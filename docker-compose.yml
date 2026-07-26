@@ -1,0 +1,87 @@
+services:
+
+  postgres:
+    image: postgres:16
+    container_name: indian_ott_postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ott_user
+      POSTGRES_PASSWORD: ott_password
+      POSTGRES_DB: ott_tracker
+
+    volumes:
+      - ott_postgres_data:/var/lib/postgresql/data
+
+    ports:
+      - "5433:5432"
+
+    networks:
+      - indian_ott_network
+
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: indian_ott_pgadmin
+    restart: unless-stopped
+
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@otttracker.com
+      PGADMIN_DEFAULT_PASSWORD: admin_password
+
+    ports:
+      - "5050:80"
+
+    depends_on:
+      - postgres
+
+    networks:
+      - indian_ott_network
+
+
+  redis:
+    image: redis:7-alpine
+    container_name: indian_ott_redis
+    restart: unless-stopped
+
+    ports:
+      - "6380:6379"
+
+    networks:
+      - indian_ott_network
+
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: indian_ott_api
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    ports:
+      - "8000:8000"
+
+    depends_on:
+      - postgres
+      - redis
+
+    volumes:
+      - .:/app
+
+    networks:
+      - indian_ott_network
+
+
+networks:
+
+  indian_ott_network:
+    name: indian_ott_network
+
+
+volumes:
+
+  ott_postgres_data:
