@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from app.api.movies import router as movie_router
 
 app = FastAPI(
     title="Indian OTT Tracker",
@@ -20,3 +21,6 @@ def health():
     return {
         "status": "healthy"
     }
+
+
+app.include_router(movie_router)

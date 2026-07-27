@@ -24,6 +24,32 @@ class MovieRepository:
     def count(self):
         return self.db.query(Movie).count()
 
+    def get_all(
+   	 self,
+   	 page: int = 1,
+   	 page_size: int = 20,
+    ):
+    	return (
+       		 self.db.query(Movie)
+       		 .order_by(Movie.release_date.desc())
+       		 .offset((page - 1) * page_size)
+      		  .limit(page_size)
+      		  .all()
+    	)
+    def get_by_id(self, movie_id: int):
+        return (
+            self.db.query(Movie)
+            .filter(Movie.id == movie_id)
+            .first()
+        )
+
+    def search(self, query: str):
+        return (
+            self.db.query(Movie)
+            .filter(Movie.title.ilike(f"%{query}%"))
+            .all()
+        )
+
     def update_from_tmdb(self, movie: Movie, item: dict):
         movie.title = item["title"]
         movie.original_title = item.get("original_title")
