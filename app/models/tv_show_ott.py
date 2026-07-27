@@ -1,4 +1,4 @@
-"""Movie OTT availability model."""
+"""TV show OTT availability model."""
 
 from datetime import datetime
 
@@ -10,17 +10,17 @@ from app.models.enums import AvailabilityType, availability_type_enum
 from app.models.mixins import TimestampMixin
 
 
-class MovieOtt(TimestampMixin, Base):
-    """OTT availability record for a movie on a specific platform."""
+class TVShowOtt(TimestampMixin, Base):
+    """OTT availability record for a TV show on a specific platform."""
 
-    __tablename__ = "movie_ott_availability"
+    __tablename__ = "tv_show_ott_availability"
     __table_args__ = (
-        UniqueConstraint("movie_id", "platform_id", "region", name="uq_movie_platform_region"),
+        UniqueConstraint("tv_show_id", "platform_id", "region", name="uq_tv_show_platform_region"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    movie_id: Mapped[int] = mapped_column(
-        ForeignKey("movies.id", ondelete="CASCADE"),
+    tv_show_id: Mapped[int] = mapped_column(
+        ForeignKey("tv_shows.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -38,5 +38,5 @@ class MovieOtt(TimestampMixin, Base):
     region: Mapped[str] = mapped_column(String(10), default="IN", nullable=False)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    movie: Mapped["Movie"] = relationship(back_populates="ott_availability")
-    platform: Mapped["OttPlatform"] = relationship(back_populates="movie_availability")
+    tv_show: Mapped["TVShow"] = relationship(back_populates="ott_availability")
+    platform: Mapped["OttPlatform"] = relationship(back_populates="tv_show_availability")
