@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.genre import GenreRead
 from app.schemas.language import LanguageRead
+from app.schemas.ott import MovieOTTRead
 
 
 class MovieBase(BaseModel):
@@ -33,8 +34,14 @@ class MovieCreate(MovieBase):
 class MovieRead(MovieBase):
     """Movie returned from the database."""
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True
+    )
 
     id: int
+
     genres: list[GenreRead] = []
+
     languages: list[LanguageRead] = []
+
+    ott_availability: list[MovieOTTRead] = []

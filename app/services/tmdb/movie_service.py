@@ -4,11 +4,18 @@ from app.services.tmdb.client import TMDbClient
 
 
 class TMDbMovieService:
+
     def __init__(self):
         self.client = TMDbClient()
 
     def get_movie(self, movie_id: int):
         return self.client.get(f"/movie/{movie_id}")
+
+    def get_movie_details(self, movie_id: int):
+        return self.client.get(
+            f"/movie/{movie_id}",
+            append_to_response="watch/providers",
+        )
 
     def search_movie(self, query: str):
         return self.client.get(
@@ -17,7 +24,10 @@ class TMDbMovieService:
             include_adult=False,
         )
 
-    def discover_indian_movies(self, page: int = 1):
+    def discover_indian_movies(
+        self,
+        page: int = 1,
+    ):
         return self.client.get(
             "/discover/movie",
             **{
