@@ -17,29 +17,66 @@ class Movie(TimestampMixin, Base):
     __tablename__ = "movies"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    tmdb_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, index=True)
-    title: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+
+    tmdb_id: Mapped[int] = mapped_column(
+        Integer,
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    title: Mapped[str] = mapped_column(
+        String(500),
+        nullable=False,
+        index=True,
+    )
+
     original_title: Mapped[str | None] = mapped_column(String(500))
+
     overview: Mapped[str | None] = mapped_column(Text)
-    release_date: Mapped[date | None] = mapped_column(Date, index=True)
+
+    release_date: Mapped[date | None] = mapped_column(
+        Date,
+        index=True,
+    )
+
     runtime_minutes: Mapped[int | None] = mapped_column(Integer)
+
     poster_path: Mapped[str | None] = mapped_column(String(500))
+
     backdrop_path: Mapped[str | None] = mapped_column(String(500))
+
     popularity: Mapped[float | None] = mapped_column(Float)
+
     vote_average: Mapped[float | None] = mapped_column(Float)
+
     vote_count: Mapped[int | None] = mapped_column(Integer)
+
     original_language: Mapped[str | None] = mapped_column(String(10))
-    adult: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    adult: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    status: Mapped[str | None] = mapped_column(String(50))
+
 
     genres: Mapped[list["Genre"]] = relationship(
         secondary=movie_genres,
         back_populates="movies",
     )
+
+
     languages: Mapped[list["Language"]] = relationship(
         secondary=movie_languages,
         back_populates="movies",
     )
-    ott_availability: Mapped[list["MovieOtt"]] = relationship(
+
+
+    # New OTT availability system
+    ott_availabilities: Mapped[list["OttAvailability"]] = relationship(
         back_populates="movie",
         cascade="all, delete-orphan",
     )

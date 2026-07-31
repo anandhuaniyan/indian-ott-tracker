@@ -105,3 +105,30 @@ def get_movie(
 
 
     return movie
+
+
+@router.post(
+    "/{movie_id}/sync-ott",
+    response_model=MovieRead,
+    summary="Trigger immediate OTT availability sync for a movie",
+)
+def sync_movie_ott(
+    movie_id: int,
+    db: Session = Depends(get_db),
+):
+    from app.services.ott_availability_service import OttAvailabilityService
+
+    service = MovieService(db)
+    movie = service.get_movie(movie_id)
+
+    if movie is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Movie not found",
+        )
+
+    ott_service = OttAvailabilityService(db)
+    ott_service.sync_movie_ott(movie)
+
+    # Re-fetch movie with updated availability
+    return service.get_movie(movie_id)

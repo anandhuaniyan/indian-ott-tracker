@@ -1,0 +1,727 @@
+
+
+==============================
+FILE: app\models\movie.py
+==============================
+
+"""Movie model."""
+
+from datetime import date
+
+from sqlalchemy import Boolean, Date, Float, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database.base import Base
+from app.models.genre import movie_genres
+from app.models.language import movie_languages
+from app.models.mixins import TimestampMixin
+
+
+class Movie(TimestampMixin, Base):
+    """A movie title, typically sourced from TMDB."""
+
+    __tablename__ = "movies"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tmdb_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    original_title: Mapped[str | None] = mapped_column(String(500))
+    overview: Mapped[str | None] = mapped_column(Text)
+    release_date: Mapped[date | None] = mapped_column(Date, index=True)
+    runtime_minutes: Mapped[int | None] = mapped_column(Integer)
+    poster_path: Mapped[str | None] = mapped_column(String(500))
+    backdrop_path: Mapped[str | None] = mapped_column(String(500))
+    popularity: Mapped[float | None] = mapped_column(Float)
+    vote_average: Mapped[float | None] = mapped_column(Float)
+    vote_count: Mapped[int | None] = mapped_column(Integer)
+    original_language: Mapped[str | None] = mapped_column(String(10))
+    adult: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str | None] = mapped_column(String(50))
+
+    genres: Mapped[list["Genre"]] = relationship(
+        secondary=movie_genres,
+        back_populates="movies",
+    )
+    languages: Mapped[list["Language"]] = relationship(
+        secondary=movie_languages,
+        back_populates="movies",
+    )
+    ott_availability: Mapped[list["MovieOtt"]] = relationship(
+        back_populates="movie",
+        cascade="all, delete-orphan",
+    )
+    ott_availabilities: Mapped[list["OttAvailability"]] = relationship(
+        back_populates="movie",
+        cascade="all, delete-orphan",
+    )
+
+
+==============================
+FILE: app\models\ott_availability.py
+==============================
+
+"""OTT Availability model for tracking movie streaming availability and fallback metadata."""
+
+from datetime import date, datetime
+
+from sqlalchemy import Date, DateTime, Float, ForeignKey, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database.base import Base
+from app.models.mixins import TimestampMixin
+
+
+class OttAvailability(TimestampMixin, Base):
+    """Detailed OTT availability tracking record for a movie."""
+
+    __tablename__ = "ott_availability"
+    __table_args__ = (
+        UniqueConstraint(
+            "movie_id",
+            "provider",
+            "country",
+            "watch_type",
+            name="uq_movie_ott_provider_country_type",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    movie_id: Mapped[int] = mapped_column(
+        ForeignKey("movies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    provider: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    provider_logo: Mapped[str | None] = mapped_column(String(500))
+    country: Mapped[str] = mapped_column(String(10), default="IN", nullable=False)
+    watch_type: Mapped[str] = mapped_column(String(50), default="subscription", nullable=False)
+    ott_release_date: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(50), default="available", nullable=False)
+    source_type: Mapped[str] = mapped_column(String(50), default="tmdb", nullable=False)
+    source_url: Mapped[str | None] = mapped_column(String(1000))
+    confidence: Mapped[float] = mapped_column(Float, default=100.0, nullable=False)
+    last_checked: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    movie: Mapped["Movie"] = relationship(back_populates="ott_availabilities")
+
+
+==============================
+FILE: app\models\movie_ott.py
+==============================
+
+"""Movie OTT availability model."""
+
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database.base import Base
+from app.models.enums import AvailabilityType, availability_type_enum
+from app.models.mixins import TimestampMixin
+
+
+class MovieOtt(TimestampMixin, Base):
+    """OTT availability record for a movie on a specific platform."""
+
+    __tablename__ = "movie_ott_availability"
+    __table_args__ = (
+        UniqueConstraint("movie_id", "platform_id", "region", name="uq_movie_platform_region"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    movie_id: Mapped[int] = mapped_column(
+        ForeignKey("movies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    platform_id: Mapped[int] = mapped_column(
+        ForeignKey("ott_platforms.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    watch_url: Mapped[str | None] = mapped_column(String(1000))
+    availability_type: Mapped[AvailabilityType] = mapped_column(
+        availability_type_enum,
+        default=AvailabilityType.STREAM,
+        nullable=False,
+    )
+    region: Mapped[str] = mapped_column(String(10), default="IN", nullable=False)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    movie: Mapped["Movie"] = relationship(back_populates="ott_availability")
+    platform: Mapped["OttPlatform"] = relationship(back_populates="movie_availability")
+
+
+==============================
+FILE: app\schemas\movie.py
+==============================
+
+"""Pydantic schemas for movies."""
+
+from datetime import date, datetime
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.schemas.genre import GenreRead
+from app.schemas.language import LanguageRead
+from app.schemas.ott_availability import OttAvailabilitySummary, OttProviderItem
+
+
+class MovieBase(BaseModel):
+    """Shared movie fields."""
+
+    tmdb_id: int
+    title: str = Field(..., max_length=500)
+    original_title: str | None = Field(default=None, max_length=500)
+    overview: str | None = None
+    release_date: date | None = None
+    runtime_minutes: int | None = None
+    poster_path: str | None = Field(default=None, max_length=500)
+    backdrop_path: str | None = Field(default=None, max_length=500)
+    popularity: float | None = None
+    vote_average: float | None = None
+    vote_count: int | None = None
+    original_language: str | None = Field(default=None, max_length=10)
+    adult: bool = False
+
+
+class MovieCreate(MovieBase):
+    """Payload for creating a movie."""
+
+
+class MovieRead(MovieBase):
+    """Movie returned from the database."""
+
+    model_config = ConfigDict(
+        from_attributes=True
+    )
+
+    id: int
+    genres: list[GenreRead] = []
+    languages: list[LanguageRead] = []
+    ott_availability: OttAvailabilitySummary = Field(
+        default_factory=OttAvailabilitySummary,
+        description="OTT Availability tracking summary",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_ott_summary(cls, data: Any) -> Any:
+        """Automatically convert SQLAlchemy Movie.ott_availabilities into OttAvailabilitySummary."""
+        if hasattr(data, "ott_availabilities"):
+            records = getattr(data, "ott_availabilities", []) or []
+            providers = []
+            earliest_release_date: date | None = None
+            latest_last_checked: datetime | None = None
+
+            for rec in records:
+                providers.append(
+                    OttProviderItem(
+                        name=getattr(rec, "provider", ""),
+                        country=getattr(rec, "country", "IN"),
+                        watch_type=getattr(rec, "watch_type", "subscription"),
+                        source=getattr(rec, "source_type", "TMDB"),
+                        provider_logo=getattr(rec, "provider_logo", None),
+                        source_url=getattr(rec, "source_url", None),
+                    )
+                )
+
+                r_date = getattr(rec, "ott_release_date", None)
+                if r_date:
+                    if earliest_release_date is None or r_date < earliest_release_date:
+                        earliest_release_date = r_date
+
+                l_checked = getattr(rec, "last_checked", None)
+                if l_checked:
+                    if latest_last_checked is None or l_checked > latest_last_checked:
+                        latest_last_checked = l_checked
+
+            summary = OttAvailabilitySummary(
+                available=len(providers) > 0,
+                ott_release_date=earliest_release_date,
+                last_checked=latest_last_checked,
+                providers=providers,
+            )
+
+            # Build a dictionary to avoid triggering SQLAlchemy ORM attribute assignment
+            return {
+                "id": getattr(data, "id"),
+                "tmdb_id": getattr(data, "tmdb_id"),
+                "title": getattr(data, "title"),
+                "original_title": getattr(data, "original_title", None),
+                "overview": getattr(data, "overview", None),
+                "release_date": getattr(data, "release_date", None),
+                "runtime_minutes": getattr(data, "runtime_minutes", None),
+                "poster_path": getattr(data, "poster_path", None),
+                "backdrop_path": getattr(data, "backdrop_path", None),
+                "popularity": getattr(data, "popularity", None),
+                "vote_average": getattr(data, "vote_average", None),
+                "vote_count": getattr(data, "vote_count", None),
+                "original_language": getattr(data, "original_language", None),
+                "adult": getattr(data, "adult", False),
+                "genres": getattr(data, "genres", []),
+                "languages": getattr(data, "languages", []),
+                "ott_availability": summary,
+            }
+
+        return data
+
+
+==============================
+FILE: app\api\movies.py
+==============================
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
+from app.database.connection import get_db
+from app.schemas.movie import MovieRead
+from app.services.movie_service import MovieService
+
+
+router = APIRouter(
+    prefix="/movies",
+    tags=["Movies"],
+)
+
+
+@router.get("/", response_model=list[MovieRead])
+def get_movies(
+    page: int = Query(
+        default=1,
+        ge=1,
+        description="Page number starting from 1",
+    ),
+
+    page_size: int = Query(
+        default=20,
+        ge=1,
+        le=100,
+        description="Number of movies per page",
+    ),
+
+    language: str | None = Query(
+        default=None,
+        description="Language code e.g. ml, ta, te, hi",
+    ),
+
+    genre: str | None = Query(
+        default=None,
+        description="Genre slug e.g. action, comedy",
+    ),
+
+    year: int | None = Query(
+        default=None,
+        description="Release year",
+    ),
+
+    sort: str = Query(
+        default="latest",
+        description="Sort options: latest, rating, popular",
+    ),
+
+    db: Session = Depends(get_db),
+):
+
+    service = MovieService(db)
+
+    return service.get_movies(
+        page=page,
+        page_size=page_size,
+        language=language,
+        genre=genre,
+        year=year,
+        sort=sort,
+    )
+
+
+
+@router.get(
+    "/search/",
+    response_model=list[MovieRead],
+)
+def search_movies(
+    query: str,
+    db: Session = Depends(get_db),
+):
+
+    service = MovieService(db)
+
+    return service.search_movies(
+        query
+    )
+
+
+
+@router.get(
+    "/{movie_id}",
+    response_model=MovieRead,
+)
+def get_movie(
+    movie_id: int,
+    db: Session = Depends(get_db),
+):
+
+    service = MovieService(db)
+
+    movie = service.get_movie(
+        movie_id
+    )
+
+
+    if movie is None:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Movie not found",
+        )
+
+
+    return movie
+
+
+@router.post(
+    "/{movie_id}/sync-ott",
+    response_model=MovieRead,
+    summary="Trigger immediate OTT availability sync for a movie",
+)
+def sync_movie_ott(
+    movie_id: int,
+    db: Session = Depends(get_db),
+):
+    from app.services.ott_availability_service import OttAvailabilityService
+
+    service = MovieService(db)
+    movie = service.get_movie(movie_id)
+
+    if movie is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Movie not found",
+        )
+
+    ott_service = OttAvailabilityService(db)
+    ott_service.sync_movie_ott(movie)
+
+    # Re-fetch movie with updated availability
+    return service.get_movie(movie_id)
+
+
+==============================
+FILE: app\services\movie_service.py
+==============================
+
+from sqlalchemy.orm import Session
+
+from app.repositories.movie_repository import MovieRepository
+
+
+class MovieService:
+
+    def __init__(self, db: Session):
+        self.repository = MovieRepository(db)
+
+
+    def count_movies(
+        self,
+        language=None,
+        genre=None,
+        year=None,
+    ):
+        return self.repository.count(
+            language,
+            genre,
+            year,
+        )
+
+
+    def get_movies(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        language: str | None = None,
+        genre: str | None = None,
+        year: int | None = None,
+        sort: str = "latest",
+    ):
+
+        return self.repository.get_all(
+            page=page,
+            page_size=page_size,
+            language=language,
+            genre=genre,
+            year=year,
+            sort=sort,
+        )
+
+
+    def get_movie(
+        self,
+        movie_id: int,
+    ):
+
+        return self.repository.get_by_id(
+            movie_id
+        )
+
+
+    def search_movies(
+        self,
+        query: str,
+    ):
+
+        return self.repository.search(
+            query
+        )
+
+
+==============================
+FILE: app\repositories\movie_repository.py
+==============================
+
+from datetime import date
+
+from sqlalchemy import desc
+from sqlalchemy.orm import Session, selectinload
+
+from app.models.genre import Genre
+from app.models.language import Language
+from app.models.movie import Movie
+
+
+class MovieRepository:
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get_by_tmdb_id(
+        self,
+        tmdb_id: int,
+    ):
+
+        return (
+            self.db.query(Movie)
+            .filter(
+                Movie.tmdb_id == tmdb_id
+            )
+            .first()
+        )
+
+    def create(
+        self,
+        movie: Movie,
+    ):
+
+        self.db.add(movie)
+
+    def save(self):
+
+        self.db.commit()
+
+    def count(
+        self,
+        language=None,
+        genre=None,
+        year=None,
+    ):
+
+        query = self.db.query(Movie)
+
+        if language:
+
+            query = (
+                query
+                .join(Movie.languages)
+                .filter(
+                    Language.iso_639_1 == language
+                )
+            )
+
+        if genre:
+
+            query = (
+                query
+                .join(Movie.genres)
+                .filter(
+                    Genre.slug == genre
+                )
+            )
+
+        if year:
+
+            start_date = date(year, 1, 1)
+            end_date = date(year, 12, 31)
+
+            query = query.filter(
+                Movie.release_date.between(
+                    start_date,
+                    end_date,
+                )
+            )
+
+        return query.count()
+
+    def get_all(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        language=None,
+        genre=None,
+        year=None,
+        sort="latest",
+    ):
+
+        query = self.db.query(Movie)
+
+        if language:
+
+            query = (
+                query
+                .join(Movie.languages)
+                .filter(
+                    Language.iso_639_1 == language
+                )
+            )
+
+        if genre:
+
+            query = (
+                query
+                .join(Movie.genres)
+                .filter(
+                    Genre.slug == genre
+                )
+            )
+
+        if year:
+
+            start_date = date(year, 1, 1)
+            end_date = date(year, 12, 31)
+
+            query = query.filter(
+                Movie.release_date.between(
+                    start_date,
+                    end_date,
+                )
+            )
+
+        if sort == "rating":
+
+            query = query.order_by(
+                desc(Movie.vote_average)
+            )
+
+        elif sort == "popular":
+
+            query = query.order_by(
+                desc(Movie.popularity)
+            )
+
+        else:
+
+            query = query.order_by(
+                desc(Movie.release_date)
+            )
+
+        return (
+            query
+            .options(
+                selectinload(Movie.genres),
+                selectinload(Movie.languages),
+                selectinload(Movie.ott_availabilities),
+            )
+            .offset(
+                (page - 1) * page_size
+            )
+            .limit(
+                page_size
+            )
+            .all()
+        )
+
+    def get_by_id(
+        self,
+        movie_id: int,
+    ):
+
+        return (
+            self.db.query(Movie)
+            .options(
+                selectinload(Movie.genres),
+                selectinload(Movie.languages),
+                selectinload(Movie.ott_availabilities),
+            )
+            .filter(
+                Movie.id == movie_id
+            )
+            .first()
+        )
+
+    def search(
+        self,
+        query: str,
+    ):
+
+        return (
+            self.db.query(Movie)
+            .options(
+                selectinload(Movie.genres),
+                selectinload(Movie.languages),
+                selectinload(Movie.ott_availabilities),
+            )
+            .filter(
+                Movie.title.ilike(
+                    f"%{query}%"
+                )
+            )
+            .limit(50)
+            .all()
+        )
+
+    def update_from_tmdb(
+        self,
+        movie: Movie,
+        item: dict,
+    ):
+
+        movie.title = item["title"]
+        movie.original_title = item.get(
+            "original_title"
+        )
+        movie.overview = item.get(
+            "overview"
+        )
+        movie.release_date = item.get(
+            "release_date"
+        ) or None
+
+        movie.poster_path = item.get(
+            "poster_path"
+        )
+
+        movie.backdrop_path = item.get(
+            "backdrop_path"
+        )
+
+        movie.popularity = item.get(
+            "popularity"
+        )
+
+        movie.vote_average = item.get(
+            "vote_average"
+        )
+
+        movie.vote_count = item.get(
+            "vote_count"
+        )
+
+        movie.original_language = item.get(
+            "original_language"
+        )
+
+        movie.adult = item.get(
+            "adult",
+            False
+        )

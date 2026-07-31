@@ -14,7 +14,7 @@ from app.services.tmdb.movie_service import TMDbMovieService
 service = TMDbMovieService()
 
 LANGUAGES = ["ml","ta","te","hi","kn"]
-START_YEAR = 2020
+START_YEAR = 2011
 END_YEAR = date.today().year
 
 def sync_movies():

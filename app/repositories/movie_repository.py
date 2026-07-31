@@ -1,9 +1,11 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from datetime import date
 
-from app.models.movie import Movie
+from sqlalchemy import desc
+from sqlalchemy.orm import Session, selectinload
+
 from app.models.genre import Genre
 from app.models.language import Language
+from app.models.movie import Movie
 
 
 class MovieRepository:
@@ -11,10 +13,9 @@ class MovieRepository:
     def __init__(self, db: Session):
         self.db = db
 
-
     def get_by_tmdb_id(
         self,
-        tmdb_id: int
+        tmdb_id: int,
     ):
 
         return (
@@ -25,19 +26,16 @@ class MovieRepository:
             .first()
         )
 
-
     def create(
         self,
-        movie: Movie
+        movie: Movie,
     ):
 
         self.db.add(movie)
 
-
     def save(self):
 
         self.db.commit()
-
 
     def count(
         self,
@@ -47,7 +45,6 @@ class MovieRepository:
     ):
 
         query = self.db.query(Movie)
-
 
         if language:
 
@@ -59,7 +56,6 @@ class MovieRepository:
                 )
             )
 
-
         if genre:
 
             query = (
@@ -70,20 +66,19 @@ class MovieRepository:
                 )
             )
 
-
         if year:
+
+            start_date = date(year, 1, 1)
+            end_date = date(year, 12, 31)
 
             query = query.filter(
                 Movie.release_date.between(
-                    f"{year}-01-01",
-                    f"{year}-12-31"
+                    start_date,
+                    end_date,
                 )
             )
 
-
         return query.count()
-
-
 
     def get_all(
         self,
@@ -97,8 +92,6 @@ class MovieRepository:
 
         query = self.db.query(Movie)
 
-
-
         if language:
 
             query = (
@@ -108,7 +101,6 @@ class MovieRepository:
                     Language.iso_639_1 == language
                 )
             )
-
 
         if genre:
 
@@ -120,17 +112,17 @@ class MovieRepository:
                 )
             )
 
-
         if year:
+
+            start_date = date(year, 1, 1)
+            end_date = date(year, 12, 31)
 
             query = query.filter(
                 Movie.release_date.between(
-                    f"{year}-01-01",
-                    f"{year}-12-31"
+                    start_date,
+                    end_date,
                 )
             )
-
-
 
         if sort == "rating":
 
@@ -138,13 +130,11 @@ class MovieRepository:
                 desc(Movie.vote_average)
             )
 
-
         elif sort == "popular":
 
             query = query.order_by(
                 desc(Movie.popularity)
             )
-
 
         else:
 
@@ -152,10 +142,13 @@ class MovieRepository:
                 desc(Movie.release_date)
             )
 
-
-
         return (
             query
+            .options(
+                selectinload(Movie.genres),
+                selectinload(Movie.languages),
+                selectinload(Movie.ott_availabilities),
+            )
             .offset(
                 (page - 1) * page_size
             )
@@ -165,44 +158,49 @@ class MovieRepository:
             .all()
         )
 
-
-
     def get_by_id(
         self,
-        movie_id: int
+        movie_id: int,
     ):
 
         return (
             self.db.query(Movie)
+            .options(
+                selectinload(Movie.genres),
+                selectinload(Movie.languages),
+                selectinload(Movie.ott_availabilities),
+            )
             .filter(
                 Movie.id == movie_id
             )
             .first()
         )
 
-
-
     def search(
         self,
-        query: str
+        query: str,
     ):
 
         return (
             self.db.query(Movie)
+            .options(
+                selectinload(Movie.genres),
+                selectinload(Movie.languages),
+                selectinload(Movie.ott_availabilities),
+            )
             .filter(
                 Movie.title.ilike(
                     f"%{query}%"
                 )
             )
+            .limit(50)
             .all()
         )
-
-
 
     def update_from_tmdb(
         self,
         movie: Movie,
-        item: dict
+        item: dict,
     ):
 
         movie.title = item["title"]
