@@ -23,6 +23,7 @@ from app.models.ott_availability import OttAvailability
 from app.models.ott_platform import OttPlatform
 from app.models.tv_show import TVShow
 from app.models.tv_show_ott import TVShowOtt
+from app.models.operations import MovieRequest, OttEvidence, DataQualityIssue, NotificationLog
 
 __all__ = [
     "AvailabilityType",
@@ -50,4 +51,5 @@ __all__ = [
     "movie_languages",
     "tv_show_genres",
     "tv_show_languages",
+    "MovieRequest", "OttEvidence", "DataQualityIssue", "NotificationLog",
 ]

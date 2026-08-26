@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.database.connection import get_db
 from app.schemas.movie import MovieRead
 from app.services.movie_service import MovieService
+from app.core.admin import require_admin
 from app.models.movie_metadata import ExternalId, MovieCredit, MovieImage, MovieRating, MovieReleaseDate
 
 
@@ -158,7 +159,7 @@ def get_movie_external_ids(movie_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/{movie_id}/enrich", response_model=MovieRead, summary="Enrich an existing movie from TMDB")
-def enrich_movie(movie_id: int, db: Session = Depends(get_db)):
+def enrich_movie(movie_id: int, db: Session = Depends(get_db), _admin: None = Depends(require_admin)):
     from app.services.movie_metadata_service import MovieMetadataService
 
     movie = _require_movie(movie_id, db)
@@ -174,6 +175,7 @@ def enrich_movie(movie_id: int, db: Session = Depends(get_db)):
 def sync_movie_ott(
     movie_id: int,
     db: Session = Depends(get_db),
+    _admin: None = Depends(require_admin),
 ):
     from app.services.ott_availability_service import OttAvailabilityService
 
