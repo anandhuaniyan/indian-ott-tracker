@@ -1,10 +1,11 @@
 from datetime import date, timedelta
+from calendar import monthrange
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 from app.database.connection import get_db
 from app.models.movie import Movie
-from app.models.movie_metadata import MovieCredit, Person, Keyword, MovieKeyword
+from app.models.movie_metadata import MovieCredit, Person, Keyword, MovieKeyword, MovieImage, MovieRating, MovieReleaseDate, ExternalId
 from app.models.ott_availability import OttAvailability
 from app.models.genre import Genre
 from app.models.language import Language
@@ -48,8 +49,17 @@ def person_detail(person_id: int, db: Session = Depends(get_db)):
 
 @router.get("/calendar/{period}")
 def calendar(period: str, db: Session = Depends(get_db)):
-    today = date.today(); monday = today - timedelta(days=today.weekday())
-    ranges = {"previous-week": (monday - timedelta(days=7), monday), "this-week": (monday, monday + timedelta(days=7)), "next-week": (monday + timedelta(days=7), monday + timedelta(days=14)), "this-month": (today.replace(day=1), (today.replace(day=28) + timedelta(days=4)).replace(day=1))}
+    today = date.today(); monday = today - timedelta(days=today.weekday()); this_month = today.replace(day=1)
+    previous_month = (this_month - timedelta(days=1)).replace(day=1); next_month = (this_month.replace(day=28) + timedelta(days=4)).replace(day=1); after_next = (next_month.replace(day=28) + timedelta(days=4)).replace(day=1)
+    ranges = {"previous-week": (monday - timedelta(days=7), monday), "this-week": (monday, monday + timedelta(days=7)), "next-week": (monday + timedelta(days=7), monday + timedelta(days=14)), "previous-month": (previous_month, this_month), "this-month": (this_month, next_month), "next-month": (next_month, after_next)}
     if period not in ranges: raise HTTPException(404, "Unknown calendar period")
     start, end = ranges[period]
     return {"start": start, "end": end, "items": cards(db.query(Movie).options(selectinload(Movie.genres)).filter(Movie.release_date >= start, Movie.release_date < end).order_by(Movie.release_date).all())}
+
+@router.get("/movies/{movie_id}/detail")
+def movie_detail(movie_id: int, db: Session = Depends(get_db)):
+    movie = db.query(Movie).options(selectinload(Movie.genres), selectinload(Movie.languages), selectinload(Movie.ott_availabilities)).filter(Movie.id == movie_id).first()
+    if not movie: raise HTTPException(404, "Movie not found")
+    cast = db.query(MovieCredit).filter_by(movie_id=movie_id, credit_type="cast").order_by(MovieCredit.cast_order).all()
+    crew = db.query(MovieCredit).filter_by(movie_id=movie_id, credit_type="crew").order_by(MovieCredit.department, MovieCredit.job).all()
+    return {"movie": cards([movie])[0] | {"tmdb_id": movie.tmdb_id, "tagline": movie.tagline, "runtime_minutes": movie.runtime_minutes, "status": movie.status, "budget": movie.budget, "revenue": movie.revenue, "spoken_languages": [{"code": x.iso_639_1, "name": x.name} for x in movie.languages], "ott": [{"provider": x.provider, "logo": x.provider_logo, "watch_type": x.watch_type, "release_date": x.ott_release_date, "url": x.source_url, "confidence": x.confidence, "status": x.status} for x in movie.ott_availabilities]}, "cast": [{"person_id": x.person_id, "name": x.person.name, "profile_path": x.person.profile_path, "character": x.character} for x in cast], "crew": [{"person_id": x.person_id, "name": x.person.name, "profile_path": x.person.profile_path, "job": x.job, "department": x.department} for x in crew], "images": [{"type": x.image_type, "url": x.local_path or x.original_url, "language": x.language} for x in db.query(MovieImage).filter_by(movie_id=movie_id).all()], "releases": [{"country": x.country, "date": x.release_date, "type": x.release_type, "certification": x.certification, "note": x.note} for x in db.query(MovieReleaseDate).filter_by(movie_id=movie_id).all()], "ratings": [{"source": x.source, "rating": x.rating, "votes": x.vote_count} for x in db.query(MovieRating).filter_by(movie_id=movie_id).all()], "external_ids": [{"provider": x.provider, "id": x.external_id, "url": x.source_url} for x in db.query(ExternalId).filter_by(movie_id=movie_id).all()]}

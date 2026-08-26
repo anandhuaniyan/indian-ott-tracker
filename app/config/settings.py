@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     ADSENSE_PUBLISHER_ID: str = ""
     ADMIN_NOTIFICATION_EMAIL: str = ""
     OTT_RESEARCH_PROVIDER: str = ""
+    OTT_SEARCH_API_URL: str = ""
+    OTT_SEARCH_API_KEY: str = ""
+    OTT_CONFIRMATION_THRESHOLD: float = 85.0
+    DISCORD_WEBHOOK_URL: str = ""
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
 
     model_config = SettingsConfigDict(
         env_file=".env",
