@@ -4,6 +4,20 @@ from app.models.enums import AvailabilityType
 from app.models.genre import Genre, movie_genres, tv_show_genres
 from app.models.language import Language, movie_languages, tv_show_languages
 from app.models.movie import Movie
+from app.models.movie_metadata import (
+    ExternalId,
+    Keyword,
+    MovieCredit,
+    MovieImage,
+    MovieKeyword,
+    MovieProductionCompany,
+    MovieProductionCountry,
+    MovieRating,
+    MovieReleaseDate,
+    Person,
+    ProductionCompany,
+    ProductionCountry,
+)
 from app.models.movie_ott import MovieOtt
 from app.models.ott_availability import OttAvailability
 from app.models.ott_platform import OttPlatform
@@ -15,6 +29,18 @@ __all__ = [
     "Genre",
     "Language",
     "Movie",
+    "ExternalId",
+    "Keyword",
+    "MovieCredit",
+    "MovieImage",
+    "MovieKeyword",
+    "MovieProductionCompany",
+    "MovieProductionCountry",
+    "MovieRating",
+    "MovieReleaseDate",
+    "Person",
+    "ProductionCompany",
+    "ProductionCountry",
     "MovieOtt",
     "OttAvailability",
     "OttPlatform",

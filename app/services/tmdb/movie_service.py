@@ -22,6 +22,13 @@ class TMDbMovieService:
             append_to_response="watch/providers",
         )
 
+    def get_rich_movie_details(self, movie_id: int) -> dict:
+        """Fetch the movie payload required by the metadata enrichment service."""
+        return self.client.get(
+            f"/movie/{movie_id}",
+            append_to_response="credits,external_ids,images,keywords,release_dates",
+        )
+
     def search_movie(self, query: str) -> dict:
         """Search movies by title query."""
         return self.client.get(

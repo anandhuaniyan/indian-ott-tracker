@@ -2,7 +2,7 @@
 
 from datetime import date
 
-from sqlalchemy import Boolean, Date, Float, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Date, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
@@ -62,6 +62,10 @@ class Movie(TimestampMixin, Base):
 
     status: Mapped[str | None] = mapped_column(String(50))
 
+    tagline: Mapped[str | None] = mapped_column(Text)
+    budget: Mapped[int | None] = mapped_column(BigInteger)
+    revenue: Mapped[int | None] = mapped_column(BigInteger)
+
 
     genres: Mapped[list["Genre"]] = relationship(
         secondary=movie_genres,
@@ -80,3 +84,9 @@ class Movie(TimestampMixin, Base):
         back_populates="movie",
         cascade="all, delete-orphan",
     )
+
+    credits: Mapped[list["MovieCredit"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
+    external_ids: Mapped[list["ExternalId"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
+    release_dates: Mapped[list["MovieReleaseDate"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
+    images: Mapped[list["MovieImage"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
+    ratings: Mapped[list["MovieRating"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
