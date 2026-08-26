@@ -16,6 +16,8 @@ class Settings(BaseSettings):
 
     LOG_LEVEL: str = "INFO"
 
+    MEDIA_ROOT: str = "media"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         extra="ignore",

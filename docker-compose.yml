@@ -71,6 +71,7 @@ services:
 
     volumes:
       - .:/app
+      - ott_media_data:/app/media
 
     networks:
       - indian_ott_network
@@ -85,3 +86,4 @@ networks:
 volumes:
 
   ott_postgres_data:
+  ott_media_data:

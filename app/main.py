@@ -1,13 +1,20 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 from app.api.movies import router as movie_router
+from app.config.settings import settings
 
 
 app = FastAPI(
     title="Indian OTT Tracker",
     version="0.1.0"
 )
+
+media_root = Path(settings.MEDIA_ROOT)
+media_root.mkdir(parents=True, exist_ok=True)
+app.mount("/media", StaticFiles(directory=media_root), name="media")
 
 
 # Frontend access
