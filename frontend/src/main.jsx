@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import App from "./app/App";
 import Tracking from "./components/Tracking";
+import Consent from "./components/Consent";
 import "./styles.css";
 
-createRoot(document.getElementById("root")).render(<BrowserRouter><Tracking/><App /></BrowserRouter>);
+createRoot(document.getElementById("root")).render(<BrowserRouter><Tracking/><App /><Consent/></BrowserRouter>);
