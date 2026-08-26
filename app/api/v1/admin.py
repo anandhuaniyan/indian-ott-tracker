@@ -1,16 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.core.session_auth import COOKIE, create_session, require_admin_session, verify_password
 from app.config.settings import settings
 from app.database.connection import get_db
 from app.models.operations import MovieRequest, DataQualityIssue, OttEvidence, NotificationLog, OperationState
+from app.core.rate_limit import limit
 
 router=APIRouter(prefix="/api/v1/admin",tags=["Admin"])
 class Login(BaseModel): password:str=Field(min_length=8,max_length=512)
 class RequestStatus(BaseModel): status:str=Field(pattern="^(PENDING|REVIEWING|FOUND|ADDED|REJECTED)$")
 @router.post("/login")
-def login(payload:Login,response:Response):
+def login(payload:Login,response:Response,request:Request):
+    limit(request,"admin-login",5,300)
     if not verify_password(payload.password): raise HTTPException(401,"Invalid credentials")
     response.set_cookie(COOKIE,create_session(),httponly=True,secure=settings.ENVIRONMENT == "production",samesite="strict",max_age=28800,path="/")
     return {"authenticated":True}
