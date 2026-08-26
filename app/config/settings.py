@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     GOOGLE_ANALYTICS_ID: str = ""
     GOOGLE_SITE_VERIFICATION: str = ""
     ADSENSE_PUBLISHER_ID: str = ""
+    SITE_CONTACT_EMAIL: str = ""
     ADMIN_NOTIFICATION_EMAIL: str = ""
     OTT_RESEARCH_PROVIDER: str = ""
     OTT_SEARCH_API_URL: str = ""
