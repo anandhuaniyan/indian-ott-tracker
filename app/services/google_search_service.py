@@ -1,4 +1,8 @@
-"""Google Search Fallback Service for OTT Availability tracking."""
+"""Deprecated compatibility shim.
+
+Consumer-search scraping is deliberately disabled. Use the configured lawful
+OTT research provider in ``app.services.ott_providers`` instead.
+"""
 
 from datetime import date, datetime, timezone
 import re
@@ -96,22 +100,11 @@ class GoogleSearchOttService:
         return result
 
     def _perform_search_and_parse(self, query: str, movie: Movie) -> dict | None:
-        """Simulate search query response parsing and calculate confidence score."""
-        encoded_query = urllib.parse.quote(query)
-        search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+        """Disabled: deployments must opt into a lawful provider explicitly."""
+        return None
 
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            }
-            with httpx.Client(timeout=10, follow_redirects=True) as client:
-                resp = client.get(search_url, headers=headers)
-                if resp.status_code != 200:
-                    return None
-                text = resp.text
-        except Exception as e:
-            print(f"[GOOGLE_SEARCH_FALLBACK] Network search error: {e}")
-            return None
+        # Historical parser retained below for migration reference only.
+        text = ""
 
         # Parse text snippets for OTT platforms, dates, and domain matches
         found_platform = None

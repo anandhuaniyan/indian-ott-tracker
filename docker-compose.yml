@@ -101,6 +101,32 @@ services:
     networks:
       - indian_ott_network
 
+  worker:
+    build: .
+    env_file: .env
+    command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ott_media_data:/app/media
+    networks:
+      - indian_ott_network
+
+  beat:
+    build: .
+    env_file: .env
+    command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - indian_ott_network
+
 
 networks:
 
