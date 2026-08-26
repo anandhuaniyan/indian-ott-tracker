@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.admin import require_admin
 from app.database.connection import get_db
 from app.models.movie import Movie
+from app.core.rate_limit import limit
 from app.models.operations import DataQualityIssue, MovieRequest, OttEvidence
 
 router = APIRouter(prefix="/api/v1", tags=["Operations"])
@@ -26,6 +27,7 @@ class RequestMovie(BaseModel):
 
 @router.post("/movie-requests", status_code=201)
 def request_movie(payload: RequestMovie, request: Request, db: Session = Depends(get_db)):
+    limit(request,"movie-request",5,3600)
     duplicate = db.query(MovieRequest).filter(func.lower(MovieRequest.movie_name) == payload.movie_name.strip().lower(), MovieRequest.email == str(payload.email), MovieRequest.status.in_(["PENDING", "REVIEWING"])).first()
     if duplicate: return {"request_id": duplicate.request_id, "status": duplicate.status, "duplicate": True}
     item = MovieRequest(request_id=f"REQ-{secrets.token_hex(5).upper()}", movie_name=payload.movie_name.strip(), email=str(payload.email), release_year=payload.release_year, language=payload.language, details=payload.details.strip() if payload.details else None)
