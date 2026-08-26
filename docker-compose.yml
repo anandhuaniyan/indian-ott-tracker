@@ -18,6 +18,11 @@ services:
 
     networks:
       - indian_ott_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ott_user -d ott_tracker"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 
   pgadmin:
@@ -49,6 +54,11 @@ services:
 
     networks:
       - indian_ott_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 
   api:
@@ -66,13 +76,28 @@ services:
       - "8000:8000"
 
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
     volumes:
       - .:/app
       - ott_media_data:/app/media
 
+    networks:
+      - indian_ott_network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
     networks:
       - indian_ott_network
 
