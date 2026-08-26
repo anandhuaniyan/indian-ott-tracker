@@ -62,7 +62,7 @@ app.include_router(admin_router)
 
 @app.get("/robots.txt", include_in_schema=False)
 def robots():
-    return Response("User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: " + settings.SITE_URL.rstrip("/") + "/sitemap.xml\n", media_type="text/plain")
+    return Response("User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /admin\nSitemap: " + settings.SITE_URL.rstrip("/") + "/sitemap.xml\n", media_type="text/plain")
 
 @app.get("/ads.txt", include_in_schema=False)
 def ads():
