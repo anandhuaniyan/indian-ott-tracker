@@ -30,6 +30,8 @@ def request_movie(payload: RequestMovie, request: Request, db: Session = Depends
     if duplicate: return {"request_id": duplicate.request_id, "status": duplicate.status, "duplicate": True}
     item = MovieRequest(request_id=f"REQ-{secrets.token_hex(5).upper()}", movie_name=payload.movie_name.strip(), email=str(payload.email), release_year=payload.release_year, language=payload.language, details=payload.details.strip() if payload.details else None)
     db.add(item); db.commit()
+    from app.services.notification_service import NotificationService
+    NotificationService(db).notify(f"New movie request: {item.movie_name} ({item.request_id})", severity="info", fingerprint=f"movie-request:{item.request_id}")
     return {"request_id": item.request_id, "status": item.status, "duplicate": False}
 
 @router.get("/admin/health", dependencies=[Depends(require_admin)])

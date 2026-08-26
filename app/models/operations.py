@@ -55,3 +55,13 @@ class NotificationLog(TimestampMixin, Base):
     severity: Mapped[str] = mapped_column(String(20))
     message: Mapped[str] = mapped_column(Text)
     last_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OperationState(TimestampMixin, Base):
+    """Persistent cursors and last-run facts for resumable scheduled work."""
+    __tablename__ = "operation_states"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    cursor: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
