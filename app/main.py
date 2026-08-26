@@ -6,6 +6,7 @@ from pathlib import Path
 from app.api.movies import router as movie_router
 from app.api.v1.public import router as public_router
 from app.api.v1.operations import router as operations_router
+from app.api.v1.admin import router as admin_router
 from app.database.connection import get_db
 from app.config.settings import settings
 
@@ -57,6 +58,7 @@ def health():
 app.include_router(movie_router)
 app.include_router(public_router)
 app.include_router(operations_router)
+app.include_router(admin_router)
 
 @app.get("/robots.txt", include_in_schema=False)
 def robots():

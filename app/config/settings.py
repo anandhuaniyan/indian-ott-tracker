@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     MEDIA_ROOT: str = "media"
     FRONTEND_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
     ADMIN_API_KEY: str = ""
+    ADMIN_SESSION_SECRET: str = ""
+    ADMIN_PASSWORD_HASH: str = ""
     SITE_URL: str = "http://localhost:5173"
     GOOGLE_ANALYTICS_ID: str = ""
     GOOGLE_SITE_VERIFICATION: str = ""
