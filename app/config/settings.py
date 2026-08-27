@@ -14,6 +14,14 @@ class Settings(BaseSettings):
     IMDB_RATING_PROVIDER: str = ""
     IMDB_RATING_API_URL: str = ""
     IMDB_RATING_API_KEY: str = ""
+    METADATA_BACKFILL_BATCH_SIZE: int = 100
+    PERSON_BACKFILL_BATCH_SIZE: int = 100
+    IMAGE_BACKFILL_BATCH_SIZE: int = 100
+    IMDB_BACKFILL_BATCH_SIZE: int = 50
+    IMDB_BACKFILL_DELAY_SECONDS: float = 0.1
+    OTT_BACKFILL_BATCH_SIZE: int = 200
+    BACKFILL_MAX_ATTEMPTS: int = 3
+    ON_DEMAND_REPAIR_COOLDOWN_HOURS: int = 12
 
     SECRET_KEY: str = "change-me-in-production"
 
@@ -33,6 +41,8 @@ class Settings(BaseSettings):
     OTT_RESEARCH_PROVIDER: str = ""
     OTT_SEARCH_API_URL: str = ""
     OTT_SEARCH_API_KEY: str = ""
+    GOOGLE_SEARCH_API_KEY: str = ""
+    GOOGLE_SEARCH_ENGINE_ID: str = ""
     OTT_CONFIRMATION_THRESHOLD: float = 85.0
     DISCORD_WEBHOOK_URL: str = ""
     TELEGRAM_BOT_TOKEN: str = ""

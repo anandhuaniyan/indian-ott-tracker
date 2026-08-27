@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import httpx
+from app.config.settings import settings
 
 
 class PosterDownloader:
@@ -10,18 +11,16 @@ class PosterDownloader:
 
     Folder structure:
 
-    storage/
+    media/
         posters/
             tmdb/
             fanart/
             imdb/
     """
 
-    BASE_FOLDER = Path("storage/posters")
-
     def __init__(self):
-
-        self.BASE_FOLDER.mkdir(
+        self.base_folder = Path(settings.MEDIA_ROOT) / "posters"
+        self.base_folder.mkdir(
             parents=True,
             exist_ok=True,
         )
@@ -36,7 +35,7 @@ class PosterDownloader:
         if not url:
             return None
 
-        folder = self.BASE_FOLDER / source
+        folder = self.base_folder / source
 
         folder.mkdir(
             parents=True,
@@ -54,7 +53,7 @@ class PosterDownloader:
         filename = f"{movie_id}{extension}"
 
         filepath = folder / filename
-        public_path = f"/storage/posters/{source}/{filename}"
+        public_path = f"/media/posters/{source}/{filename}"
 
         if filepath.exists():
 
@@ -87,11 +86,7 @@ class PosterDownloader:
 
             return public_path
 
-        except Exception as e:
-
-            print(
-                "Poster download failed:",
-                e,
-            )
+        except Exception:
+            print("Poster download failed")
 
             return None

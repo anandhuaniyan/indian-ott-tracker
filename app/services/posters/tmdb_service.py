@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 import httpx
+from app.config.settings import settings
 
 
 class TMDBPosterService:
@@ -16,11 +17,7 @@ class TMDBPosterService:
 
     def __init__(self):
 
-        self.storage = (
-            Path("storage")
-            / "posters"
-            / "tmdb"
-        )
+        self.storage = Path(settings.MEDIA_ROOT) / "posters" / "tmdb"
 
         self.storage.mkdir(
             parents=True,
@@ -53,7 +50,7 @@ class TMDBPosterService:
         if local_file.exists():
 
             return (
-                f"/storage/posters/tmdb/{filename}"
+                f"/media/posters/tmdb/{filename}"
             )
 
         url = (
@@ -75,14 +72,10 @@ class TMDBPosterService:
             )
 
             return (
-                f"/storage/posters/tmdb/{filename}"
+                f"/media/posters/tmdb/{filename}"
             )
 
-        except Exception as e:
-
-            print(
-                "TMDB Poster Error:",
-                e,
-            )
+        except Exception:
+            print("TMDB poster download failed")
 
             return None

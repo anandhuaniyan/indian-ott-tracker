@@ -1,7 +1,7 @@
 """Public discovery APIs for the movie-only V1 experience."""
 
 from calendar import monthrange
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,6 +19,7 @@ from app.models.movie_metadata import (
     MovieReleaseDate, Person, ProductionCompany, ProductionCountry,
 )
 from app.models.ott_availability import OttAvailability
+from app.models.operations import OperationState
 from app.services.roles import ROLE_ALIASES, normalize_role
 
 router = APIRouter(prefix="/api/v1", tags=["Discovery"])
@@ -64,6 +65,38 @@ def _external_id_payload(item: ExternalId) -> dict:
         provider = "IMDb"
         url = f"https://www.imdb.com/title/{item.external_id}/"
     return {"provider": provider, "id": item.external_id, "url": url}
+
+
+def _queue_on_demand_repair(db: Session, movie: Movie, credits: list[MovieCredit]) -> bool:
+    """Deduplicate asynchronous repair for detail pages with critical gaps."""
+    missing = (
+        not any(item.credit_type == "cast" for item in credits)
+        or not any(item.credit_type == "crew" for item in credits)
+        or not movie.poster_path or not movie.backdrop_path
+        or not any(item.provider.lower() == "imdb" for item in movie.external_ids)
+        or not any(item.source.lower() == "imdb" for item in movie.ratings)
+        or not movie.ott_availabilities
+    )
+    if not missing:
+        return False
+    now = datetime.now(timezone.utc); name = f"on_demand_repair:{movie.id}"
+    state = db.query(OperationState).filter_by(name=name).first()
+    if state and state.status != "FAILED" and state.last_success_at and state.last_success_at >= now - timedelta(hours=settings.ON_DEMAND_REPAIR_COOLDOWN_HOURS):
+        return False
+    if not state:
+        state = OperationState(name=name, total_count=1)
+        db.add(state)
+    state.status = "QUEUED"; state.last_success_at = now; state.last_error = None
+    db.commit()
+    try:
+        from app.workers.celery_app import celery_app
+        celery_app.send_task("repair.movie", args=[movie.id])
+        return True
+    except Exception as exc:
+        state = db.query(OperationState).filter_by(name=name).first()
+        state.status = "FAILED"; state.last_failure_at = now; state.last_error = str(exc)[:2000]
+        db.commit()
+        return False
 
 
 def _ratings_payload(movie: Movie) -> list[dict]:
@@ -261,6 +294,9 @@ def person_detail(person_id: int, sort: str = "newest", credit_type: str = "all"
     return {
         "id": person.id, "name": person.name,
         "profile_path": person.profile_path, "department": person.known_for_department,
+        "biography": person.biography, "birthday": person.birthday, "place_of_birth": person.place_of_birth,
+        "imdb_id": person.imdb_id,
+        "imdb_url": f"https://www.imdb.com/name/{person.imdb_id}/" if person.imdb_id else None,
         "roles": sorted({normalize_role(x.job or x.department or x.credit_type) for x in credits if normalize_role(x.job or x.department or x.credit_type)}),
         "filmography": [{"movie": _card(x.movie), "character": x.character, "job": x.job, "department": x.department, "credit_type": x.credit_type, "normalized_role": normalize_role(x.job or x.department or x.credit_type)} for x in credits],
     }
@@ -351,7 +387,7 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
         release_type = item.release_type.lower()
         group = "theatrical" if release_type in {"2", "3", "limited theatrical", "theatrical"} else "digital" if release_type in {"4", "digital"} else "streaming" if release_type in {"ott", "streaming"} else "other"
         grouped_releases[group].append({"country": item.country, "date": item.release_date, "type": item.release_type, "certification": item.certification, "note": item.note})
-    return {
+    payload = {
         "movie": _card(movie) | {
             "tagline": movie.tagline, "runtime_minutes": movie.runtime_minutes, "status": movie.status,
             "certification": certification, "budget": movie.budget, "revenue": movie.revenue,
@@ -373,3 +409,5 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
         "alternative_titles": [{"title": x.title, "country": x.country, "type": x.title_type} for x in db.query(AlternativeTitle).filter_by(movie_id=movie_id).order_by(AlternativeTitle.country, AlternativeTitle.title).all()],
         "external_ids": [_external_id_payload(x) for x in db.query(ExternalId).filter_by(movie_id=movie_id).all() if x.provider.lower() != "tmdb"],
     }
+    payload["repair_queued"] = _queue_on_demand_repair(db, movie, credits)
+    return payload

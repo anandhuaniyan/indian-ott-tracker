@@ -17,6 +17,10 @@ class Person(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     profile_path: Mapped[str | None] = mapped_column(String(500))
     known_for_department: Mapped[str | None] = mapped_column(String(100))
+    biography: Mapped[str | None] = mapped_column(Text)
+    birthday: Mapped[date | None] = mapped_column(Date)
+    place_of_birth: Mapped[str | None] = mapped_column(String(500))
+    imdb_id: Mapped[str | None] = mapped_column(String(32), index=True)
 
     credits: Mapped[list["MovieCredit"]] = relationship(back_populates="person", cascade="all, delete-orphan")
 

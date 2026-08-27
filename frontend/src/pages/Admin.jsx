@@ -56,8 +56,23 @@ export function OttResearch() {
 }
 
 export function Jobs() {
-  const [data, error] = useAdmin("/api/v1/admin/jobs"); if (error) return <Guard error={error}/>;
-  return <Page title="Job status">{data && <Table headers={["Task", "Last success", "Last failure", "Last error", "Cursor / processed", "Progress"]} rows={data.map(item => <tr key={item.task}><td>{item.task}</td><td>{item.last_success || "Never"}</td><td>{item.last_failure || "—"}</td><td>{item.last_error || "—"}</td><td>{item.cursor} / {item.processed_count}</td><td>{item.progress}</td></tr>)}/>}</Page>;
+  const [jobs, jobsError, reloadJobs] = useAdmin("/api/v1/admin/jobs");
+  const [backfills, backfillError, reloadBackfills] = useAdmin("/api/v1/admin/backfills");
+  const [message, setMessage] = useState(""), [movieId, setMovieId] = useState("");
+  const start = operation => call(`/api/v1/admin/backfills/${operation}/start`, { method: "POST" }).then(result => { setMessage(result.detail || `${result.task} queued`); reloadJobs(); reloadBackfills(); }).catch(reason => setMessage(reason.message));
+  const repair = event => { event.preventDefault(); call(`/api/v1/admin/movies/${movieId}/repair`, { method: "POST" }).then(() => setMessage(`Movie ${movieId} repair queued`)).catch(reason => setMessage(reason.message)); };
+  const error = jobsError || backfillError; if (error) return <Guard error={error}/>;
+  const labels = { metadata: "Metadata", people: "People", images: "Images", imdb: "IMDb ratings", ott: "OTT queue", all: "Run sequential repair" };
+  return <Page title="Job status">
+    <h2>Accelerated data repair</h2><p>Each action resumes its persistent checkpoint. Completed backfills do not restart.</p>
+    <div className="toolbar">{Object.entries(labels).map(([key, label]) => <button key={key} onClick={() => start(key)}>{label}</button>)}</div>
+    <form className="toolbar" onSubmit={repair}><input aria-label="Movie database ID" type="number" min="1" required value={movieId} onChange={event => setMovieId(event.target.value)} placeholder="Movie database ID"/><button>Repair one movie</button></form>
+    {message && <p role="status">{message}</p>}
+    {backfills && <><h2>Backfill progress</h2><Table headers={["Operation", "Status", "Processed / total", "Remaining", "Failures", "Last success", "Last error"]} rows={backfills.progress.map(item => <tr key={item.operation}><td>{item.operation}</td><td>{item.status}</td><td>{item.processed} / {item.total || "not counted"}</td><td>{item.remaining ?? "—"}</td><td>{item.failed}</td><td>{item.last_success || "Never"}</td><td>{item.last_error || "—"}</td></tr>)}/>
+      <h2>Database coverage</h2><div className="metrics">{Object.entries(backfills.coverage).map(([label, value]) => <article key={label}><strong>{value}</strong><span>{label.replaceAll("_", " ")}</span></article>)}</div>
+      <h2>Provider configuration</h2><div className="metrics">{Object.entries(backfills.configuration).map(([label, value]) => <article key={label}><strong>{value ? "Ready" : "Missing"}</strong><span>{label.replaceAll("_", " ")}</span></article>)}</div></>}
+    {jobs && <><h2>All jobs</h2><Table headers={["Task", "Status", "Last success", "Last failure", "Last error", "Cursor / processed / total", "Progress"]} rows={jobs.map(item => <tr key={item.task}><td>{item.task}</td><td>{item.status}</td><td>{item.last_success || "Never"}</td><td>{item.last_failure || "—"}</td><td>{item.last_error || "—"}</td><td>{item.cursor} / {item.processed_count} / {item.total_count || "—"}</td><td>{item.progress}</td></tr>)}/></>}
+  </Page>;
 }
 
 export function Notifications() {

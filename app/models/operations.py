@@ -1,6 +1,6 @@
 """Additive operational models for requests, evidence, health and notifications."""
 from datetime import date, datetime
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database.base import Base
 from app.models.mixins import TimestampMixin
@@ -65,6 +65,27 @@ class OperationState(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     cursor: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     processed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="IDLE", nullable=False, index=True)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BackfillRecord(TimestampMixin, Base):
+    """Per-entity checkpoint that makes priority backfills resumable and retryable."""
+
+    __tablename__ = "backfill_records"
+    __table_args__ = (
+        UniqueConstraint("operation", "entity_type", "entity_id", name="uq_backfill_entity"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    operation: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    entity_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
