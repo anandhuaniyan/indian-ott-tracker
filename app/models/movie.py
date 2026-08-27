@@ -1,8 +1,8 @@
 """Movie model."""
 
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, Date, Float, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
@@ -61,6 +61,13 @@ class Movie(TimestampMixin, Base):
     )
 
     status: Mapped[str | None] = mapped_column(String(50))
+
+    # Locally derived from stored release records. This deliberately remains
+    # separate from TMDB's production ``status`` field above.
+    release_status_code: Mapped[str | None] = mapped_column(String(32), index=True)
+    theatrical_release_date: Mapped[date | None] = mapped_column(Date, index=True)
+    ott_research_eligibility: Mapped[str | None] = mapped_column(String(32), index=True)
+    release_classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     tagline: Mapped[str | None] = mapped_column(Text)
     budget: Mapped[int | None] = mapped_column(BigInteger)

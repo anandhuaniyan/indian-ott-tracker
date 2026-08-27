@@ -20,6 +20,7 @@ from app.models.movie_metadata import ExternalId, Keyword, MovieCredit, MovieIma
 from app.models.operations import MovieRequest, OperationState, OttEvidence
 from app.models.ott_availability import OttAvailability
 from app.services.operations import OttResearchService
+from app.services.release_status import ReleaseStatusService
 
 
 @pytest.fixture()
@@ -41,12 +42,14 @@ def database():
         MovieCredit(movie_id=movie.id, person_id=director.id, credit_type="crew", department="Camera", job="Director of Photography"),
         OttAvailability(movie_id=movie.id, provider="Netflix", provider_logo="/netflix.png", ott_release_date=today, status="confirmed", source_type="official", source_url="https://netflix.com/title/example", confidence=95),
         MovieReleaseDate(movie_id=movie.id, country="IN", release_date=today, release_type="theatrical", certification="U/A"),
+        MovieReleaseDate(movie_id=future.id, country="IN", release_date=today + timedelta(days=20), release_type="3"),
         MovieImage(movie_id=movie.id, image_type="logo", source="tmdb", source_id="logo", original_url="https://image.tmdb.org/logo.png"),
         MovieRating(movie_id=movie.id, source="imdb", rating=8, vote_count=100),
         ExternalId(movie_id=movie.id, provider="imdb", external_id="tt1234567"),
     ])
     keyword = Keyword(tmdb_id=20, name="friendship"); session.add(keyword); session.flush(); session.add(MovieKeyword(movie_id=movie.id, keyword_id=keyword.id))
     session.commit()
+    ReleaseStatusService(session).classify_batch(100)
     try: yield session
     finally: session.close(); engine.dispose()
 
@@ -66,10 +69,13 @@ def test_home_discover_search_and_browse(client):
     assert home["trending"][0]["rating"] == 8
     assert home["trending"][0]["rating_source"] == "IMDb"
     assert "tmdb_id" not in home["trending"][0]
+    assert "display_id" not in home["trending"][0]
     assert home["language_sections"]["ml"]["items"]
     assert home["platforms"][0]["name"] == "Netflix"
     assert client.get("/api/v1/discover?genre=drama&language=ml&director=Example&rating=8&sort=name-asc").json()["total"] == 1
     assert client.get("/api/v1/discover?cinematographer=Example%20Director").json()["items"][0]["title"] == "Example Film"
+    assert client.get("/api/v1/discover?release_status=released").json()["total"] == 1
+    assert client.get("/api/v1/discover?release_status=upcoming").json()["total"] == 1
     search = client.get("/api/v1/search?q=Example").json()
     assert search["movies"]["total"] == 1 and search["people"]["total"] == 2
 
@@ -95,6 +101,12 @@ def test_calendar_ott_movie_and_person(client, database):
     assert detail["movie"]["certification"] == "U/A"
     assert detail["movie"]["rating"] == 8 and detail["movie"]["rating_source"] == "IMDb"
     assert "tmdb_id" not in detail["movie"]
+    assert detail["movie"]["display_id"] == 101
+    assert detail["movie"]["id"] == 1
+    assert detail["movie"]["release_status"] == "Released"
+    assert detail["movie"]["theatrical_release_date"] == date.today().isoformat()
+    assert detail["movie"]["ott_platform"] == "Netflix"
+    assert detail["movie"]["ott_release_date"] == date.today().isoformat()
     assert all(item["provider"].lower() != "tmdb" for item in detail["external_ids"])
     assert detail["external_ids"][0]["url"] == "https://www.imdb.com/title/tt1234567/"
     assert detail["crew_by_role"]["cinematography"][0]["job"] == "Director of Photography"
@@ -102,6 +114,8 @@ def test_calendar_ott_movie_and_person(client, database):
     assert detail["keywords"] == ["friendship"]
     person = client.get("/api/v1/people/1?credit_type=cast&sort=oldest").json()
     assert "tmdb_id" not in person
+    assert person["display_id"] == 10
+    assert person["id"] == 1
     assert person["filmography"][0]["character"] == "Hero"
     assert person["filmography"][0]["normalized_role"] == "actor"
 
@@ -109,14 +123,19 @@ def test_calendar_ott_movie_and_person(client, database):
 def test_missing_imdb_rating_is_not_fabricated_and_missing_ott_is_queued(client, database):
     future = client.get("/api/v1/discover?q=Future").json()["items"][0]
     assert future["rating"] is None and future["rating_source"] is None
-    assert OttResearchService(database).queue_missing() == 1
-    assert database.query(OttEvidence).filter_by(movie_id=2, status="QUEUED").count() == 1
+    assert OttResearchService(database).queue_missing() == 0
+    assert database.get(Movie, 2).ott_research_eligibility == "WAITING_RELEASE"
+    assert database.query(OttEvidence).filter_by(movie_id=2, status="QUEUED").count() == 0
 
 
 def test_confirmed_research_publishes_to_canonical_ott_calendar(client, database):
+    released = Movie(tmdb_id=103, title="Released Missing OTT", original_language="ml")
+    database.add(released); database.flush()
+    database.add(MovieReleaseDate(movie_id=released.id, country="IN", release_date=date.today() - timedelta(days=10), release_type="3"))
+    database.commit()
     assert OttResearchService(database).queue_missing() == 1
     evidence = OttResearchService(database).record_evidence(
-        2,
+        released.id,
         platform="Prime Video",
         release_date=date.today(),
         source_url="https://primevideo.com/detail/example",
@@ -125,7 +144,7 @@ def test_confirmed_research_publishes_to_canonical_ott_calendar(client, database
     )
     assert evidence.status == "CONFIRMED"
     calendar = client.get("/api/v1/calendar/this-week").json()
-    assert any(item["id"] == 2 and item["ott_platform"] == "Prime Video" for item in calendar["ott"]["items"])
+    assert any(item["id"] == released.id and item["ott_platform"] == "Prime Video" for item in calendar["ott"]["items"])
 
 
 def test_request_admin_auth_and_management(client, database, monkeypatch):
@@ -142,7 +161,11 @@ def test_request_admin_auth_and_management(client, database, monkeypatch):
     assert client.patch(f"/api/v1/admin/requests/{request_id}", json={"status": "REVIEWING"}).json()["status"] == "REVIEWING"
     assert client.get("/api/v1/admin/data-health").status_code == 200
     assert client.get("/api/v1/admin/images").status_code == 200
-    assert client.get("/api/v1/admin/ott-research").status_code == 200
+    ott_admin = client.get("/api/v1/admin/ott-research")
+    assert ott_admin.status_code == 200
+    assert {"release_status", "theatrical_release_date", "eligibility", "eligibility_label"} <= set(ott_admin.json()["items"][0])
+    assert ott_admin.json()["daily_usage"]["limit"] == settings.OTT_DAILY_RESEARCH_MOVIE_LIMIT
+    assert ott_admin.json()["tavily_usage"]["limit"] == settings.TAVILY_MONTHLY_APP_BUDGET
     assert client.get("/api/v1/admin/jobs").status_code == 200
     assert client.get("/api/v1/admin/notifications").status_code == 200
 

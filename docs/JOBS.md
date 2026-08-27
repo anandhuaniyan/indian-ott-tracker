@@ -1,6 +1,6 @@
 # Background jobs
 
-Celery registers and Beat schedules: TMDB incremental sync, bounded metadata enrichment, IMDb rating refresh, whole-catalogue data health, image health, image recovery, OTT queueing, research, verification, daily notifications and cleanup. Redis is both broker and result backend.
+Celery registers and Beat schedules: TMDB incremental sync, bounded metadata enrichment, IMDb rating refresh, whole-catalogue data health, image health, image recovery, daily release-status classification, OTT eligibility queueing, research, verification, daily notifications and cleanup. Redis is both broker and result backend.
 
 Data, metadata and image tasks persist cursors. Celery success/failure signals update job state for every task; failure signals also dispatch an administrator notification without altering retry behavior. Tasks acknowledge late and external/operational tasks use bounded batches and retry backoff.
 
@@ -12,6 +12,6 @@ Inspect registration with `docker compose exec worker celery -A app.workers.cele
 
 The conservative Beat schedule is separate from administrator-started backfills. The Jobs page can start or resume `tmdb.metadata_backfill`, `tmdb.person_backfill`, `operations.image_backfill`, `ratings.imdb_backfill`, `operations.ott_backfill`, or the sequential `operations.repair_orchestrator`. Batch sizes are configurable through the matching `*_BACKFILL_BATCH_SIZE` variables.
 
-`operation_states` stores status, cursor, attempted/completed totals, last success/failure/error, and completion time. `backfill_records` checkpoints every movie/person with attempts and error text. Successful records are never repeated, failures stop after `BACKFILL_MAX_ATTEMPTS`, completed runs do not automatically restart, and a stale interrupted run can be resumed. The orchestrator deliberately performs metadata, people, images, IMDb, OTT queue/research, and a whole-database health pass in sequence rather than saturating providers concurrently.
+`operation_states` stores status, cursor, attempted/completed totals, last success/failure/error, and completion time. `backfill_records` checkpoints every movie/person with attempts and error text. Successful records are never repeated, failures stop after `BACKFILL_MAX_ATTEMPTS`, completed runs do not automatically restart, and a stale interrupted run can be resumed. Release classification uses its own additive `release_status_classification` state and does not reset any metadata, people, image, IMDb, or earlier OTT checkpoint. The orchestrator deliberately performs metadata, people, images, IMDb, eligible OTT queue/research, and a whole-database health pass in sequence rather than saturating providers concurrently.
 
 Movie detail requests may enqueue `repair.movie` only when critical metadata is missing. `on_demand_repair:<movie-id>` provides cooldown and deduplication. The task updates metadata, associated people, images, approved IMDb ratings, OTT queue state, and targeted data-health issues. Administrators can explicitly queue the same repair from the Jobs page.

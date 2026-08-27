@@ -21,6 +21,7 @@ from app.models.ott_availability import OttAvailability
 from app.services.image_fallback import ImageFallbackService
 from app.services.movie_metadata_service import MovieMetadataService
 from app.services.operations import DataHealthService, OttResearchService
+from app.services.release_status import ReleaseStatusService
 from app.services.rating_provider import (
     MovieRatingProvider,
     ProviderQuotaExhausted,
@@ -34,7 +35,7 @@ METADATA = "tmdb.metadata_backfill"
 PEOPLE = "tmdb.person_backfill"
 IMAGES = "operations.image_backfill"
 IMDB = "ratings.imdb_backfill"
-OTT = "operations.ott_backfill"
+OTT = "operations.ott_eligibility_backfill"
 
 
 def _now() -> datetime:
@@ -306,17 +307,22 @@ class OttQueueBackfillService(ResumableBackfill):
     operation = OTT
 
     def _missing(self):
-        return self.db.query(Movie).outerjoin(OttAvailability).group_by(Movie.id).having(
+        return self.db.query(Movie).outerjoin(OttAvailability).filter(
+            Movie.ott_research_eligibility == "ELIGIBLE"
+        ).group_by(Movie.id).having(
             (func.count(OttAvailability.id) == 0)
             | (func.count(OttAvailability.ott_release_date) < func.count(OttAvailability.id))
         )
 
     def run(self, batch_size: int | None = None) -> dict:
         batch_size = max(1, min(batch_size or settings.OTT_BACKFILL_BATCH_SIZE, 500))
+        classification = ReleaseStatusService(self.db).classify_batch(batch_size)
         state = self.state(self._missing().count())
         movies = self._missing().filter(self._eligible("movie", Movie.id)).order_by(Movie.id).limit(batch_size).all()
         if not movies:
-            return self._summary(state, 0, 0, 0, True)
+            result = self._summary(state, 0, 0, 0, classification.get("complete", False))
+            result["classification"] = classification
+            return result
         state.status = "RUNNING"; state.completed_at = None; self.db.commit()
         service = OttResearchService(self.db, settings.OTT_CONFIRMATION_THRESHOLD); succeeded = failed = queued = 0
         for movie in movies:

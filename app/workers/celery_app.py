@@ -19,6 +19,7 @@ celery_app.conf.update(
         "data-health": {"task": "operations.data_health", "schedule": 900},
         "image-health": {"task": "operations.image_health", "schedule": 21600},
         "image-recovery": {"task": "operations.image_recovery", "schedule": 3600},
+        "release-status": {"task": "operations.release_status", "schedule": 86400},
         "ott-queue": {"task": "operations.ott_queue", "schedule": 21600},
         "ott-research": {"task": "operations.ott_research", "schedule": 1800},
         "ott-verification": {"task": "operations.ott_verification", "schedule": 86400},
