@@ -67,7 +67,7 @@ class GoogleProgrammableSearchProvider:
     def configured(self) -> bool:
         return bool(self.api_key and self.engine_id)
 
-    def search(self, movie) -> list[dict]:
+    def search(self, movie, *, max_queries: int | None = None, before_query=None) -> list[dict]:
         if not self.configured: return []
         title = movie.title if hasattr(movie, "title") else str(movie)
         year = getattr(getattr(movie, "release_date", None), "year", "")
@@ -75,7 +75,11 @@ class GoogleProgrammableSearchProvider:
         identity = " ".join(str(x) for x in (f'"{title}"', year, language) if x)
         queries = (f"{identity} OTT release India", f"{identity} streaming Netflix Prime Video JioHotstar SonyLIV ZEE5", f"{identity} digital release date official")
         results: list[dict] = []; seen: set[str] = set()
-        for query in queries:
+        self.last_query_count = 0
+        for query in queries[: max_queries or len(queries)]:
+            if before_query and not before_query():
+                break
+            self.last_query_count += 1
             response = httpx.get(self.endpoint, params={"key": self.api_key, "cx": self.engine_id, "q": query, "num": 10}, timeout=self.timeout, follow_redirects=True)
             if response.status_code == 429: raise RuntimeError("Google Custom Search quota or rate limit reached")
             response.raise_for_status()
@@ -95,8 +99,10 @@ class ConfiguredSearchProvider:
     def configured(self) -> bool:
         return bool(settings.OTT_SEARCH_API_URL and settings.OTT_SEARCH_API_KEY)
 
-    def search(self, movie) -> list[dict]:
+    def search(self, movie, *, max_queries: int | None = None, before_query=None) -> list[dict]:
         if not self.configured: return []
+        if before_query and not before_query(): return []
+        self.last_query_count = 1
         title = movie.title if hasattr(movie, "title") else str(movie)
         year = getattr(getattr(movie, "release_date", None), "year", "")
         response = httpx.get(settings.OTT_SEARCH_API_URL, params={"q": f"{title} {year} OTT release India"}, headers={"Authorization": f"Bearer {settings.OTT_SEARCH_API_KEY}"}, timeout=15)
@@ -105,7 +111,98 @@ class ConfiguredSearchProvider:
         return [{"title": x.get("title"), "url": x.get("url"), "snippet": x.get("snippet", ""), "platform": x.get("platform"), "release_date": x.get("release_date")} for x in results if isinstance(x, dict)]
 
 
+class TavilySearchProvider:
+    """Free-budgeted Tavily adapter dedicated to platform/date evidence."""
+
+    endpoint = "https://api.tavily.com/search"
+    is_tavily = True
+
+    def __init__(self, api_key: str | None = None, endpoint: str | None = None, timeout: float = 20):
+        self.api_key = (settings.TAVILY_API_KEY or settings.OTT_SEARCH_API_KEY) if api_key is None else api_key
+        self.endpoint = endpoint or settings.OTT_SEARCH_API_URL or self.endpoint
+        self.timeout = timeout
+        self.last_query_count = 0
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.api_key)
+
+    @staticmethod
+    def _matches_movie(movie, text: str) -> bool:
+        normalized_title = re.sub(r"[^a-z0-9]+", " ", movie.title.lower()).strip()
+        normalized_text = re.sub(r"[^a-z0-9]+", " ", text.lower())
+        if normalized_title and normalized_title not in normalized_text:
+            return False
+        release_date = getattr(movie, "theatrical_release_date", None) or getattr(movie, "release_date", None)
+        expected_year = getattr(release_date, "year", None)
+        mentioned_years = {int(value) for value in re.findall(r"\b(?:19|20)\d{2}\b", text)}
+        return not (expected_year and mentioned_years and all(abs(year - expected_year) > 1 for year in mentioned_years))
+
+    def _request(self, query: str, before_query=None) -> list[dict]:
+        if before_query and not before_query():
+            return []
+        self.last_query_count += 1
+        response = httpx.post(
+            self.endpoint,
+            json={
+                "api_key": self.api_key,
+                "query": query,
+                "search_depth": "basic",
+                "max_results": 8,
+                "include_answer": False,
+                "include_raw_content": False,
+            },
+            timeout=self.timeout,
+            follow_redirects=True,
+        )
+        if response.status_code in {402, 429}:
+            raise RuntimeError("Tavily free quota or rate limit reached")
+        response.raise_for_status()
+        return response.json().get("results", [])
+
+    def search(self, movie, *, max_queries: int | None = None, before_query=None) -> list[dict]:
+        if not self.configured:
+            return []
+        self.last_query_count = 0
+        maximum = max(1, min(max_queries or settings.TAVILY_MAX_QUERIES_PER_MOVIE, settings.TAVILY_MAX_QUERIES_PER_MOVIE))
+        release_date = getattr(movie, "theatrical_release_date", None) or getattr(movie, "release_date", None)
+        year = getattr(release_date, "year", "")
+        language = getattr(movie, "original_language", "") or ""
+        identity = " ".join(str(value) for value in (f'"{movie.title}"', year, language) if value)
+        queries = [
+            f"{identity} OTT release date streaming platform India",
+            f"{identity} digital streaming release official Netflix Prime Video JioHotstar SonyLIV ZEE5",
+        ]
+        found: list[dict] = []
+        seen: set[str] = set()
+        for index, query in enumerate(queries[:maximum]):
+            raw_results = self._request(query, before_query)
+            for item in raw_results:
+                url = item.get("url")
+                text = " ".join(filter(None, (item.get("title"), item.get("content"))))
+                if not url or url in seen or not self._matches_movie(movie, text):
+                    continue
+                seen.add(url)
+                found.append({
+                    "title": item.get("title"),
+                    "url": url,
+                    "snippet": item.get("content", ""),
+                    "platform": _platform(url, text),
+                    "release_date": _release_date(text),
+                    "published_date": item.get("published_date"),
+                    "query": query,
+                })
+            # Spend a second credit only when the first query did not identify
+            # both pieces of information Tavily is allowed to research.
+            if index == 0 and any(item.get("platform") and item.get("release_date") for item in found):
+                break
+        return found
+
+
 def configured_ott_provider():
-    if settings.GOOGLE_SEARCH_API_KEY and settings.GOOGLE_SEARCH_ENGINE_ID:
+    provider = (settings.OTT_RESEARCH_PROVIDER or "").strip().lower()
+    if provider == "tavily" or settings.TAVILY_API_KEY or "tavily.com" in settings.OTT_SEARCH_API_URL.lower():
+        return TavilySearchProvider()
+    if provider in {"google", "google_programmable_search"} and settings.GOOGLE_SEARCH_API_KEY and settings.GOOGLE_SEARCH_ENGINE_ID:
         return GoogleProgrammableSearchProvider()
     return ConfiguredSearchProvider()

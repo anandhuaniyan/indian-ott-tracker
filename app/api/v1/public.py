@@ -20,6 +20,13 @@ from app.models.movie_metadata import (
 )
 from app.models.ott_availability import OttAvailability
 from app.models.operations import OperationState
+from app.services.release_status import (
+    RELEASE_LABELS,
+    ReleaseStatusService,
+    best_canonical_ott,
+    confirmed_canonical_ott,
+    research_status_label,
+)
 from app.services.roles import ROLE_ALIASES, normalize_role
 
 router = APIRouter(prefix="/api/v1", tags=["Discovery"])
@@ -151,7 +158,17 @@ def _apply_filters(query, **values):
     if values.get("certification"):
         query = query.filter(Movie.release_dates.any(MovieReleaseDate.certification == values["certification"]))
     if values.get("release_status"):
-        query = query.filter(func.lower(Movie.status) == values["release_status"].lower())
+        status = values["release_status"].strip().lower().replace("_", "-")
+        code = {
+            "released": "THEATRICALLY_RELEASED",
+            "theatrically-released": "THEATRICALLY_RELEASED",
+            "upcoming": "UPCOMING",
+            "direct-to-ott": "DIRECT_TO_OTT",
+            "unknown": "UNKNOWN",
+        }.get(status)
+        if not code:
+            raise HTTPException(422, "Unknown release status")
+        query = query.filter(Movie.release_status_code == code)
     if values.get("platform"):
         query = query.filter(Movie.ott_availabilities.any(OttAvailability.provider.ilike(f"%{values['platform'].replace('-', ' ')}%")))
     role_filters = {"actor": values.get("actor"), "director": values.get("director"), "writer": values.get("writer"), "cinematography": values.get("cinematographer"), "producer": values.get("producer"), "editor": values.get("editor"), "composer": values.get("composer")}
@@ -293,6 +310,7 @@ def person_detail(person_id: int, sort: str = "newest", credit_type: str = "all"
     credits = query.order_by(Movie.release_date.asc() if sort == "oldest" else Movie.release_date.desc()).all()
     return {
         "id": person.id, "name": person.name,
+        "display_id": person.tmdb_id,
         "profile_path": person.profile_path, "department": person.known_for_department,
         "biography": person.biography, "birthday": person.birthday, "place_of_birth": person.place_of_birth,
         "imdb_id": person.imdb_id,
@@ -331,11 +349,6 @@ def calendar(period: str, db: Session = Depends(get_db)):
     theatrical = []
     for item in sorted(explicit.values(), key=lambda value: (value.release_date, value.movie_id)):
         theatrical.append(_card(item.movie) | {"release_date": item.release_date, "theatrical_release_date": item.release_date, "certification": item.certification})
-    fallback = _movie_query(db).filter(Movie.release_date >= start, Movie.release_date < end)
-    if explicit:
-        fallback = fallback.filter(Movie.id.notin_(explicit))
-    theatrical.extend(_card(movie) | {"theatrical_release_date": movie.release_date, "certification": None} for movie in fallback.order_by(Movie.release_date).all())
-
     ott_rows = db.query(Movie, OttAvailability).options(
         selectinload(Movie.genres), selectinload(Movie.languages), selectinload(Movie.ratings)
     ).join(OttAvailability).filter(
@@ -377,6 +390,11 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
     countries = db.query(ProductionCountry).join(MovieProductionCountry, MovieProductionCountry.production_country_id == ProductionCountry.id).filter(MovieProductionCountry.movie_id == movie_id).all()
     keywords = db.query(Keyword).join(MovieKeyword, MovieKeyword.keyword_id == Keyword.id).filter(MovieKeyword.movie_id == movie_id).order_by(Keyword.name).all()
     certification = next((x.certification for x in releases if x.country == "IN" and x.certification), None) or next((x.certification for x in releases if x.certification), None)
+    classification, eligibility, latest_evidence = ReleaseStatusService(db).classify_movie(
+        movie, sync_evidence=False
+    )
+    ott_summary = best_canonical_ott(movie)
+    confirmed_ott = confirmed_canonical_ott(movie)
     grouped_crew = {}
     for credit in credits:
         normalized = normalize_role(credit.job or credit.department)
@@ -389,7 +407,15 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
         grouped_releases[group].append({"country": item.country, "date": item.release_date, "type": item.release_type, "certification": item.certification, "note": item.note})
     payload = {
         "movie": _card(movie) | {
+            "display_id": movie.tmdb_id,
             "tagline": movie.tagline, "runtime_minutes": movie.runtime_minutes, "status": movie.status,
+            "release_status": classification.label,
+            "release_status_code": classification.code,
+            "theatrical_release_date": classification.theatrical_date,
+            "ott_platform": ott_summary.provider if ott_summary else None,
+            "ott_release_date": ott_summary.ott_release_date if ott_summary else None,
+            "ott_status": "Confirmed" if confirmed_ott else "Not announced" if classification.code != "UNKNOWN" else "Unknown",
+            "ott_research_status": research_status_label(latest_evidence, eligibility.code),
             "certification": certification, "budget": movie.budget, "revenue": movie.revenue,
             "collection": {"name": movie.collection_name, "poster_path": movie.collection_poster_path, "backdrop_path": movie.collection_backdrop_path} if movie.collection_name else None,
             "original_language": movie.original_language,

@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     ADMIN_SESSION_SECRET: str = ""
     ADMIN_PASSWORD_HASH: str = ""
     SITE_URL: str = "http://localhost:5173"
+    SITE_TIMEZONE: str = "Asia/Kolkata"
     GOOGLE_ANALYTICS_ID: str = ""
     GOOGLE_SITE_VERIFICATION: str = ""
     ADSENSE_PUBLISHER_ID: str = ""
@@ -44,6 +45,14 @@ class Settings(BaseSettings):
     GOOGLE_SEARCH_API_KEY: str = ""
     GOOGLE_SEARCH_ENGINE_ID: str = ""
     OTT_CONFIRMATION_THRESHOLD: float = 85.0
+    OTT_RESEARCH_MIN_DAYS_AFTER_THEATRICAL_RELEASE: int = 7
+    OTT_RESEARCH_HIGH_PRIORITY_DAYS: int = 90
+    OTT_RESEARCH_MEDIUM_PRIORITY_DAYS: int = 180
+    OTT_RESEARCH_AUTO_MAX_AGE_DAYS: int = 365
+    OTT_DAILY_RESEARCH_MOVIE_LIMIT: int = 20
+    TAVILY_API_KEY: str = ""
+    TAVILY_MONTHLY_APP_BUDGET: int = 800
+    TAVILY_MAX_QUERIES_PER_MOVIE: int = 2
     DISCORD_WEBHOOK_URL: str = ""
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""

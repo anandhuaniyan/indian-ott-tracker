@@ -1,9 +1,9 @@
 """Offline coverage for accelerated, resumable data-repair workflows."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from app.models.movie import Movie
-from app.models.movie_metadata import ExternalId, MovieCredit, MovieRating, Person
+from app.models.movie_metadata import ExternalId, MovieCredit, MovieRating, MovieReleaseDate, Person
 from app.models.operations import BackfillRecord, OttEvidence
 from app.services.backfill import IMDbBackfillService, MetadataBackfillService, OttQueueBackfillService, PersonBackfillService, SingleMovieRepairService
 from app.services.movie_metadata_service import MovieMetadataService
@@ -58,7 +58,8 @@ def test_imdb_backfill_uses_approved_provider_and_does_not_fabricate(database):
 def test_ott_queue_backfill_covers_missing_provider_or_date(database):
     result = OttQueueBackfillService(database).run(batch_size=10)
     queued_ids = {item.movie_id for item in database.query(OttEvidence).filter_by(status="QUEUED")}
-    assert result["processed"] == 2 and queued_ids == {1, 2}
+    assert result["processed"] == 1 and queued_ids == {1}
+    assert database.get(Movie, 2).ott_research_eligibility == "WAITING_RELEASE"
 
 
 def test_google_programmable_search_uses_json_api_and_disambiguated_queries(database, monkeypatch):
@@ -83,6 +84,7 @@ def test_single_movie_repair_populates_credits_profiles_rating_and_ott_queue(dat
         self.db.add(actor); self.db.flush()
         self.db.add_all([MovieCredit(movie_id=target.id, person_id=actor.id, credit_type="cast", character="Lead"), MovieCredit(movie_id=target.id, person_id=actor.id, credit_type="crew", job="Director")])
         self.db.add(ExternalId(movie_id=target.id, provider="imdb", external_id="tt3030303"))
+        self.db.add(MovieReleaseDate(movie_id=target.id, country="IN", release_date=date.today() - timedelta(days=10), release_type="3"))
         target.poster_path = "/poster.jpg"; target.backdrop_path = "/backdrop.jpg"; self.db.commit(); return target
 
     monkeypatch.setattr("app.services.backfill.MovieMetadataService.enrich_movie", fake_enrich)

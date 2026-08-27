@@ -9,7 +9,7 @@ from app.database.base import Base
 from app.models.genre import Genre
 from app.models.language import Language
 from app.models.movie import Movie
-from app.models.movie_metadata import MovieCredit, Person
+from app.models.movie_metadata import MovieCredit, MovieReleaseDate, Person
 from app.models.ott_availability import OttAvailability
 
 
@@ -28,6 +28,8 @@ def database():
     session.add_all([
         MovieCredit(movie_id=first.id, person_id=actor.id, credit_type="cast", character="Hero"),
         MovieCredit(movie_id=first.id, person_id=director.id, credit_type="crew", department="Directing", job="Director"),
+        MovieReleaseDate(movie_id=first.id, country="IN", release_date=date.today() - timedelta(days=10), release_type="3"),
+        MovieReleaseDate(movie_id=second.id, country="IN", release_date=date.today() + timedelta(days=20), release_type="3"),
         OttAvailability(movie_id=first.id, provider="Netflix", status="confirmed", confidence=95),
     ])
     session.commit()

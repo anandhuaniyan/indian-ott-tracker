@@ -10,7 +10,7 @@ const meta = (selector, attributes, value) => {
   element.content = value || "";
 };
 
-export default function Seo({ title, description = "Discover Indian movies and verified lawful OTT availability.", image, type = "website", jsonLd }) {
+export default function Seo({ title, description = "Discover Indian movies and verified lawful OTT availability.", image, type = "website", jsonLd, noindex = false }) {
   useEffect(() => {
     const full = title === "Indian OTT Tracker" ? title : `${title} | Indian OTT Tracker`;
     const canonical = `${import.meta.env.VITE_SITE_URL || location.origin}${location.pathname}`;
@@ -23,6 +23,7 @@ export default function Seo({ title, description = "Discover Indian movies and v
     meta('meta[name="twitter:card"]', { name: "twitter:card" }, image ? "summary_large_image" : "summary");
     meta('meta[name="twitter:title"]', { name: "twitter:title" }, full);
     meta('meta[name="twitter:description"]', { name: "twitter:description" }, description);
+    meta('meta[name="robots"]', { name: "robots" }, noindex ? "noindex,follow" : "index,follow");
     if (import.meta.env.VITE_GOOGLE_SITE_VERIFICATION) meta('meta[name="google-site-verification"]', { name: "google-site-verification" }, import.meta.env.VITE_GOOGLE_SITE_VERIFICATION);
     if (image) {
       meta('meta[property="og:image"]', { property: "og:image" }, image);
@@ -41,7 +42,7 @@ export default function Seo({ title, description = "Discover Indian movies and v
       document.head.append(script);
     });
     return () => document.head.querySelectorAll('script[data-page-jsonld="true"]').forEach(node => node.remove());
-  }, [title, description, image, type, jsonLd]);
+  }, [title, description, image, type, jsonLd, noindex]);
   return null;
 }
 

@@ -12,16 +12,23 @@ class TMDbClient:
     BASE_URL = "https://api.themoviedb.org/3"
 
     def __init__(self, request_delay: float = 0.25, max_retries: int = 3):
+        headers = {}
+        if settings.TMDB_ACCESS_TOKEN:
+            headers["Authorization"] = f"Bearer {settings.TMDB_ACCESS_TOKEN}"
         self.client = httpx.Client(
             base_url=self.BASE_URL,
             timeout=30.0,
+            headers=headers,
         )
         self.request_delay = request_delay
         self.max_retries = max_retries
 
     def get(self, endpoint: str, **params) -> dict:
         """Perform GET request with rate limiting and exponential backoff retries."""
-        params["api_key"] = settings.TMDB_API_KEY
+        if settings.TMDB_API_KEY:
+            params["api_key"] = settings.TMDB_API_KEY
+        elif not settings.TMDB_ACCESS_TOKEN:
+            raise RuntimeError("TMDB access is not configured")
 
         # Enforce minimum inter-request delay
         if self.request_delay > 0:

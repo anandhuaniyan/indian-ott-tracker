@@ -1,13 +1,15 @@
 import logging
 from datetime import date, datetime, timedelta, timezone
+from sqlalchemy import case, exists, func, select
 from app.workers.celery_app import celery_app
 from app.database.connection import SessionLocal
-from app.services.operations import DataHealthService, OttResearchService
+from app.services.operations import DataHealthService, OttResearchService, ResearchUsageService
+from app.services.release_status import ReleaseStatusService
 from app.services.image_fallback import ImageFallbackService
 from app.config.settings import settings
 from app.services.ott_providers import configured_ott_provider, source_rank
 from app.models.movie import Movie
-from app.models.operations import DataQualityIssue, NotificationLog, OperationState, OttEvidence
+from app.models.operations import DataQualityIssue, MovieRequest, NotificationLog, OperationState, OttEvidence
 from app.models.ott_availability import OttAvailability
 
 log = logging.getLogger(__name__)
@@ -37,6 +39,21 @@ def _continue(task, result, *, batch_size=None, countdown=2):
 def data_health(): return _run(lambda db: DataHealthService(db).scan())
 @celery_app.task(name="operations.ott_queue", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
 def ott_queue(): return _run(lambda db: OttResearchService(db).queue_missing())
+
+
+@celery_app.task(bind=True, name="operations.release_status", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def release_status(self, batch_size=1000, restart_completed=True):
+    result = _run(
+        lambda db: ReleaseStatusService(db).classify_batch(
+            batch_size, restart_completed=restart_completed
+        )
+    )
+    if not result.get("complete"):
+        self.apply_async(
+            kwargs={"batch_size": batch_size, "restart_completed": False},
+            countdown=2,
+        )
+    return result
 @celery_app.task(name="operations.image_recovery", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
 def image_recovery(): return _run(lambda db: ImageFallbackService(db).recover_batch())
 @celery_app.task(name="operations.image_health", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
@@ -57,7 +74,9 @@ def metadata_enrichment():
         if not movies: state.cursor = 0; db.commit(); return {"processed": 0, "cycle_complete": True}
         service = MovieMetadataService(db)
         for movie in movies:
-            service.enrich_movie(movie); state.cursor = movie.id; state.processed_count += 1
+            service.enrich_movie(movie)
+            ReleaseStatusService(db).classify_movie(movie)
+            state.cursor = movie.id; state.processed_count += 1
         state.last_success_at = datetime.now(timezone.utc); db.commit()
         return {"processed": len(movies), "cursor": state.cursor, "cycle_complete": False}
     return _run(run)
@@ -130,9 +149,7 @@ def ott_verification():
         due = db.query(OttAvailability).filter((OttAvailability.last_checked.is_(None)) | (OttAvailability.last_checked < datetime.now(timezone.utc) - timedelta(days=30))).order_by(OttAvailability.id).limit(100).all()
         service = OttResearchService(db); queued = 0
         for availability in due:
-            active = db.query(OttEvidence).filter(OttEvidence.movie_id == availability.movie_id, OttEvidence.status.in_(["QUEUED", "RESEARCHING"])).first()
-            if not active:
-                db.add(OttEvidence(movie_id=availability.movie_id, status="QUEUED", platform=availability.provider, release_date=availability.ott_release_date, next_check=datetime.now(timezone.utc), notes="scheduled canonical verification")); queued += 1
+            queued += int(service.queue_movie(availability.movie_id))
         db.commit(); return queued
     return _run(run)
 
@@ -157,22 +174,83 @@ def _ott_research_batch(db):
         provider = configured_ott_provider(); service = OttResearchService(db, settings.OTT_CONFIRMATION_THRESHOLD)
         if not getattr(provider, "configured", False):
             return {"configured": False, "processed": 0, "complete": False}
-        queue = db.query(OttEvidence).filter(OttEvidence.status.in_(["UNKNOWN", "QUEUED", "POSSIBLE", "NOT_FOUND", "CONFLICTING", "FAILED"]), OttEvidence.next_check <= datetime.now(timezone.utc)).order_by(OttEvidence.next_check).limit(20).all()
+        now = datetime.now(timezone.utc)
+        usage = ResearchUsageService(db)
+        daily = usage.daily_snapshot(now)
+        monthly = usage.monthly_snapshot(now) if getattr(provider, "is_tavily", False) else None
+        available_slots = daily["remaining"]
+        if monthly is not None and monthly["remaining"] <= 0:
+            return {"configured": True, "processed": 0, "queries": 0, "complete": False, "stopped": "monthly_free_budget_exhausted", "daily": daily, "monthly": monthly}
+        if available_slots <= 0:
+            return {"configured": True, "processed": 0, "queries": 0, "complete": False, "stopped": "daily_movie_limit_reached", "daily": daily, "monthly": monthly}
+        requested = exists(
+            select(MovieRequest.id).where(
+                func.lower(MovieRequest.movie_name) == func.lower(Movie.title),
+                MovieRequest.status.in_(["PENDING", "REVIEWING", "FOUND"]),
+            )
+        )
+        queue = (
+            db.query(OttEvidence)
+            .join(Movie, Movie.id == OttEvidence.movie_id)
+            .filter(
+                Movie.ott_research_eligibility == "ELIGIBLE",
+                OttEvidence.status.in_(["UNKNOWN", "QUEUED", "POSSIBLE", "NOT_FOUND", "CONFLICTING", "FAILED"]),
+                OttEvidence.next_check <= now,
+            )
+            .order_by(
+                case((requested, 0), else_=1),
+                Movie.theatrical_release_date.desc(),
+                Movie.popularity.desc(),
+                OttEvidence.next_check,
+            )
+            .limit(available_slots)
+            .all()
+        )
+        processed = 0
+        queries_used = 0
         for item in queue:
+            movie = db.get(Movie, item.movie_id)
+            _, eligibility, _ = ReleaseStatusService(db).classify_movie(movie, now=now)
+            if eligibility.code != "ELIGIBLE":
+                db.commit()
+                continue
+            if getattr(provider, "is_tavily", False) and usage.monthly_snapshot(now)["remaining"] <= 0:
+                break
+            if not usage.reserve_daily_movie(now):
+                break
             item.status = "RESEARCHING"; item.attempts += 1
-            movie = db.get(__import__("app.models.movie", fromlist=["Movie"]).Movie, item.movie_id)
-            results = provider.search(movie) if movie else []
+            maximum = settings.TAVILY_MAX_QUERIES_PER_MOVIE
+            reserve_query = None
+            if getattr(provider, "is_tavily", False):
+                monthly = usage.monthly_snapshot(now)
+                maximum = min(maximum, monthly["remaining"])
+                reserve_query = lambda: usage.reserve_tavily_query(now)
+            results = provider.search(movie, max_queries=maximum, before_query=reserve_query) if movie and maximum > 0 else []
+            item_queries = max(0, getattr(provider, "last_query_count", 0))
+            queries_used += item_queries
+            if getattr(provider, "is_tavily", False) and item_queries == 0:
+                item.status = "QUEUED"
+                item.next_check = now + timedelta(days=1)
+                db.commit()
+                break
             if not results:
-                item.status = "NOT_FOUND"; item.last_checked = datetime.now(timezone.utc); item.next_check = service.next_check_for(item.status, attempts=item.attempts); continue
+                item.status = "NOT_FOUND"; item.last_checked = now; item.next_check = service.next_check_for(item.status, attempts=item.attempts); processed += 1; continue
             for result in results[:3]:
                 rank, score = source_rank(result["url"])
                 parsed_date = result.get("release_date")
                 try: parsed_date = date.fromisoformat(parsed_date) if parsed_date else None
                 except ValueError: parsed_date = None
-                service.record_evidence(item.movie_id, platform=result.get("platform"), release_date=parsed_date, source_url=result["url"], source_title=result["title"], summary=result["snippet"], confidence=score, source_rank=rank)
-            item.status = "CONFIRMED" if any(source_rank(result["url"])[1] >= service.threshold and result.get("platform") for result in results[:3]) else "POSSIBLE"
-            item.last_checked = datetime.now(timezone.utc); item.next_check = service.next_check_for(item.status, attempts=item.attempts)
-        db.commit(); return {"configured": True, "processed": len(queue), "complete": not queue}
+                published = result.get("published_date")
+                try: published = date.fromisoformat(published[:10]) if published else None
+                except (TypeError, ValueError): published = None
+                service.record_evidence(item.movie_id, platform=result.get("platform"), release_date=parsed_date, source_url=result["url"], source_title=result["title"], source_published_at=published, summary=result["snippet"], confidence=score, source_rank=rank)
+            item.status = "CONFIRMED" if any(source_rank(result["url"])[1] >= service.threshold and result.get("platform") and result.get("release_date") for result in results[:3]) else "POSSIBLE"
+            item.last_checked = now; item.next_check = service.next_check_for(item.status, attempts=item.attempts)
+            processed += 1
+        db.commit()
+        daily = usage.daily_snapshot(now)
+        monthly = usage.monthly_snapshot(now) if getattr(provider, "is_tavily", False) else None
+        return {"configured": True, "processed": processed, "queries": queries_used, "complete": not queue, "daily": daily, "monthly": monthly}
 
 
 @celery_app.task(name="operations.ott_research", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
