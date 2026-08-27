@@ -41,6 +41,7 @@ class DataQualityIssue(TimestampMixin, Base):
     __tablename__ = "data_quality_issues"
     id: Mapped[int] = mapped_column(primary_key=True)
     movie_id: Mapped[int | None] = mapped_column(ForeignKey("movies.id", ondelete="CASCADE"), index=True)
+    person_id: Mapped[int | None] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), index=True)
     issue_type: Mapped[str] = mapped_column(String(80), index=True)
     severity: Mapped[str] = mapped_column(String(20), default="warning")
     detail: Mapped[str | None] = mapped_column(Text)
@@ -63,5 +64,7 @@ class OperationState(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     cursor: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    processed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)

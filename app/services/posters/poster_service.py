@@ -53,8 +53,8 @@ class PosterService:
         if fanart_url:
 
             return self.downloader.download(
-                tmdb_id,
                 fanart_url,
+                tmdb_id,
                 source="fanart",
             )
 

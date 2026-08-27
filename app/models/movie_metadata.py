@@ -21,6 +21,19 @@ class Person(TimestampMixin, Base):
     credits: Mapped[list["MovieCredit"]] = relationship(back_populates="person", cascade="all, delete-orphan")
 
 
+class AlternativeTitle(TimestampMixin, Base):
+    __tablename__ = "alternative_titles"
+    __table_args__ = (UniqueConstraint("movie_id", "country", "title", name="uq_movie_alternative_title"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id", ondelete="CASCADE"), index=True)
+    country: Mapped[str | None] = mapped_column(String(2), index=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    title_type: Mapped[str | None] = mapped_column(String(100))
+
+    movie: Mapped["Movie"] = relationship(back_populates="alternative_titles")
+
+
 class MovieCredit(TimestampMixin, Base):
     __tablename__ = "movie_credits"
     __table_args__ = (UniqueConstraint("movie_id", "person_id", "credit_type", "job", "character", name="uq_movie_credit"),)

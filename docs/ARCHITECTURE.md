@@ -1,7 +1,12 @@
 # Architecture
 
-The FastAPI application is the source of truth for discovery, requests, operational data and the existing TMDB ingestion pipeline. PostgreSQL stores all persistent data and Redis remains the shared background-job broker/cache. The React/Vite single-page frontend is deliberately read-only apart from the public request form; it never downloads the movie catalogue to filter locally.
+The movie-only V1 has four runtime layers:
 
-`/api/v1/discover` applies query, people, language, genre, year, platform and date filters at the database. `/api/v1/home` supplies dynamic home rails. `/api/v1/people/{id}` returns role-aware filmography. Mutating enrichment and OTT actions require `X-Admin-Key`, as do operational views.
+1. React/Vite renders public and cookie-authenticated admin routes. Public route modules are code-split with `React.lazy`; API GETs share a short-lived promise cache and all artwork is lazy, responsive and failure-safe.
+2. FastAPI owns validation, discovery queries, categorized search, movie/person projections, SEO XML/text endpoints, requests and admin APIs. SQLAlchemy expressions and bound parameters are used throughout.
+3. PostgreSQL stores the existing movie catalogue plus normalized genres, languages, credits, people, releases, ratings, artwork, production records, alternative titles, canonical OTT availability and operational records.
+4. Redis is the Celery broker/result backend and rate-limit store. Celery worker and Beat execute bounded tasks. `operation_states` persists cursors, processed counts, success/failure timestamps and errors so repeated runs eventually cover the full catalogue.
 
-The additive `d4e5f6a7b8c9` migration leaves movie records and legacy TV tables untouched. It adds request, OTT-evidence, health-issue and notification-log storage.
+The legacy TV tables remain untouched but are not exposed in V1. Metadata enrichment is additive and keyed by existing movie/TMDB IDs. No task deletes or replaces the catalogue.
+
+Authentication uses a PBKDF2 password hash and an eight-hour `itsdangerous` signed, HttpOnly, SameSite=Strict session cookie. Production adds Secure and HSTS. Same-origin checks protect cookie-authenticated mutations. `ADMIN_API_KEY` remains server-side for legacy automation endpoints only.

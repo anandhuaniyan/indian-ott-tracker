@@ -1,7 +1,7 @@
 # Deployment
 
-Copy `.env.example` to `.env`, supply TMDB and strong secret/admin values, then run `docker compose up --build`. The API is on port 8000, frontend on 5173, PostgreSQL on 5433 and Redis on 6380. API startup runs only additive Alembic migrations and keeps the named PostgreSQL volume.
+Copy `.env.example` to `.env` and configure database, Redis, TMDB, strong admin/session secrets, site origins/URL and any optional integrations. Generate `ADMIN_PASSWORD_HASH` using the command shown in `.env.example`. Use HTTPS and set `ENVIRONMENT=production` to enable Secure cookies and HSTS.
 
-Set `SITE_URL` to the public HTTPS URL before indexing. Submit `/sitemap.xml` in Google Search Console and set its verification token in the frontend/deployment configuration. Configure analytics and AdSense IDs only after those accounts are approved; `ads.txt` stays empty until a publisher ID is configured.
+`docker compose up --build -d` starts PostgreSQL, Redis, API, frontend, Celery worker and Beat. pgAdmin is isolated behind the optional `tools` profile. PostgreSQL, Redis, API, frontend and worker have health checks; API waits for PostgreSQL/Redis and frontend waits for API health. PostgreSQL and media use named volumes.
 
-Admin endpoints require `X-Admin-Key`. Do not put that key in frontend configuration or client code.
+After deployment, check `docker compose ps`, `docker compose logs api worker beat`, `/health`, the frontend, admin login and sitemap. Submit the sitemap in Search Console. Credentials required for optional features are TMDB, the lawful OTT research API, Telegram, Discord, SMTP, Google Analytics/Search Console and AdSense.

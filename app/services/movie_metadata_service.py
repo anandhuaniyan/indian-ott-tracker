@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.models.movie import Movie
 from app.models.movie_metadata import (
+    AlternativeTitle,
     ExternalId,
     Keyword,
     MovieCredit,
@@ -35,6 +36,7 @@ class MovieMetadataService:
         payload = self.tmdb.get_rich_movie_details(movie.tmdb_id)
         self._update_movie_scalars(movie, payload)
         self._upsert_external_ids(movie, payload.get("external_ids", {}))
+        self._upsert_alternative_titles(movie, payload.get("alternative_titles", {}))
         self._upsert_credits(movie, payload.get("credits", {}))
         self._upsert_keywords(movie, payload.get("keywords", {}))
         self._upsert_production(movie, payload)
@@ -57,6 +59,22 @@ class MovieMetadataService:
         for field in ("tagline", "budget", "revenue", "status", "runtime", "popularity", "vote_average", "vote_count"):
             target = "runtime_minutes" if field == "runtime" else field
             self._set_if_present(movie, target, payload.get(field))
+        collection = payload.get("belongs_to_collection") or {}
+        if collection:
+            self._set_if_present(movie, "collection_tmdb_id", collection.get("id"))
+            self._set_if_present(movie, "collection_name", collection.get("name"))
+            self._set_if_present(movie, "collection_poster_path", collection.get("poster_path"))
+            self._set_if_present(movie, "collection_backdrop_path", collection.get("backdrop_path"))
+
+    def _upsert_alternative_titles(self, movie: Movie, data: dict) -> None:
+        for item in data.get("titles", []):
+            title = (item.get("title") or "").strip()
+            if not title:
+                continue
+            country = item.get("iso_3166_1") or None
+            record = self.db.query(AlternativeTitle).filter_by(movie_id=movie.id, country=country, title=title).first()
+            if not record:
+                self.db.add(AlternativeTitle(movie_id=movie.id, country=country, title=title, title_type=item.get("type") or None))
 
     def _upsert_external_ids(self, movie: Movie, data: dict) -> None:
         values = {"imdb": data.get("imdb_id"), "wikidata": data.get("wikidata_id"), "facebook": data.get("facebook_id"), "instagram": data.get("instagram_id"), "twitter": data.get("twitter_id")}

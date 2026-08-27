@@ -54,10 +54,11 @@ class PosterDownloader:
         filename = f"{movie_id}{extension}"
 
         filepath = folder / filename
+        public_path = f"/storage/posters/{source}/{filename}"
 
         if filepath.exists():
 
-            return str(filepath)
+            return public_path
 
         try:
 
@@ -84,7 +85,7 @@ class PosterDownloader:
                     response.content
                 )
 
-            return str(filepath)
+            return public_path
 
         except Exception as e:
 

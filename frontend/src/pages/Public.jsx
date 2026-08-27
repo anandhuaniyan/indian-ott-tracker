@@ -1,15 +1,115 @@
-import React, { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { get, post, imageUrl } from "../services/api";
-import { Card, Loading, Failure } from "../components/ui";
-import Seo from "../components/Seo";
-const useData = path => { const [d,setD]=useState(),[e,setE]=useState(); useEffect(()=>{setD(null);get(path).then(setD).catch(x=>setE(x.message))},[path]); return [d,e]; };
-const Rail=({title,items=[]})=><section><h2>{title}</h2><div className="rail">{items.map(x=><Card key={x.id} movie={x}/>)}</div></section>;
-export function Home(){const[d,e]=useData("/api/v1/home");if(e)return <Failure error={e}/>;if(!d)return <Loading/>;return <main><Seo title="Indian movie discovery"/><div className="hero"><p>Indian cinema, all in one place</p><h1>Find your next movie night.</h1><Link to="/discover">Explore movies</Link></div><Rail title="Trending" items={d.trending}/><Rail title="Popular" items={d.popular}/><Rail title="Latest releases" items={d.latest}/><Rail title="Coming soon" items={d.upcoming}/><Rail title="Recently added" items={d.recently_added}/></main>}
-export function Discover({preset=""}){const[q,setQ]=useState(preset),[d,setD]=useState({items:[]}),[e,setE]=useState();const search=x=>{x?.preventDefault();get(`/api/v1/discover?q=${encodeURIComponent(q)}`).then(setD).catch(y=>setE(y.message))};useEffect(()=>search(),[]);return <main><h1>Discover movies</h1><form className="search" onSubmit={search}><input aria-label="Search movies and people" value={q} onChange={x=>setQ(x.target.value)} placeholder="Movies, actors, directors, keywords…"/><button>Search</button></form>{e&&<p>{e}</p>}<p>{d.total||0} movies found</p><div className="grid">{d.items.map(x=><Card key={x.id} movie={x}/>)}</div></main>}
-export function Browse(){const {slug,code,platform}=useParams();const query=slug?`genre=${slug}`:code?`language=${code}`:platform?`platform=${encodeURIComponent(platform)}`:"";const[d,e]=useData(`/api/v1/discover?${query}`);if(e)return <Failure error={e}/>;if(!d)return <Loading/>;const title=slug?slug.replaceAll("-"," "):code?`Movies in ${code}`:platform?`${platform} movies`:"OTT releases";return <main><Seo title={title}/><h1>{title}</h1><div className="grid">{d.items.map(x=><Card key={x.id} movie={x}/>)}</div></main>}
-export function Movie(){const{id}=useParams();const[d,e]=useData(`/api/v1/movies/${id}/detail`);if(e)return <Failure error={e}/>;if(!d)return <Loading/>;const m=d.movie;return <main className="detail"><img className="poster" src={imageUrl(m.poster_path)} alt={`${m.title} poster`}/><article><p>{m.release_date} · {m.runtime_minutes||"—"} min · {m.status||""}</p><h1>{m.title}</h1>{m.tagline&&<p>{m.tagline}</p>}<p>{m.overview}</p><h2>Watch legally</h2>{d.movie.ott?.map(x=><p key={x.provider}>{x.url?<a href={x.url}>{x.provider}</a>:x.provider} · {x.release_date||"being verified"}</p>)}<h2>Cast</h2><div className="people">{d.cast.map(x=><Link key={x.person_id} to={`/people/${x.person_id}`}>{x.name}<small>{x.character}</small></Link>)}</div><h2>Crew</h2><div className="people">{d.crew.map((x,i)=><Link key={i} to={`/people/${x.person_id}`}>{x.name}<small>{x.job||x.department}</small></Link>)}</div><h2>Release information</h2>{d.releases.map((x,i)=><p key={i}>{x.country}: {x.date} · {x.type}</p>)}</article></main>}
-export function Person(){const{id}=useParams();const[d,e]=useData(`/api/v1/people/${id}`);if(e)return <Failure error={e}/>;if(!d)return <Loading/>;return <main><div className="detail"><img className="poster" src={imageUrl(d.profile_path)} alt={`${d.name} profile`}/><article><h1>{d.name}</h1><p>{d.department||"Film professional"}</p></article></div><h2>Filmography</h2><div className="grid">{d.filmography.map((x,i)=><div key={i}><Card movie={x.movie}/><small>{x.role}</small></div>)}</div></main>}
-export function Calendar(){const{period}=useParams();const[d,e]=useData(`/api/v1/calendar/${period}`);if(e)return <Failure error={e}/>;if(!d)return <Loading/>;return <main><h1>{period.replaceAll("-"," ")}</h1><div className="grid">{d.items.map(x=><Card key={x.id} movie={x}/>)}</div></main>}
-export function Request(){const[r,setR]=useState();const submit=e=>{e.preventDefault();post("/api/v1/movie-requests",Object.fromEntries(new FormData(e.target))).then(setR).catch(x=>setR({error:x.message}))};return <main><h1>Request a movie</h1><form className="request" onSubmit={submit}><input name="movie_name" required placeholder="Movie name"/><input name="email" type="email" required placeholder="Email"/><input name="release_year" type="number" placeholder="Release year"/><input name="language" placeholder="Language"/><textarea name="details" placeholder="Details"/><button>Submit request</button></form>{r&&<p>{r.error||`Request ${r.request_id} is ${r.status.toLowerCase()}.`}</p>}</main>}
-export function Legal({title,children}){return <main><h1>{title}</h1><p>{children}</p></main>}
+import React, { useEffect, useMemo, useState } from "react";
+import { Link, useLocation, useParams } from "react-router-dom";
+import { get, imageUrl, post } from "../services/api";
+import { Card, Failure, Loading } from "../components/ui";
+import Seo, { breadcrumbJsonLd } from "../components/Seo";
+import AdSlot from "../components/AdSlot";
+
+const LANGUAGE_NAMES = { ml: "Malayalam", ta: "Tamil", te: "Telugu", hi: "Hindi", kn: "Kannada" };
+const SORTS = [["latest", "Latest"], ["oldest", "Oldest"], ["highest-rated", "Highest rated"], ["popularity", "Popularity"], ["recently-added", "Recently added"], ["ott-release", "OTT release date"], ["name-asc", "Name A–Z"], ["name-desc", "Name Z–A"]];
+
+const useData = path => {
+  const [data, setData] = useState();
+  const [error, setError] = useState();
+  useEffect(() => {
+    let current = true;
+    setData(undefined); setError(undefined);
+    get(path).then(value => current && setData(value)).catch(reason => current && setError(reason.message));
+    return () => { current = false; };
+  }, [path]);
+  return [data, error];
+};
+
+const Rail = ({ title, items = [], more }) => items.length ? <section><div className="section-title"><h2>{title}</h2>{more && <Link to={more}>View all</Link>}</div><div className="rail">{items.map(movie => <Card key={movie.id} movie={movie} />)}</div></section> : null;
+const Art = ({ path, alt, className = "", size = "w500" }) => <img className={className} loading="lazy" decoding="async" src={imageUrl(path, size)} srcSet={path ? `${imageUrl(path, "w342")} 342w, ${imageUrl(path, "w500")} 500w, ${imageUrl(path, "w780")} 780w` : undefined} sizes="(max-width: 640px) 90vw, 500px" alt={alt} onError={event => { event.currentTarget.onerror = null; event.currentTarget.src = "/placeholder.svg"; }} />;
+const Empty = ({ children = "No movies match these filters yet." }) => <p className="empty">{children}</p>;
+
+function Pager({ page, pages, onPage }) {
+  if (!pages || pages < 2) return null;
+  return <nav className="pager" aria-label="Pagination"><button disabled={page <= 1} onClick={() => onPage(page - 1)}>Previous</button><span>Page {page} of {pages}</span><button disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</button></nav>;
+}
+
+export function Home() {
+  const [data, error] = useData("/api/v1/home");
+  if (error) return <Failure error={error} />;
+  if (!data) return <Loading />;
+  const website = { "@context": "https://schema.org", "@type": "WebSite", name: "Indian OTT Tracker", url: import.meta.env.VITE_SITE_URL || location.origin, potentialAction: { "@type": "SearchAction", target: `${import.meta.env.VITE_SITE_URL || location.origin}/search?q={search_term_string}`, "query-input": "required name=search_term_string" } };
+  return <main><Seo title="Indian OTT Tracker" jsonLd={website} /><div className="hero"><p>Indian cinema, all in one place</p><h1>Find your next movie night.</h1><Link to="/discover">Explore movies</Link></div><Rail title="Trending" items={data.trending} more="/discover?sort=popularity"/><Rail title="Popular" items={data.popular} more="/discover?sort=highest-rated"/><Rail title="Latest theatrical" items={data.latest_theatrical}/><Rail title="Upcoming theatrical" items={data.upcoming_theatrical}/><Rail title="Recently added" items={data.recently_added}/><AdSlot slot={import.meta.env.VITE_ADSENSE_SLOT_ID}/><Rail title="Upcoming OTT" items={data.upcoming_ott} more="/ott"/><Rail title="Recently released on OTT" items={data.recent_ott} more="/ott"/>{Object.entries(data.language_sections || {}).map(([code, section]) => <Rail key={code} title={section.name} items={section.items} more={`/languages/${code}`}/>)}<section><h2>Browse genres</h2><div className="chips">{data.genres.map(item => <Link key={item.slug} to={`/genres/${item.slug}`}>{item.name}</Link>)}</div></section><section><h2>OTT platforms</h2><div className="platforms">{data.platforms.map(item => <Link key={item.slug} to={`/ott/${item.slug}`}>{item.logo && <Art path={item.logo} alt=""/>}<strong>{item.name}</strong><small>{item.movie_count} movies</small></Link>)}</div></section></main>;
+}
+
+const initialFilters = { q: "", language: "", genre: "", year: "", rating: "", certification: "", release_status: "", platform: "", actor: "", director: "", writer: "", cinematographer: "", producer: "", editor: "", composer: "", date_from: "", date_to: "", sort: "latest" };
+
+export function Discover() {
+  const location = useLocation();
+  const isSearch = location.pathname === "/search";
+  const initial = useMemo(() => ({ ...initialFilters, ...Object.fromEntries(new URLSearchParams(location.search)) }), [location.search]);
+  const [filters, setFilters] = useState(initial);
+  const [query, setQuery] = useState(new URLSearchParams(Object.entries(initial).filter(([, value]) => value)).toString());
+  const [page, setPage] = useState(Number(new URLSearchParams(location.search).get("page")) || 1);
+  const endpoint = isSearch ? `/api/v1/search?q=${encodeURIComponent(filters.q || initial.q || "")}&page=${page}` : `/api/v1/discover?${query}&page=${page}`;
+  const [data, error] = useData(endpoint);
+  const submit = event => { event.preventDefault(); setPage(1); setQuery(new URLSearchParams(Object.entries(filters).filter(([, value]) => value)).toString()); };
+  const set = event => setFilters(value => ({ ...value, [event.target.name]: event.target.value }));
+  const movies = isSearch ? data?.movies?.items || [] : data?.items || [];
+  const total = isSearch ? data?.movies?.total || 0 : data?.total || 0;
+  return <main><Seo title={isSearch ? "Search" : "Discover movies"}/><h1>{isSearch ? "Search movies and people" : "Discover movies"}</h1><form className="filters" onSubmit={submit}><label className="wide">Search<input name="q" value={filters.q} onChange={set} placeholder="Title, actor, director, writer or keyword"/></label>{!isSearch && <><label>Language<select name="language" value={filters.language} onChange={set}><option value="">All</option>{Object.entries(LANGUAGE_NAMES).map(([code, name]) => <option key={code} value={code}>{name}</option>)}</select></label><label>Genre<input name="genre" value={filters.genre} onChange={set} placeholder="e.g. drama"/></label><label>Year<input name="year" type="number" value={filters.year} onChange={set}/></label><label>Minimum rating<input name="rating" type="number" min="0" max="10" step="0.5" value={filters.rating} onChange={set}/></label><label>Certification<input name="certification" value={filters.certification} onChange={set}/></label><label>Status<input name="release_status" value={filters.release_status} onChange={set} placeholder="Released"/></label><label>OTT platform<input name="platform" value={filters.platform} onChange={set}/></label>{["actor", "director", "writer", "cinematographer", "producer", "editor", "composer"].map(name => <label key={name}>{name}<input name={name} value={filters[name]} onChange={set}/></label>)}<label>From<input name="date_from" type="date" value={filters.date_from} onChange={set}/></label><label>To<input name="date_to" type="date" value={filters.date_to} onChange={set}/></label><label>Sort<select name="sort" value={filters.sort} onChange={set}>{SORTS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label></>}<button className="wide">Apply</button></form>{error && <p role="alert">{error}</p>}{!data ? <Loading/> : <><h2>Movies <small>({total})</small></h2>{movies.length ? <div className="grid">{movies.map(movie => <Card key={movie.id} movie={movie}/>)}</div> : <Empty/>}{isSearch && <><h2>People <small>({data.people.total})</small></h2><div className="person-results">{data.people.items.map(person => <Link key={person.id} to={`/people/${person.id}`}><Art path={person.profile_path} alt=""/><span><strong>{person.name}</strong><small>{person.department}</small></span></Link>)}</div></>}<Pager page={page} pages={isSearch ? Math.max(Math.ceil(total / data.page_size), Math.ceil(data.people.total / data.page_size)) : data.pages} onPage={setPage}/></>}</main>;
+}
+
+export function Browse() {
+  const { slug, code } = useParams();
+  const [sort, setSort] = useState("latest");
+  const [page, setPage] = useState(1);
+  const query = slug ? `genre=${slug}` : `language=${code}`;
+  const [data, error] = useData(`/api/v1/discover?${query}&sort=${sort}&page=${page}`);
+  if (error) return <Failure error={error}/>;
+  const title = slug ? `${slug.replaceAll("-", " ")} movies` : `${LANGUAGE_NAMES[code] || code} movies`;
+  return <main><Seo title={title} jsonLd={breadcrumbJsonLd([{ name: "Home", path: "/" }, { name: title, path: location.pathname }])}/><h1 className="capitalize">{title}</h1><label>Sort <select value={sort} onChange={event => { setSort(event.target.value); setPage(1); }}>{SORTS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>{!data ? <Loading/> : <><p>{data.total} movies</p>{data.items.length ? <div className="grid">{data.items.map(movie => <Card key={movie.id} movie={movie}/>)}</div> : <Empty/>}<Pager page={page} pages={data.pages} onPage={setPage}/></>}</main>;
+}
+
+export function Ott() {
+  const [data, error] = useData("/api/v1/ott");
+  if (error) return <Failure error={error}/>;
+  if (!data) return <Loading/>;
+  return <main><Seo title="OTT releases" jsonLd={breadcrumbJsonLd([{ name: "Home", path: "/" }, { name: "OTT", path: "/ott" }])}/><h1>OTT releases</h1><p>Confirmed and currently available streaming information from canonical records.</p><div className="platforms">{data.platforms.map(item => <Link key={item.slug} to={`/ott/${item.slug}`}>{item.logo && <Art path={item.logo} alt=""/>}<strong>{item.name}</strong><small>{item.movie_count} movies</small></Link>)}</div><Rail title="Upcoming OTT releases" items={data.upcoming}/><Rail title="Recently released on OTT" items={data.recent}/><Rail title="Confirmed releases" items={data.confirmed}/></main>;
+}
+
+export function OttPlatform() {
+  const { platform } = useParams(); const [sort, setSort] = useState("ott-release"); const [page, setPage] = useState(1);
+  const [data, error] = useData(`/api/v1/ott/${platform}?sort=${sort}&page=${page}`);
+  if (error) return <Failure error={error}/>; if (!data) return <Loading/>;
+  return <main><Seo title={`${data.platform} movies`} jsonLd={breadcrumbJsonLd([{ name: "Home", path: "/" }, { name: "OTT", path: "/ott" }, { name: data.platform, path: location.pathname }])}/><h1>{data.platform}</h1><Rail title="Upcoming" items={data.upcoming}/><Rail title="Recently released" items={data.recent}/><div className="section-title"><h2>Available</h2><select value={sort} onChange={event => setSort(event.target.value)}>{SORTS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></div>{data.available.length ? <div className="grid">{data.available.map(movie => <Card key={movie.id} movie={movie}/>)}</div> : <Empty/>}<Pager page={page} pages={data.pages} onPage={setPage}/></main>;
+}
+
+const Values = ({ title, children }) => children && React.Children.count(children) ? <section><h2>{title}</h2>{children}</section> : null;
+
+export function Movie() {
+  const { id } = useParams(); const [data, error] = useData(`/api/v1/movies/${id}/detail`);
+  if (error) return <Failure error={error}/>; if (!data) return <Loading/>;
+  const movie = data.movie;
+  const images = type => data.images.filter(item => item.type.toLowerCase().includes(type));
+  const logo = images("logo")[0];
+  const movieLd = { "@context": "https://schema.org", "@type": "Movie", name: movie.title, ...(movie.original_title && { alternateName: movie.original_title }), ...(movie.overview && { description: movie.overview }), ...(movie.release_date && { dateCreated: movie.release_date }), ...(movie.poster_path && { image: imageUrl(movie.poster_path, "original") }), ...(movie.runtime_minutes && { duration: `PT${movie.runtime_minutes}M` }), ...(movie.rating != null && { aggregateRating: { "@type": "AggregateRating", ratingValue: movie.rating, ratingCount: movie.vote_count || 0, bestRating: 10 } }), ...(data.cast.length && { actor: data.cast.map(item => ({ "@type": "Person", name: item.name })) }), ...(data.crew_by_role.director?.length && { director: data.crew_by_role.director.map(item => ({ "@type": "Person", name: item.name })) }) };
+  return <main><Seo title={movie.title} description={movie.overview || `Details and OTT availability for ${movie.title}.`} image={imageUrl(movie.backdrop_path || movie.poster_path, "original")} type="video.movie" jsonLd={[movieLd, breadcrumbJsonLd([{ name: "Home", path: "/" }, { name: "Movies", path: "/discover" }, { name: movie.title, path: location.pathname }])]}/>{movie.backdrop_path && <Art className="hero-backdrop" path={movie.backdrop_path} size="original" alt={`${movie.title} backdrop`}/>}<div className="detail movie-detail"><Art className="poster" path={movie.poster_path} alt={`${movie.title} poster`}/><article>{logo && <Art className="title-logo" path={logo.url} alt={`${movie.title} logo`}/>}<p>{[movie.release_date, movie.runtime_minutes && `${movie.runtime_minutes} min`, movie.status, movie.certification].filter(Boolean).join(" · ")}</p><h1>{movie.title}</h1>{movie.original_title && movie.original_title !== movie.title && <p>Original title: {movie.original_title}</p>}{data.alternative_titles.length > 0 && <p>Also known as: {data.alternative_titles.map(item => item.title).join(", ")}</p>}{movie.tagline && <blockquote>{movie.tagline}</blockquote>}{movie.overview && <p>{movie.overview}</p>}<div className="facts">{movie.rating != null && <span>TMDB ★ {movie.rating.toFixed(1)} ({movie.vote_count || 0} votes)</span>}{movie.original_language && <span>Original language: {movie.original_language}</span>}{movie.spoken_languages.length > 0 && <span>Spoken: {movie.spoken_languages.map(x => x.name).join(", ")}</span>}{movie.production_countries.length > 0 && <span>Countries: {movie.production_countries.map(x => x.name).join(", ")}</span>}{movie.collection && <span>Collection: {movie.collection.name}</span>}{movie.budget > 0 && <span>Budget: ${movie.budget.toLocaleString()}</span>}{movie.revenue > 0 && <span>Revenue: ${movie.revenue.toLocaleString()}</span>}</div></article></div><Values title="Watch legally">{movie.ott.map((item, index) => <article className="ott-row" key={`${item.provider}-${index}`}>{item.logo && <Art path={item.logo} alt=""/>}<div><strong>{item.provider}</strong><p>{[item.watch_type, item.release_date, item.country, item.verification_state, item.confidence != null && `${item.confidence}% confidence`].filter(Boolean).join(" · ")}</p>{item.source_url && <a href={item.source_url} rel="nofollow noreferrer">View source ({item.source})</a>}</div></article>)}</Values><Values title="Ratings">{data.ratings.map((item, index) => <p key={`${item.source}-${index}`}><strong>{item.source}</strong>: {item.rating ?? "—"}{item.votes != null && ` (${item.votes} votes)`}</p>)}</Values><Values title="Cast"><div className="people">{data.cast.map(item => <Link key={`${item.person_id}-${item.order}`} to={`/people/${item.person_id}`}>{item.name}<small>{item.character}</small></Link>)}</div></Values><Values title="Crew"><div className="people">{data.crew.map((item, index) => <Link key={`${item.person_id}-${index}`} to={`/people/${item.person_id}`}>{item.name}<small>{item.job || item.department}</small></Link>)}</div></Values>{["poster", "backdrop", "logo"].map(type => images(type).length ? <Values key={type} title={`${type[0].toUpperCase()}${type.slice(1)} gallery`}><div className={`image-gallery ${type}`}>{images(type).map((item, index) => <Art key={`${item.url}-${index}`} path={item.url} alt={`${movie.title} ${type} ${index + 1}`}/>)}</div></Values> : null)}<Values title="Release information">{data.releases.map((item, index) => <p key={index}>{item.country}: {item.date} · {item.type}{item.certification && ` · ${item.certification}`}{item.note && ` · ${item.note}`}</p>)}</Values><Values title="Production companies"><div className="chips">{movie.production_companies.map(item => <span key={item.name}>{item.name}</span>)}</div></Values><Values title="Keywords"><div className="chips">{data.keywords.map(item => <span key={item}>{item}</span>)}</div></Values><Values title="External IDs">{data.external_ids.map(item => <p key={item.provider}><strong>{item.provider}</strong>: {item.url ? <a href={item.url} rel="noreferrer">{item.id}</a> : item.id}</p>)}</Values><AdSlot slot={import.meta.env.VITE_ADSENSE_SLOT_ID}/></main>;
+}
+
+export function Person() {
+  const { id } = useParams(); const [sort, setSort] = useState("newest"); const [creditType, setCreditType] = useState("all"); const [role, setRole] = useState("");
+  const [data, error] = useData(`/api/v1/people/${id}?sort=${sort}&credit_type=${creditType}&role=${encodeURIComponent(role)}`);
+  if (error) return <Failure error={error}/>; if (!data) return <Loading/>;
+  const personLd = { "@context": "https://schema.org", "@type": "Person", name: data.name, ...(data.profile_path && { image: imageUrl(data.profile_path, "original") }), ...(data.department && { jobTitle: data.department }) };
+  return <main><Seo title={data.name} description={`${data.name} filmography and movie credits.`} image={imageUrl(data.profile_path, "original")} jsonLd={[personLd, breadcrumbJsonLd([{ name: "Home", path: "/" }, { name: data.name, path: location.pathname }])]}/><div className="detail"><Art className="poster profile" path={data.profile_path} alt={`${data.name} profile`}/><article><h1>{data.name}</h1><p>{data.department || "Film professional"}</p></article></div><div className="toolbar"><label>Order<select value={sort} onChange={event => setSort(event.target.value)}><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select></label><label>Credits<select value={creditType} onChange={event => setCreditType(event.target.value)}><option value="all">Cast and crew</option><option value="cast">Cast only</option><option value="crew">Crew only</option></select></label><label>Role<select value={role} onChange={event => setRole(event.target.value)}><option value="">All roles</option>{data.roles.map(item => <option key={item} value={item}>{item}</option>)}</select></label></div><h2>Filmography</h2>{data.filmography.length ? <div className="grid">{data.filmography.map((item, index) => <div key={`${item.movie.id}-${index}`}><Card movie={item.movie}/><small>{item.character || item.job || item.department || item.credit_type}</small></div>)}</div> : <Empty>No credits match this filter.</Empty>}</main>;
+}
+
+export function Calendar() {
+  const { period } = useParams(); const [data, error] = useData(`/api/v1/calendar/${period}`);
+  if (error) return <Failure error={error}/>; if (!data) return <Loading/>;
+  const periods = ["previous-week", "this-week", "next-week", "previous-month", "this-month", "next-month"];
+  return <main><Seo title={`${period.replaceAll("-", " ")} movie calendar`}/><h1 className="capitalize">{period.replaceAll("-", " ")}</h1><p>{data.start} to {data.end}</p><nav className="chips">{periods.map(item => <Link className={item === period ? "active" : ""} key={item} to={`/calendar/${item}`}>{item.replaceAll("-", " ")}</Link>)}</nav>{data.items.length ? <div className="grid">{data.items.map(movie => <Card key={movie.id} movie={movie}/>)}</div> : <Empty>No releases are recorded in this period.</Empty>}</main>;
+}
+
+export function Request() {
+  const [result, setResult] = useState(); const submit = event => { event.preventDefault(); const body = Object.fromEntries(new FormData(event.target)); if (body.release_year) body.release_year = Number(body.release_year); post("/api/v1/movie-requests", body).then(setResult).catch(error => setResult({ error: error.message })); };
+  return <main><Seo title="Request a movie"/><h1>Request a movie</h1><p>Tell us about a missing movie. Your email is used only to process this request.</p><form className="request" onSubmit={submit}><input name="movie_name" required maxLength="500" placeholder="Movie name"/><input name="email" type="email" required maxLength="320" placeholder="Email"/><input name="release_year" type="number" min="1888" max="2100" placeholder="Release year"/><input name="language" maxLength="20" placeholder="Language"/><textarea name="details" maxLength="2000" placeholder="Any details that help identify it"/><button>Submit request</button></form>{result && <p role="status">{result.error || `Request ${result.request_id} is ${result.status.toLowerCase()}.`}</p>}</main>;
+}
+
+export function Legal({ title, children }) { return <main className="legal"><Seo title={title}/><h1>{title}</h1>{children}</main>; }

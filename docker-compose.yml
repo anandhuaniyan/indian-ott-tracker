@@ -29,6 +29,7 @@ services:
     image: dpage/pgadmin4
     container_name: indian_ott_pgadmin
     restart: unless-stopped
+    profiles: ["tools"]
 
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@otttracker.com
@@ -87,24 +88,36 @@ services:
 
     networks:
       - indian_ott_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    environment:
-      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+        VITE_SITE_URL: ${VITE_SITE_URL:-http://localhost:5173}
+        VITE_SITE_CONTACT_EMAIL: ${SITE_CONTACT_EMAIL:-}
+        VITE_GA_MEASUREMENT_ID: ${VITE_GA_MEASUREMENT_ID:-}
+        VITE_ADSENSE_CLIENT_ID: ${VITE_ADSENSE_CLIENT_ID:-}
+        VITE_ADSENSE_SLOT_ID: ${VITE_ADSENSE_SLOT_ID:-}
+        VITE_GOOGLE_SITE_VERIFICATION: ${GOOGLE_SITE_VERIFICATION:-}
     ports:
       - "5173:80"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     networks:
       - indian_ott_network
 
   worker:
     build: .
     env_file: .env
-    command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
+    command: sh -c "mkdir -p /app/media && chmod -R a+rwX /app/media && exec celery -A app.workers.celery_app.celery_app worker --loglevel=INFO --uid=nobody --gid=nogroup"
     restart: unless-stopped
     depends_on:
       postgres:
@@ -115,17 +128,27 @@ services:
       - ott_media_data:/app/media
     networks:
       - indian_ott_network
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.workers.celery_app.celery_app inspect ping --timeout 5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   beat:
     build: .
     env_file: .env
-    command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
+    command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO --uid=nobody --gid=nogroup --schedule=/tmp/celerybeat-schedule
     restart: unless-stopped
     depends_on:
       redis:
         condition: service_healthy
     networks:
       - indian_ott_network
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/celerybeat-schedule"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
 
 
 networks:
