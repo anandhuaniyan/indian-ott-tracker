@@ -11,6 +11,9 @@ class Settings(BaseSettings):
 
     TMDB_API_KEY: str = ""
     TMDB_ACCESS_TOKEN: str = ""
+    IMDB_RATING_PROVIDER: str = ""
+    IMDB_RATING_API_URL: str = ""
+    IMDB_RATING_API_KEY: str = ""
 
     SECRET_KEY: str = "change-me-in-production"
 

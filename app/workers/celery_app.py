@@ -9,6 +9,7 @@ celery_app.conf.update(
     beat_schedule={
         "tmdb-incremental-sync": {"task": "tmdb.incremental_sync", "schedule": 86400},
         "metadata-enrichment": {"task": "tmdb.metadata_enrichment", "schedule": 900},
+        "imdb-rating-refresh": {"task": "ratings.imdb_refresh", "schedule": 21600},
         "data-health": {"task": "operations.data_health", "schedule": 900},
         "image-health": {"task": "operations.image_health", "schedule": 21600},
         "image-recovery": {"task": "operations.image_recovery", "schedule": 3600},

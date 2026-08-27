@@ -4,7 +4,9 @@ Indian OTT Tracker is a movie-only discovery application for Indian cinema. The 
 
 ## Public experience
 
-The frontend implements home, discover, categorized search, genre, language, OTT landing/platform, movie, person, six calendar periods, movie request and legal routes. Discovery combines language, genre, year, rating, certification, release status, platform, normalized people roles and custom dates, with eight sorts. Movie pages render only stored values: artwork galleries, releases, ratings, OTT verification facts, credits, keywords, production information, collection and external IDs.
+The frontend implements home, discover, categorized search, genre, language, OTT landing/platform, movie, person, six calendar periods, movie request and legal routes. Every calendar period has separate theatrical and confirmed canonical OTT tabs. Discovery combines language, genre, year, IMDb rating, certification, release status, platform, normalized people roles and custom dates, with eight sorts. Movie pages render only stored values: artwork galleries, releases, ratings, OTT verification facts, credits with profile images, keywords, production information, collection and external IDs. Public pages never expose raw TMDB IDs; TMDB identity remains internal for synchronization and enrichment.
+
+IMDb is the primary public rating. Ratings are never copied from TMDB or fabricated. Configure an approved OMDb API account with `IMDB_RATING_PROVIDER=omdb`, `IMDB_RATING_API_URL` and `IMDB_RATING_API_KEY` to enable bounded background refreshes. The stored IMDb external ID is the provider lookup key; the existing `movie_ratings` record stores the returned score, vote count and check time.
 
 ## Local Windows setup
 

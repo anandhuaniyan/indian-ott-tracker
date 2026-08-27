@@ -43,6 +43,12 @@ def metadata_enrichment():
         return {"processed": len(movies), "cursor": state.cursor, "cycle_complete": False}
     return _run(run)
 
+
+@celery_app.task(name="ratings.imdb_refresh", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def imdb_rating_refresh():
+    from app.services.rating_provider import IMDbRatingRefreshService
+    return _run(lambda db: IMDbRatingRefreshService(db).refresh())
+
 @celery_app.task(name="operations.ott_verification", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
 def ott_verification():
     def run(db):
