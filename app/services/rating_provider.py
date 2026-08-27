@@ -18,6 +18,14 @@ from app.models.operations import OperationState
 IMDB_ID = re.compile(r"tt\d{7,10}")
 
 
+class ProviderRateLimited(RuntimeError):
+    """Provider asked the caller to stop the current batch and resume later."""
+
+
+class ProviderQuotaExhausted(RuntimeError):
+    """Provider account has no remaining quota for the current period."""
+
+
 @dataclass(frozen=True)
 class RatingResult:
     rating: float | None
@@ -53,8 +61,14 @@ class OmdbRatingProvider(MovieRatingProvider):
             timeout=self.timeout,
             follow_redirects=True,
         )
+        if getattr(response, "status_code", 200) == 429:
+            raise ProviderRateLimited("OMDb rate limit reached")
         response.raise_for_status()
         payload = response.json()
+        if str(payload.get("Response", "True")).lower() == "false" and any(
+            phrase in str(payload.get("Error", "")).lower() for phrase in ("limit", "quota", "too many")
+        ):
+            raise ProviderQuotaExhausted(str(payload.get("Error"))[:300])
         checked_at = datetime.now(timezone.utc)
         if str(payload.get("Response", "True")).lower() == "false":
             return RatingResult(None, None, imdb_id, checked_at)

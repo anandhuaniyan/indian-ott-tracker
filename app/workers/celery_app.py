@@ -1,6 +1,12 @@
 from celery import Celery
 from celery.signals import task_failure, task_success
+import logging
 from app.config.settings import settings
+
+# httpx's INFO message includes complete request URLs. Provider credentials may
+# be query parameters, so only warnings/errors are allowed into worker logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 celery_app = Celery("indian_ott_tracker", broker=settings.REDIS_URL, backend=settings.REDIS_URL, include=["app.workers.tasks"])
 celery_app.conf.update(

@@ -113,7 +113,8 @@ class ImageFallbackService:
             if recovered:
                 break
         if not recovered and image_type == "poster":
-            recovered = self.poster_service.fetch(movie.tmdb_id, movie.poster_path)
+            tmdb_path = movie.poster_path if movie.poster_path and movie.poster_path.startswith("/") and not movie.poster_path.startswith(("/media/", "/storage/")) else None
+            recovered = self.poster_service.fetch(movie.tmdb_id, tmdb_path)
             if recovered and self.validate(recovered) != "HEALTHY":
                 recovered = None
         if recovered:

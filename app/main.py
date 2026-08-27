@@ -2,6 +2,7 @@ from fastapi import FastAPI, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+import logging
 from xml.sax.saxutils import escape
 
 from app.api.movies import router as movie_router
@@ -10,6 +11,9 @@ from app.api.v1.operations import router as operations_router
 from app.api.v1.admin import router as admin_router
 from app.database.connection import get_db
 from app.config.settings import settings
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 frontend_origins = [origin.strip().rstrip("/") for origin in settings.FRONTEND_ORIGINS.split(",") if origin.strip()]

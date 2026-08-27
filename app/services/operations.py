@@ -62,13 +62,20 @@ class OttResearchService:
     """Queue/evidence policy. Retrieval is delegated to configured lawful providers."""
     def __init__(self, db: Session, confirmation_threshold=85.0): self.db, self.threshold = db, confirmation_threshold
     def queue_missing(self, batch_size=100):
-        movies = self.db.query(Movie).outerjoin(OttAvailability).filter(OttAvailability.id.is_(None)).limit(batch_size).all()
+        movies = self.db.query(Movie).outerjoin(OttAvailability).group_by(Movie.id).having(
+            (func.count(OttAvailability.id) == 0) | (func.count(OttAvailability.ott_release_date) < func.count(OttAvailability.id))
+        ).limit(batch_size).all()
         now = datetime.now(timezone.utc); added = 0
         for movie in movies:
-            active = self.db.query(OttEvidence).filter(OttEvidence.movie_id == movie.id, OttEvidence.status.in_(OPEN)).first()
-            if not active:
-                self.db.add(OttEvidence(movie_id=movie.id, status="QUEUED", next_check=now)); added += 1
+            added += int(self.queue_movie(movie.id, now=now))
         self.db.commit(); return added
+    def queue_movie(self, movie_id: int, *, now=None):
+        now = now or datetime.now(timezone.utc)
+        active = self.db.query(OttEvidence).filter(OttEvidence.movie_id == movie_id, OttEvidence.status.in_(OPEN)).first()
+        if active:
+            return False
+        self.db.add(OttEvidence(movie_id=movie_id, status="QUEUED", next_check=now))
+        return True
     @staticmethod
     def next_check_for(status: str, release_date=None, attempts=0):
         now = datetime.now(timezone.utc)

@@ -43,10 +43,14 @@ class TMDbClient:
                 response.raise_for_status()
                 return response.json()
             except (httpx.HTTPStatusError, httpx.RequestError) as e:
+                status = e.response.status_code if isinstance(e, httpx.HTTPStatusError) else None
+                if status is not None and 400 <= status < 500 and status != 429:
+                    print(f"[TMDB_CLIENT] GET {endpoint} rejected with HTTP {status}; not retrying")
+                    raise
                 if attempt >= self.max_retries:
-                    print(f"[TMDB_CLIENT] Request failed after {self.max_retries} attempts: GET {endpoint} -> {e}")
+                    print(f"[TMDB_CLIENT] GET {endpoint} failed after {self.max_retries} attempts ({type(e).__name__})")
                     raise e
-                print(f"[TMDB_CLIENT] Warning GET {endpoint} error: {e}. Retrying in {backoff:.1f}s...")
+                print(f"[TMDB_CLIENT] GET {endpoint} failed ({type(e).__name__}); retrying in {backoff:.1f}s")
                 time.sleep(backoff)
                 backoff *= 2.0
 

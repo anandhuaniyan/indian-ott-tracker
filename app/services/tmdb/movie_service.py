@@ -26,7 +26,14 @@ class TMDbMovieService:
         """Fetch the movie payload required by the metadata enrichment service."""
         return self.client.get(
             f"/movie/{movie_id}",
-            append_to_response="credits,external_ids,images,keywords,release_dates,alternative_titles",
+            append_to_response="credits,external_ids,images,keywords,release_dates,alternative_titles,watch/providers",
+        )
+
+    def get_person_details(self, person_id: int) -> dict:
+        """Fetch practical person metadata and lawful external identifiers."""
+        return self.client.get(
+            f"/person/{person_id}",
+            append_to_response="external_ids,images",
         )
 
     def search_movie(self, query: str) -> dict:

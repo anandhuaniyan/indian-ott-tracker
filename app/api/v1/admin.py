@@ -1,6 +1,6 @@
 """Cookie-authenticated operational administration API."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -12,14 +12,19 @@ from app.core.rate_limit import limit
 from app.core.session_auth import COOKIE, create_session, require_admin_session, require_same_origin, verify_password
 from app.database.connection import get_db
 from app.models.movie import Movie
-from app.models.movie_metadata import Person
-from app.models.operations import DataQualityIssue, MovieRequest, NotificationLog, OperationState, OttEvidence
+from app.models.movie_metadata import ExternalId, MovieCredit, MovieRating, Person
+from app.models.operations import BackfillRecord, DataQualityIssue, MovieRequest, NotificationLog, OperationState, OttEvidence
 from app.models.ott_availability import OttAvailability
 from app.services.image_fallback import ImageFallbackService
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 REQUEST_STATUSES = {"PENDING", "REVIEWING", "FOUND", "ADDED", "REJECTED"}
 OTT_STATUSES = {"UNKNOWN", "QUEUED", "RESEARCHING", "POSSIBLE", "CONFIRMED", "CONFLICTING", "NOT_FOUND", "NEEDS_REVIEW", "FAILED"}
+BACKFILL_TASKS = {
+    "metadata": "tmdb.metadata_backfill", "people": "tmdb.person_backfill",
+    "images": "operations.image_backfill", "imdb": "ratings.imdb_backfill",
+    "ott": "operations.ott_backfill", "all": "operations.repair_orchestrator",
+}
 
 
 class Login(BaseModel):
@@ -169,7 +174,74 @@ def ott_action(evidence_id: int, payload: OttAction, db: Session = Depends(get_d
 
 @router.get("/jobs")
 def jobs(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
-    return [{"task": item.name, "last_success": item.last_success_at, "last_failure": item.last_failure_at, "last_error": item.last_error, "cursor": item.cursor, "processed_count": item.processed_count, "progress": "cycle restarts after the final row"} for item in db.query(OperationState).order_by(OperationState.name)]
+    return [{"task": item.name, "status": item.status, "last_success": item.last_success_at, "last_failure": item.last_failure_at, "last_error": item.last_error, "cursor": item.cursor, "processed_count": item.processed_count, "total_count": item.total_count, "completed_at": item.completed_at, "remaining": max(0, item.total_count - item.processed_count) if item.total_count else None, "progress": "complete" if item.status == "COMPLETE" else "resumable"} for item in db.query(OperationState).order_by(OperationState.name)]
+
+
+@router.get("/backfills")
+def backfills(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    states = {item.name: item for item in db.query(OperationState).all()}
+    operations = ("tmdb.metadata_backfill", "tmdb.person_backfill", "operations.image_backfill", "ratings.imdb_backfill", "operations.ott_backfill", "operations.repair_orchestrator")
+    progress = []
+    for name in operations:
+        state = states.get(name)
+        failures = db.query(BackfillRecord).filter_by(operation=name, status="FAILED").count()
+        progress.append({
+            "operation": name, "status": state.status if state else "IDLE", "cursor": state.cursor if state else 0,
+            "processed": state.processed_count if state else 0, "total": state.total_count if state else 0,
+            "remaining": max(0, state.total_count - state.processed_count) if state and state.total_count else None,
+            "failed": failures, "last_success": state.last_success_at if state else None,
+            "last_failure": state.last_failure_at if state else None, "last_error": state.last_error if state else None,
+            "completed_at": state.completed_at if state else None,
+        })
+    total_movies = db.query(Movie).count(); total_people = db.query(Person).count()
+    return {
+        "progress": progress,
+        "coverage": {
+            "movies": total_movies,
+            "movies_with_cast": db.query(func.count(func.distinct(MovieCredit.movie_id))).filter(MovieCredit.credit_type == "cast").scalar() or 0,
+            "movies_with_crew": db.query(func.count(func.distinct(MovieCredit.movie_id))).filter(MovieCredit.credit_type == "crew").scalar() or 0,
+            "movies_with_posters": db.query(Movie).filter(Movie.poster_path.is_not(None), Movie.poster_path != "").count(),
+            "movies_with_backdrops": db.query(Movie).filter(Movie.backdrop_path.is_not(None), Movie.backdrop_path != "").count(),
+            "people": total_people,
+            "people_with_profiles": db.query(Person).filter(Person.profile_path.is_not(None), Person.profile_path != "").count(),
+            "movies_with_imdb_id": db.query(func.count(func.distinct(ExternalId.movie_id))).filter(func.lower(ExternalId.provider) == "imdb").scalar() or 0,
+            "movies_with_imdb_rating": db.query(func.count(func.distinct(MovieRating.movie_id))).filter(func.lower(MovieRating.source) == "imdb").scalar() or 0,
+            "movies_with_ott": db.query(func.count(func.distinct(OttAvailability.movie_id))).scalar() or 0,
+            "movies_with_ott_date": db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.ott_release_date.is_not(None)).scalar() or 0,
+            "ott_queued": db.query(OttEvidence).filter(OttEvidence.status.in_(["UNKNOWN", "QUEUED", "RESEARCHING", "POSSIBLE", "NOT_FOUND", "CONFLICTING", "NEEDS_REVIEW", "FAILED"])).count(),
+            "ott_confirmed": db.query(OttEvidence).filter(OttEvidence.status == "CONFIRMED").count(),
+        },
+        "configuration": {
+            "tmdb": bool(settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN),
+            "imdb": bool(settings.IMDB_RATING_PROVIDER and settings.IMDB_RATING_API_URL and settings.IMDB_RATING_API_KEY),
+            "google_ott_search": bool(settings.GOOGLE_SEARCH_API_KEY and settings.GOOGLE_SEARCH_ENGINE_ID),
+            "generic_ott_search": bool(settings.OTT_SEARCH_API_URL and settings.OTT_SEARCH_API_KEY),
+        },
+    }
+
+
+@router.post("/backfills/{operation}/start", dependencies=[Depends(require_same_origin)])
+def start_backfill(operation: str, db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    task_name = BACKFILL_TASKS.get(operation)
+    if not task_name:
+        raise HTTPException(422, "Unknown backfill")
+    state = db.query(OperationState).filter_by(name=task_name).first()
+    if state and state.status == "COMPLETE":
+        return {"queued": False, "task": task_name, "status": "COMPLETE", "detail": "Backfill already completed; it was not restarted"}
+    if state and state.status == "RUNNING" and state.last_success_at and state.last_success_at >= datetime.now(timezone.utc) - timedelta(minutes=15):
+        return {"queued": False, "task": task_name, "status": "RUNNING", "detail": "Backfill is already running"}
+    from app.workers.celery_app import celery_app
+    queued = celery_app.send_task(task_name)
+    return {"queued": True, "task": task_name, "task_id": queued.id, "status": "QUEUED"}
+
+
+@router.post("/movies/{movie_id}/repair", dependencies=[Depends(require_same_origin)])
+def repair_movie(movie_id: int, db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    if not db.get(Movie, movie_id):
+        raise HTTPException(404, "Movie not found")
+    from app.workers.celery_app import celery_app
+    queued = celery_app.send_task("repair.movie", args=[movie_id])
+    return {"queued": True, "movie_id": movie_id, "task_id": queued.id}
 
 
 @router.get("/notifications")

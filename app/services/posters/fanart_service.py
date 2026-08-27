@@ -47,8 +47,7 @@ class FanartService:
 
             return posters[0]["url"]
 
-        except Exception as e:
-
-            print("Fanart Error:", e)
+        except Exception:
+            print("Fanart poster lookup failed")
 
             return None
