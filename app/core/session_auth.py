@@ -1,6 +1,6 @@
 """Cookie-based administrator authentication; API keys remain automation-only."""
 import hashlib, hmac, secrets
-from fastapi import Cookie, HTTPException, status
+from fastapi import Cookie, HTTPException, Request, status
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from app.config.settings import settings
 
@@ -21,3 +21,14 @@ def require_admin_session(ott_admin_session: str | None = Cookie(default=None)):
         if not _signer().loads(ott_admin_session, max_age=60*60*8).get("admin"): raise ValueError
     except (BadSignature, SignatureExpired, ValueError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin login required")
+
+
+def require_same_origin(request: Request):
+    """Reject cross-origin cookie-authenticated mutations while allowing non-browser clients."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    allowed = {item.strip().rstrip("/") for item in settings.FRONTEND_ORIGINS.split(",") if item.strip()}
+    allowed.add(settings.SITE_URL.rstrip("/"))
+    if origin.rstrip("/") not in allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-origin admin request rejected")

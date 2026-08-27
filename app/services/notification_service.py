@@ -10,17 +10,21 @@ class NotificationService:
     def __init__(self, db: Session): self.db = db
     def notify(self, message: str, severity="warning", fingerprint=None, cooldown_minutes=360):
         fingerprint = fingerprint or hashlib.sha256(f"{severity}:{message}".encode()).hexdigest()
-        old = self.db.query(NotificationLog).filter_by(fingerprint=fingerprint).order_by(NotificationLog.last_notified_at.desc()).first()
+        old = self.db.query(NotificationLog).filter_by(fingerprint=fingerprint).filter(NotificationLog.last_notified_at.is_not(None)).order_by(NotificationLog.last_notified_at.desc()).first()
         now = datetime.now(timezone.utc)
-        if old and old.last_notified_at and old.last_notified_at > now - timedelta(minutes=cooldown_minutes): return False
-        channels = []
+        if old and old.last_notified_at:
+            last_notified = old.last_notified_at if old.last_notified_at.tzinfo else old.last_notified_at.replace(tzinfo=timezone.utc)
+            if last_notified > now - timedelta(minutes=cooldown_minutes): return False
+        deliveries = []
         for channel, send in (("discord", self._discord), ("telegram", self._telegram), ("email", self._email)):
             try:
-                if send(message): channels.append(channel)
+                sent = bool(send(message)); deliveries.append((channel, sent))
             except Exception:
                 logging.getLogger(__name__).exception("Notification channel failed: %s", channel)
-        for channel in channels: self.db.add(NotificationLog(fingerprint=fingerprint, channel=channel, severity=severity, message=message, last_notified_at=now))
-        self.db.commit(); return bool(channels)
+                deliveries.append((channel, False))
+        for channel, sent in deliveries:
+            self.db.add(NotificationLog(fingerprint=fingerprint, channel=channel, severity=severity, message=message, last_notified_at=now if sent else None))
+        self.db.commit(); return any(sent for _, sent in deliveries)
     def _discord(self, message):
         if not settings.DISCORD_WEBHOOK_URL: return False
         httpx.post(settings.DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10).raise_for_status(); return True

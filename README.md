@@ -1,20 +1,47 @@
 # Indian OTT Tracker
 
-Indian OTT Tracker is a movie-only discovery site for Malayalam, Tamil, Telugu, Hindi, Kannada and future Indian-language catalogues. It builds on the existing TMDB-backed FastAPI/PostgreSQL data pipeline and adds a responsive React frontend, people discovery, SEO endpoints, protected operations and a privacy-conscious movie request flow.
+Indian OTT Tracker is a movie-only discovery application for Indian cinema. The V1 catalogue preserves the existing approximately 12,281 movies; TV and YouTube are deliberately deferred. FastAPI and PostgreSQL provide discovery, rich movie/person data, canonical OTT availability and protected operations. React/Vite supplies the public and administrative interfaces. Redis, Celery workers and Celery Beat run resumable enrichment, image, OTT and health workflows.
 
-## Run locally
+## Public experience
 
-1. Copy `.env.example` to `.env` and set `TMDB_API_KEY`, `SECRET_KEY`, and `ADMIN_API_KEY`.
-2. Run `docker compose up --build`.
-3. Open `http://localhost:5173`; API documentation is at `http://localhost:8000/docs`.
+The frontend implements home, discover, categorized search, genre, language, OTT landing/platform, movie, person, six calendar periods, movie request and legal routes. Discovery combines language, genre, year, rating, certification, release status, platform, normalized people roles and custom dates, with eight sorts. Movie pages render only stored values: artwork galleries, releases, ratings, OTT verification facts, credits, keywords, production information, collection and external IDs.
 
-The API applies Alembic migrations on startup and uses named volumes, so existing movie data is retained. Do not remove the PostgreSQL volume when updating.
+## Local Windows setup
 
-## Included routes
+```powershell
+Set-Location C:\Users\anadh\Development\indian-ott-tracker
+Copy-Item .env.example .env
+docker compose up --build -d
+docker compose ps
+```
 
-- Public discovery: `/api/v1/home`, `/api/v1/discover`, `/api/v1/people/{id}` and `/api/v1/calendar/{period}`.
-- Movie pages consume the existing `/movies/{id}` metadata, cast, crew, artwork, release, ratings and external ID endpoints.
-- Movie requests: `POST /api/v1/movie-requests`.
-- Protected operations: `/api/v1/admin/*` and legacy enrichment/sync mutations require an `X-Admin-Key` header.
+Open `http://localhost:5173`; API docs are at `http://localhost:8000/docs`. To enable optional pgAdmin, run `docker compose --profile tools up -d pgadmin` and open `http://localhost:5050`.
 
-See [deployment documentation](docs/DEPLOYMENT.md), [architecture](docs/ARCHITECTURE.md), [OTT research policy](docs/OTT_RESEARCH.md), and [SEO notes](docs/SEO.md).
+For host-side development:
+
+```powershell
+Set-Location C:\Users\anadh\Development\indian-ott-tracker
+.\.venv\Scripts\python.exe -m alembic upgrade head
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+Set-Location .\frontend
+npm ci
+npm run dev
+```
+
+## Validation
+
+```powershell
+Set-Location C:\Users\anadh\Development\indian-ott-tracker
+.\.venv\Scripts\python.exe -m compileall -q app alembic
+.\.venv\Scripts\python.exe -m pytest
+Set-Location .\frontend
+npm ci
+npm test
+npm run build
+Set-Location ..
+docker compose config --quiet
+```
+
+API startup runs additive Alembic migrations and named volumes retain PostgreSQL and media data. Never remove those volumes during an update. Configure only credentials/accounts listed in `.env.example`; no admin key or session secret is shipped to browser JavaScript.
+
+See the documents in `docs/` for deployment, schema, operations, OTT evidence policy, images, SEO, AdSense and notifications.

@@ -5,6 +5,7 @@ from app.models.genre import Genre, movie_genres, tv_show_genres
 from app.models.language import Language, movie_languages, tv_show_languages
 from app.models.movie import Movie
 from app.models.movie_metadata import (
+    AlternativeTitle,
     ExternalId,
     Keyword,
     MovieCredit,
@@ -30,6 +31,7 @@ __all__ = [
     "Genre",
     "Language",
     "Movie",
+    "AlternativeTitle",
     "ExternalId",
     "Keyword",
     "MovieCredit",

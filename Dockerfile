@@ -16,4 +16,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 COPY --from=frontend /web/dist ./frontend_dist
 
-CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "mkdir -p media storage && chmod -R a+rwX media storage && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

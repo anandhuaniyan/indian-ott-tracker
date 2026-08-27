@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6380/0"
 
     TMDB_API_KEY: str = ""
+    TMDB_ACCESS_TOKEN: str = ""
 
     SECRET_KEY: str = "change-me-in-production"
 

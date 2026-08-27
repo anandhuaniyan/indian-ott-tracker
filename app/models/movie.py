@@ -65,6 +65,10 @@ class Movie(TimestampMixin, Base):
     tagline: Mapped[str | None] = mapped_column(Text)
     budget: Mapped[int | None] = mapped_column(BigInteger)
     revenue: Mapped[int | None] = mapped_column(BigInteger)
+    collection_tmdb_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    collection_name: Mapped[str | None] = mapped_column(String(500))
+    collection_poster_path: Mapped[str | None] = mapped_column(String(500))
+    collection_backdrop_path: Mapped[str | None] = mapped_column(String(500))
 
 
     genres: Mapped[list["Genre"]] = relationship(
@@ -90,3 +94,4 @@ class Movie(TimestampMixin, Base):
     release_dates: Mapped[list["MovieReleaseDate"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
     images: Mapped[list["MovieImage"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
     ratings: Mapped[list["MovieRating"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
+    alternative_titles: Mapped[list["AlternativeTitle"]] = relationship(back_populates="movie", cascade="all, delete-orphan")

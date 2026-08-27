@@ -1,5 +1,56 @@
 from celery import Celery
+from celery.signals import task_failure, task_success
 from app.config.settings import settings
 
 celery_app = Celery("indian_ott_tracker", broker=settings.REDIS_URL, backend=settings.REDIS_URL, include=["app.workers.tasks"])
-celery_app.conf.update(task_acks_late=True, task_default_retry_delay=60, task_serializer="json", result_serializer="json", timezone="UTC", beat_schedule={"daily-data-health": {"task": "operations.data_health", "schedule": 86400}, "daily-ott-queue": {"task": "operations.ott_queue", "schedule": 86400}, "daily-ott-research": {"task": "operations.ott_research", "schedule": 86400}, "image-recovery": {"task": "operations.image_recovery", "schedule": 21600}})
+celery_app.conf.update(
+    task_acks_late=True, task_default_retry_delay=60, task_serializer="json",
+    result_serializer="json", timezone="UTC", enable_utc=True,
+    beat_schedule={
+        "tmdb-incremental-sync": {"task": "tmdb.incremental_sync", "schedule": 86400},
+        "metadata-enrichment": {"task": "tmdb.metadata_enrichment", "schedule": 900},
+        "data-health": {"task": "operations.data_health", "schedule": 900},
+        "image-health": {"task": "operations.image_health", "schedule": 21600},
+        "image-recovery": {"task": "operations.image_recovery", "schedule": 3600},
+        "ott-queue": {"task": "operations.ott_queue", "schedule": 21600},
+        "ott-research": {"task": "operations.ott_research", "schedule": 1800},
+        "ott-verification": {"task": "operations.ott_verification", "schedule": 86400},
+        "notifications": {"task": "operations.notifications", "schedule": 86400},
+        "cleanup": {"task": "operations.cleanup", "schedule": 604800},
+    },
+)
+
+
+@task_failure.connect
+def notify_task_failure(sender=None, exception=None, **_):
+    """Persist and fan out important worker failures without affecting task handling."""
+    from app.database.connection import SessionLocal
+    from app.models.operations import OperationState
+    from app.services.notification_service import NotificationService
+    from datetime import datetime, timezone
+    db = SessionLocal()
+    try:
+        name = getattr(sender, "name", "unknown-task")
+        state = db.query(OperationState).filter_by(name=name).first()
+        if not state: state = OperationState(name=name); db.add(state)
+        state.last_failure_at = datetime.now(timezone.utc); state.last_error = str(exception)[:2000]
+        db.commit()
+        NotificationService(db).notify(f"Background job failed: {name}: {str(exception)[:500]}", "high", f"task-failure:{name}", 60)
+    finally:
+        db.close()
+
+
+@task_success.connect
+def record_task_success(sender=None, **_):
+    from datetime import datetime, timezone
+    from app.database.connection import SessionLocal
+    from app.models.operations import OperationState
+    db = SessionLocal()
+    try:
+        name = getattr(sender, "name", "unknown-task")
+        state = db.query(OperationState).filter_by(name=name).first()
+        if not state: state = OperationState(name=name); db.add(state)
+        state.last_success_at = datetime.now(timezone.utc); state.last_error = None
+        db.commit()
+    finally:
+        db.close()
