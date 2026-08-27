@@ -23,4 +23,13 @@ This file records implemented behavior, not scaffolding. TV and YouTube remain d
 - [x] README and implementation-specific documentation
 - [x] Backend and frontend automated tests
 
-Validation snapshot: Python compile/import succeeded; Pytest 16 passed; frontend Vitest 10 passed; Vite production build succeeded; npm audit found 0 vulnerabilities; Compose configuration parsed; PostgreSQL/API/Redis/frontend/worker/Beat health checks passed; the additive migration retained exactly 12,281 movies. No unchecked V1 code item remains.
+## Public ratings and calendar follow-up
+
+- [x] Remove raw TMDB IDs from public movie/person presentation while preserving internal integration keys
+- [x] Use stored IMDb ratings as the primary card, detail, discovery and filmography rating
+- [x] Add configurable lawful IMDb-compatible provider and persistent prioritized refresh task
+- [x] Add safe IMDb title links and retain TMDB only as a separately labelled secondary rating
+- [x] Split all six calendar periods into theatrical and confirmed canonical OTT datasets/tabs
+- [x] Render cast/crew photos and separate person filmography by normalized role
+
+Validation snapshot: Python compile/import succeeded; Pytest 21 passed; frontend Vitest 12 passed; Vite production build succeeded; npm audit found 0 vulnerabilities; Compose configuration parsed; PostgreSQL/API/Redis/frontend/worker/Beat health checks passed; the additive migration retained exactly 12,281 movies. No unchecked V1 code item remains.

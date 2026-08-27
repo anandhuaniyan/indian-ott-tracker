@@ -2,12 +2,14 @@
 
 from calendar import monthrange
 from datetime import date, timedelta
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session, aliased, selectinload
 
 from app.database.connection import get_db
+from app.config.settings import settings
 from app.models.genre import Genre
 from app.models.language import Language
 from app.models.movie import Movie
@@ -21,14 +23,32 @@ from app.services.roles import ROLE_ALIASES, normalize_role
 
 router = APIRouter(prefix="/api/v1", tags=["Discovery"])
 PUBLIC_OTT_STATES = ("available", "confirmed", "announced", "upcoming", "released")
+CANONICAL_OTT_CALENDAR_STATES = ("available", "confirmed")
+THEATRICAL_RELEASE_TYPES = ("2", "3", "limited theatrical", "theatrical")
+
+
+def _stored_rating(movie: Movie, source: str) -> MovieRating | None:
+    return next((item for item in movie.ratings if item.source.lower() == source.lower()), None)
+
+
+def _imdb_rating_query():
+    return (
+        select(MovieRating.rating)
+        .where(MovieRating.movie_id == Movie.id, func.lower(MovieRating.source) == "imdb")
+        .limit(1)
+        .correlate(Movie)
+        .scalar_subquery()
+    )
 
 def _card(movie: Movie) -> dict:
+    imdb = _stored_rating(movie, "imdb")
     return {
-        "id": movie.id, "tmdb_id": movie.tmdb_id, "title": movie.title,
+        "id": movie.id, "title": movie.title,
         "original_title": movie.original_title, "overview": movie.overview,
         "release_date": movie.release_date, "poster_path": movie.poster_path,
-        "backdrop_path": movie.backdrop_path, "rating": movie.vote_average,
-        "vote_count": movie.vote_count, "popularity": movie.popularity,
+        "backdrop_path": movie.backdrop_path,
+        "rating": imdb.rating if imdb else None, "rating_source": "IMDb" if imdb and imdb.rating is not None else None,
+        "vote_count": imdb.vote_count if imdb else None, "popularity": movie.popularity,
         "language": movie.original_language, "genres": [g.name for g in movie.genres],
     }
 
@@ -37,8 +57,36 @@ def cards(items) -> list[dict]:
     return [_card(movie) for movie in items]
 
 
+def _external_id_payload(item: ExternalId) -> dict:
+    provider = item.provider.strip()
+    url = item.source_url
+    if provider.lower() == "imdb" and re.fullmatch(r"tt\d{7,10}", item.external_id):
+        provider = "IMDb"
+        url = f"https://www.imdb.com/title/{item.external_id}/"
+    return {"provider": provider, "id": item.external_id, "url": url}
+
+
+def _ratings_payload(movie: Movie) -> list[dict]:
+    imdb_id = next((item.external_id for item in movie.external_ids if item.provider.lower() == "imdb"), None)
+    payload = []
+    has_tmdb = False
+    for item in movie.ratings:
+        source = "IMDb" if item.source.lower() == "imdb" else "TMDB" if item.source.lower() == "tmdb" else item.source
+        has_tmdb = has_tmdb or source == "TMDB"
+        payload.append({
+            "source": source,
+            "rating": item.rating,
+            "votes": item.vote_count,
+            "source_id": imdb_id if source == "IMDb" else None,
+            "checked_at": item.last_updated_at,
+        })
+    if movie.vote_average is not None and not has_tmdb:
+        payload.append({"source": "TMDB", "rating": movie.vote_average, "votes": movie.vote_count, "source_id": None, "checked_at": None})
+    return sorted(payload, key=lambda item: (item["source"] != "IMDb", item["source"]))
+
+
 def _movie_query(db: Session):
-    return db.query(Movie).options(selectinload(Movie.genres), selectinload(Movie.languages))
+    return db.query(Movie).options(selectinload(Movie.genres), selectinload(Movie.languages), selectinload(Movie.ratings))
 
 
 def _credit_match(role: str, person_value: str):
@@ -66,7 +114,7 @@ def _apply_filters(query, **values):
     if values.get("year"):
         query = query.filter(func.extract("year", Movie.release_date) == values["year"])
     if values.get("rating") is not None:
-        query = query.filter(Movie.vote_average >= values["rating"])
+        query = query.filter(_imdb_rating_query() >= values["rating"])
     if values.get("certification"):
         query = query.filter(Movie.release_dates.any(MovieReleaseDate.certification == values["certification"]))
     if values.get("release_status"):
@@ -90,7 +138,7 @@ def _ordering(sort: str):
     ott_date = select(func.max(OttAvailability.ott_release_date)).where(OttAvailability.movie_id == Movie.id).correlate(Movie).scalar_subquery()
     return {
         "latest": Movie.release_date.desc(), "oldest": Movie.release_date.asc(),
-        "rating": Movie.vote_average.desc(), "highest-rated": Movie.vote_average.desc(),
+        "rating": _imdb_rating_query().desc(), "highest-rated": _imdb_rating_query().desc(),
         "popular": Movie.popularity.desc(), "popularity": Movie.popularity.desc(),
         "recent": Movie.created_at.desc(), "recently-added": Movie.created_at.desc(),
         "ott-release": ott_date.desc(), "name-asc": Movie.title.asc(), "name-desc": Movie.title.desc(),
@@ -114,7 +162,7 @@ def home(db: Session = Depends(get_db)):
     providers = db.query(OttAvailability.provider, func.max(OttAvailability.provider_logo), func.count(func.distinct(OttAvailability.movie_id))).group_by(OttAvailability.provider).order_by(func.count(func.distinct(OttAvailability.movie_id)).desc()).all()
     return {
         "trending": cards(base().order_by(Movie.popularity.desc()).limit(12).all()),
-        "popular": cards(base().order_by(Movie.vote_average.desc(), Movie.vote_count.desc()).limit(12).all()),
+        "popular": cards(base().order_by(Movie.popularity.desc(), Movie.vote_count.desc()).limit(12).all()),
         "latest_theatrical": cards(base().filter(Movie.release_date <= today).order_by(Movie.release_date.desc()).limit(12).all()),
         "upcoming_theatrical": cards(base().filter(Movie.release_date > today).order_by(Movie.release_date).limit(12).all()),
         "recently_added": cards(base().order_by(Movie.created_at.desc()).limit(12).all()),
@@ -198,7 +246,11 @@ def person_detail(person_id: int, sort: str = "newest", credit_type: str = "all"
     person = db.get(Person, person_id)
     if not person:
         raise HTTPException(404, "Person not found")
-    query = db.query(MovieCredit).filter(MovieCredit.person_id == person_id).join(Movie).options(selectinload(MovieCredit.movie).selectinload(Movie.genres))
+    query = db.query(MovieCredit).filter(MovieCredit.person_id == person_id).join(Movie).options(
+        selectinload(MovieCredit.movie).selectinload(Movie.genres),
+        selectinload(MovieCredit.movie).selectinload(Movie.languages),
+        selectinload(MovieCredit.movie).selectinload(Movie.ratings),
+    )
     if credit_type in {"cast", "crew"}:
         query = query.filter(MovieCredit.credit_type == credit_type)
     normalized = normalize_role(role)
@@ -207,7 +259,7 @@ def person_detail(person_id: int, sort: str = "newest", credit_type: str = "all"
         query = query.filter(or_(func.lower(MovieCredit.job).in_(aliases), func.lower(MovieCredit.department).in_(aliases), and_(normalized == "actor", MovieCredit.credit_type == "cast")))
     credits = query.order_by(Movie.release_date.asc() if sort == "oldest" else Movie.release_date.desc()).all()
     return {
-        "id": person.id, "tmdb_id": person.tmdb_id, "name": person.name,
+        "id": person.id, "name": person.name,
         "profile_path": person.profile_path, "department": person.known_for_department,
         "roles": sorted({normalize_role(x.job or x.department or x.credit_type) for x in credits if normalize_role(x.job or x.department or x.credit_type)}),
         "filmography": [{"movie": _card(x.movie), "character": x.character, "job": x.job, "department": x.department, "credit_type": x.credit_type, "normalized_role": normalize_role(x.job or x.department or x.credit_type)} for x in credits],
@@ -226,12 +278,60 @@ def calendar(period: str, db: Session = Depends(get_db)):
     if period not in ranges:
         raise HTTPException(404, "Unknown calendar period")
     start, end = ranges[period]
-    return {"period": period, "start": start, "end": end - timedelta(days=1), "items": cards(_movie_query(db).filter(Movie.release_date >= start, Movie.release_date < end).order_by(Movie.release_date).all())}
+    release_rows = db.query(MovieReleaseDate).options(
+        selectinload(MovieReleaseDate.movie).selectinload(Movie.genres),
+        selectinload(MovieReleaseDate.movie).selectinload(Movie.languages),
+        selectinload(MovieReleaseDate.movie).selectinload(Movie.ratings),
+    ).filter(
+        MovieReleaseDate.release_date >= start,
+        MovieReleaseDate.release_date < end,
+        func.lower(MovieReleaseDate.release_type).in_(THEATRICAL_RELEASE_TYPES),
+    ).order_by(MovieReleaseDate.release_date, MovieReleaseDate.country.desc()).all()
+    explicit = {}
+    for item in release_rows:
+        existing = explicit.get(item.movie_id)
+        if existing is None or (item.country == "IN" and existing.country != "IN"):
+            explicit[item.movie_id] = item
+    theatrical = []
+    for item in sorted(explicit.values(), key=lambda value: (value.release_date, value.movie_id)):
+        theatrical.append(_card(item.movie) | {"release_date": item.release_date, "theatrical_release_date": item.release_date, "certification": item.certification})
+    fallback = _movie_query(db).filter(Movie.release_date >= start, Movie.release_date < end)
+    if explicit:
+        fallback = fallback.filter(Movie.id.notin_(explicit))
+    theatrical.extend(_card(movie) | {"theatrical_release_date": movie.release_date, "certification": None} for movie in fallback.order_by(Movie.release_date).all())
+
+    ott_rows = db.query(Movie, OttAvailability).options(
+        selectinload(Movie.genres), selectinload(Movie.languages), selectinload(Movie.ratings)
+    ).join(OttAvailability).filter(
+        OttAvailability.ott_release_date >= start,
+        OttAvailability.ott_release_date < end,
+        func.lower(OttAvailability.status).in_(CANONICAL_OTT_CALENDAR_STATES),
+        OttAvailability.confidence >= settings.OTT_CONFIRMATION_THRESHOLD,
+    ).order_by(OttAvailability.ott_release_date, Movie.title, OttAvailability.provider).all()
+    ott = [
+        _card(movie) | {
+            "release_date": availability.ott_release_date,
+            "ott_release_date": availability.ott_release_date,
+            "ott_platform": availability.provider,
+            "ott_platform_slug": availability.provider.lower().replace(" ", "-"),
+            "ott_platform_logo": availability.provider_logo,
+            "verification_state": availability.status,
+            "confidence": availability.confidence,
+        }
+        for movie, availability in ott_rows
+    ]
+    return {
+        "period": period,
+        "start_date": start,
+        "end_date": end - timedelta(days=1),
+        "theatrical": {"items": theatrical, "total": len(theatrical)},
+        "ott": {"items": ott, "total": len(ott)},
+    }
 
 
 @router.get("/movies/{movie_id}/detail")
 def movie_detail(movie_id: int, db: Session = Depends(get_db)):
-    movie = db.query(Movie).options(selectinload(Movie.genres), selectinload(Movie.languages), selectinload(Movie.ott_availabilities)).filter(Movie.id == movie_id).first()
+    movie = db.query(Movie).options(selectinload(Movie.genres), selectinload(Movie.languages), selectinload(Movie.ratings), selectinload(Movie.external_ids), selectinload(Movie.ott_availabilities)).filter(Movie.id == movie_id).first()
     if not movie:
         raise HTTPException(404, "Movie not found")
     credits = db.query(MovieCredit).filter_by(movie_id=movie_id).options(selectinload(MovieCredit.person)).order_by(MovieCredit.credit_type, MovieCredit.cast_order, MovieCredit.department, MovieCredit.job).all()
@@ -255,7 +355,7 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
         "movie": _card(movie) | {
             "tagline": movie.tagline, "runtime_minutes": movie.runtime_minutes, "status": movie.status,
             "certification": certification, "budget": movie.budget, "revenue": movie.revenue,
-            "collection": {"tmdb_id": movie.collection_tmdb_id, "name": movie.collection_name, "poster_path": movie.collection_poster_path, "backdrop_path": movie.collection_backdrop_path} if movie.collection_name else None,
+            "collection": {"name": movie.collection_name, "poster_path": movie.collection_poster_path, "backdrop_path": movie.collection_backdrop_path} if movie.collection_name else None,
             "original_language": movie.original_language,
             "spoken_languages": [{"code": x.iso_639_1, "name": x.english_name} for x in movie.languages],
             "production_countries": [{"code": x.iso_3166_1, "name": x.name} for x in countries],
@@ -268,8 +368,8 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
         "images": [{"type": x.image_type, "url": x.local_path or x.original_url, "language": x.language, "width": x.width, "height": x.height, "aspect_ratio": x.aspect_ratio, "primary": x.is_primary} for x in images],
         "releases": [{"country": x.country, "date": x.release_date, "type": x.release_type, "certification": x.certification, "note": x.note} for x in releases],
         "release_groups": grouped_releases,
-        "ratings": ([{"source": "TMDB", "rating": movie.vote_average, "votes": movie.vote_count}] if movie.vote_average is not None else []) + [{"source": x.source, "rating": x.rating, "votes": x.vote_count} for x in db.query(MovieRating).filter_by(movie_id=movie_id).all()],
+        "ratings": _ratings_payload(movie),
         "keywords": [x.name for x in keywords],
         "alternative_titles": [{"title": x.title, "country": x.country, "type": x.title_type} for x in db.query(AlternativeTitle).filter_by(movie_id=movie_id).order_by(AlternativeTitle.country, AlternativeTitle.title).all()],
-        "external_ids": [{"provider": "tmdb", "id": str(movie.tmdb_id), "url": f"https://www.themoviedb.org/movie/{movie.tmdb_id}"}] + [{"provider": x.provider, "id": x.external_id, "url": x.source_url} for x in db.query(ExternalId).filter_by(movie_id=movie_id).all()],
+        "external_ids": [_external_id_payload(x) for x in db.query(ExternalId).filter_by(movie_id=movie_id).all() if x.provider.lower() != "tmdb"],
     }
