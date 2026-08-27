@@ -30,8 +30,10 @@ class ImageFallbackService:
             return None
         if value.startswith("/media/"):
             return self.media_root / value.removeprefix("/media/")
-        path = Path(value.lstrip("/\\"))
-        return path if path.is_absolute() else Path.cwd() / path
+        path = Path(value)
+        if path.is_absolute():
+            return path
+        return Path.cwd() / value.lstrip("/\\")
 
     def validate(self, value: str | None) -> str:
         """Derive HEALTHY, MISSING or BROKEN from a local cached file."""

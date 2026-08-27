@@ -53,7 +53,9 @@ class TMDbBulkImporter:
         return {"completed_keys": []}
 
     def _save_checkpoint(self, checkpoint_data: dict) -> None:
-        os.makedirs(os.path.dirname(self.checkpoint_path), exist_ok=True)
+        checkpoint_directory = os.path.dirname(self.checkpoint_path)
+        if checkpoint_directory:
+            os.makedirs(checkpoint_directory, exist_ok=True)
         try:
             with open(self.checkpoint_path, "w", encoding="utf-8") as f:
                 json.dump(checkpoint_data, f, indent=2)
