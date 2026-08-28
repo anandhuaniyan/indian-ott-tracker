@@ -12,6 +12,7 @@ class MovieRequest(TimestampMixin, Base):
     request_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     movie_name: Mapped[str] = mapped_column(String(500), index=True)
     email: Mapped[str] = mapped_column(String(320), index=True)
+    external_movie_id: Mapped[int | None] = mapped_column(Integer, index=True)
     release_year: Mapped[int | None] = mapped_column(Integer)
     language: Mapped[str | None] = mapped_column(String(20))
     details: Mapped[str | None] = mapped_column(Text)

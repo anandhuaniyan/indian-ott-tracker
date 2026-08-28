@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 import React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { Dashboard, Jobs, OttResearch } from "./Admin";
 import { Request } from "./Public";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 
 it("shows the admin guard when the session is absent", async () => {
   vi.stubGlobal(
@@ -33,7 +36,8 @@ it("renders the validated movie request form", () => {
   expect(
     screen.getByRole("heading", { name: "Request a movie" }),
   ).toBeInTheDocument();
-  expect(screen.getByPlaceholderText("Email")).toHaveAttribute("type", "email");
+  expect(screen.getByLabelText("Email *")).toHaveAttribute("type", "email");
+  expect(screen.getByLabelText("ID *")).toHaveAttribute("type", "number");
   expect(
     screen.getByRole("button", { name: "Submit request" }),
   ).toBeInTheDocument();

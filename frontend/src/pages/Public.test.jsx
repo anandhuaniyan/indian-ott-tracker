@@ -18,12 +18,14 @@ import {
   Ott,
   OttPlatform,
   Person,
+  Request,
 } from "./Public";
 
 const get = vi.fn();
+const post = vi.fn();
 vi.mock("../services/api", () => ({
   get: (...args) => get(...args),
-  post: vi.fn(),
+  post: (...args) => post(...args),
   imageUrl: (path) => path || "/placeholder.svg",
 }));
 
@@ -38,6 +40,7 @@ const card = {
 
 beforeEach(() => {
   get.mockReset();
+  post.mockReset();
 });
 afterEach(() => cleanup());
 
@@ -110,6 +113,8 @@ it("renders stored movie metadata and galleries without fabricating empty fields
       ott_release_date: null,
       ott_research_status: "Researching",
       original_title: "Original",
+      original_language: "ml",
+      original_language_name: "Malayalam",
       overview: "Stored overview",
       backdrop_path: "/backdrop.jpg",
       runtime_minutes: 120,
@@ -136,7 +141,7 @@ it("renders stored movie metadata and galleries without fabricating empty fields
     releases: [],
     ratings: [
       { source: "IMDb", rating: 8.2, votes: 100 },
-      { source: "TMDB", rating: 7.4, votes: 90 },
+      { source: "Source Rating", rating: 7.4, votes: 90 },
     ],
     keywords: ["friendship"],
     alternative_titles: [],
@@ -177,12 +182,31 @@ it("renders stored movie metadata and galleries without fabricating empty fields
     /^OTT ResearchResearching$/,
   );
   expect(screen.getByTestId("movie-display-id")).toHaveTextContent(/^ID101$/);
+  expect(screen.getByText("Malayalam")).toHaveAttribute("href", "/languages/ml");
   expect(screen.queryByText("TMDB ID")).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: "tt1234567" })).toHaveAttribute(
     "href",
     "https://www.imdb.com/title/tt1234567/",
   );
   expect(screen.getByAltText("Actor profile")).toBeInTheDocument();
+});
+
+it("requires the external movie ID and preserves Deep Search prefills", async () => {
+  get.mockResolvedValue([{ code: "ml", name: "Malayalam" }]);
+  post.mockResolvedValue({ request_id: "REQ-1", status: "PENDING" });
+  render(
+    <MemoryRouter initialEntries={["/request-movie?movie_name=Aadu&movie_external_id=326282&release_year=2015&language=ml"]}>
+      <Routes><Route path="/request-movie" element={<Request/>}/></Routes>
+    </MemoryRouter>,
+  );
+  expect(screen.getByLabelText("Movie Name *")).toHaveValue("Aadu");
+  expect(screen.getByLabelText("ID *")).toHaveValue(326282);
+  expect(screen.getByLabelText("Year")).toHaveValue(2015);
+  expect(screen.getByLabelText("Language")).toHaveValue("ml");
+  expect(screen.getByRole("link", { name: /use deep search/i })).toHaveAttribute("href", "/search?mode=deep");
+  fireEvent.change(screen.getByLabelText("Email *"), { target: { value: "viewer@example.com" } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit request" }));
+  await waitFor(() => expect(post).toHaveBeenCalledWith("/api/v1/movie-requests", expect.objectContaining({ movie_name: "Aadu", movie_external_id: 326282, release_year: 2015, language: "ml" })));
 });
 
 it("supports person credit controls and separates normalized roles", async () => {

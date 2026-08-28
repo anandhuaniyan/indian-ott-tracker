@@ -431,9 +431,32 @@ th {
   min-height: 90px;
   margin: 2rem 0;
 }
-.deep-nav {
-  color: #ffbf47;
+.search-modes {
+  display: flex;
+  gap: 0.55rem;
+  margin: 0 0 1.25rem;
+}
+.search-modes a {
+  padding: 0.65rem 1rem;
+  border-radius: 0.45rem;
+  background: #242630;
   font-weight: 750;
+}
+.search-modes a.active {
+  background: #ffbf47;
+  color: #1c1609;
+}
+.request label {
+  display: grid;
+  gap: 0.35rem;
+}
+.request select {
+  padding: 0.7rem;
+  border-radius: 0.4rem;
+  border: 1px solid #4a4c57;
+  background: #20222b;
+  color: white;
+  font: inherit;
 }
 .deep-search-page,
 .deep-detail {

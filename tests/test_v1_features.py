@@ -80,6 +80,26 @@ def test_home_discover_search_and_browse(client):
     assert search["movies"]["total"] == 1 and search["people"]["total"] == 2
 
 
+def test_language_filter_uses_original_language_not_spoken_language(client, database):
+    english = Language(iso_639_1="en", english_name="English")
+    database.add(english)
+    database.query(Movie).filter(Movie.tmdb_id == 101).one().languages.append(english)
+    database.commit()
+
+    assert client.get("/api/v1/discover?language=ml").json()["total"] == 2
+    assert client.get("/api/v1/discover?language=en").json()["total"] == 0
+
+
+def test_public_movie_detail_neutralizes_provider_status(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.api.v1.public.research_status_label",
+        lambda *_args: "Awaiting TMDB release information",
+    )
+
+    detail = client.get("/api/v1/movies/1/detail").json()
+    assert detail["movie"]["ott_research_status"] == "Awaiting external metadata release information"
+
+
 def test_calendar_ott_movie_and_person(client, database):
     database.add(OttAvailability(movie_id=2, provider="RumourTV", ott_release_date=date.today(), status="announced", confidence=30))
     database.commit()
@@ -152,12 +172,14 @@ def test_request_admin_auth_and_management(client, database, monkeypatch):
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 1000).hex()
     monkeypatch.setattr(settings, "ADMIN_PASSWORD_HASH", f"pbkdf2_sha256$1000${salt.hex()}${digest}")
     monkeypatch.setattr("app.services.notification_service.NotificationService.notify", lambda *args, **kwargs: True)
-    response = client.post("/api/v1/movie-requests", json={"movie_name": "Missing Film", "email": "viewer@example.com"})
+    monkeypatch.setattr("app.api.v1.operations.limit", lambda *_args, **_kwargs: None)
+    response = client.post("/api/v1/movie-requests", json={"movie_name": "Missing Film", "email": "viewer@example.com", "movie_external_id": 999})
     assert response.status_code == 201
     assert client.get("/api/v1/admin/dashboard").status_code == 401
     assert client.post("/api/v1/admin/login", json={"password": password}).status_code == 200
     listing = client.get("/api/v1/admin/requests?search=Missing").json()
     request_id = listing["items"][0]["request_id"]
+    assert listing["items"][0]["movie_external_id"] == 999
     assert client.patch(f"/api/v1/admin/requests/{request_id}", json={"status": "REVIEWING"}).json()["status"] == "REVIEWING"
     assert client.get("/api/v1/admin/data-health").status_code == 200
     assert client.get("/api/v1/admin/images").status_code == 200
@@ -168,6 +190,23 @@ def test_request_admin_auth_and_management(client, database, monkeypatch):
     assert ott_admin.json()["tavily_usage"]["limit"] == settings.TAVILY_MONTHLY_APP_BUDGET
     assert client.get("/api/v1/admin/jobs").status_code == 200
     assert client.get("/api/v1/admin/notifications").status_code == 200
+
+
+def test_movie_request_external_id_validation_duplicates_and_local_match(client, monkeypatch):
+    monkeypatch.setattr("app.api.v1.operations.limit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("app.services.notification_service.NotificationService.notify", lambda *args, **kwargs: True)
+    base = {"movie_name": "Missing Film", "email": "viewer@example.com"}
+    assert client.post("/api/v1/movie-requests", json=base).status_code == 422
+    assert client.post("/api/v1/movie-requests", json=base | {"movie_external_id": 0}).status_code == 422
+    assert client.post("/api/v1/movie-requests", json=base | {"movie_external_id": "tt1234567"}).status_code == 422
+    local = client.post("/api/v1/movie-requests", json=base | {"movie_external_id": 101})
+    assert local.status_code == 409
+    assert local.json() == {"detail": "This movie is already available.", "local_movie_id": 1}
+    accepted = client.post("/api/v1/movie-requests", json=base | {"movie_external_id": 998})
+    assert accepted.status_code == 201 and accepted.json()["movie_external_id"] == 998
+    duplicate = client.post("/api/v1/movie-requests", json={**base, "email": "other@example.com", "movie_external_id": 998})
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == "This movie has already been requested."
 
 
 def test_invalid_date_range(client):

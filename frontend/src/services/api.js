@@ -13,7 +13,16 @@ export async function get(path, { maxAge = 60000 } = {}) {
   cache.set(path, { time: Date.now(), value: request });
   try { return await request; } catch (error) { cache.delete(path); throw error; }
 }
-export async function post(path, body) { const response = await fetch(`${API}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); if (!response.ok) throw new Error("Unable to submit request"); return response.json(); }
+export async function post(path, body) {
+  const response = await fetch(`${API}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(typeof payload.detail === "string" ? payload.detail : "Unable to submit request");
+    error.data = payload;
+    throw error;
+  }
+  return payload;
+}
 export async function adminGet(path) {
   const response = await fetch(`${API}${path}`, { credentials: "include" });
   if (!response.ok) throw new Error(response.status === 401 ? "Unauthenticated" : "Request failed");

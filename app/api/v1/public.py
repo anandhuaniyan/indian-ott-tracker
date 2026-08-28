@@ -28,11 +28,24 @@ from app.services.release_status import (
     research_status_label,
 )
 from app.services.roles import ROLE_ALIASES, normalize_role
+from app.services.languages import LANGUAGE_NAMES, language_name
 
 router = APIRouter(prefix="/api/v1", tags=["Discovery"])
 PUBLIC_OTT_STATES = ("available", "confirmed", "announced", "upcoming", "released")
 CANONICAL_OTT_CALENDAR_STATES = ("available", "confirmed")
 THEATRICAL_RELEASE_TYPES = ("2", "3", "limited theatrical", "theatrical")
+
+
+def _is_metadata_provider(value: str | None) -> bool:
+    normalized = re.sub(r"[^a-z]", "", (value or "").lower())
+    return normalized in {"tmdb", "themoviedb", "themoviedatabase"}
+
+
+def _public_operational_label(value: str | None) -> str | None:
+    """Keep useful status detail while hiding implementation-provider names."""
+    if not value:
+        return value
+    return re.sub(r"\bTMDB\b", "external metadata", value, flags=re.IGNORECASE)
 
 
 def _stored_rating(movie: Movie, source: str) -> MovieRating | None:
@@ -50,6 +63,7 @@ def _imdb_rating_query():
 
 def _card(movie: Movie) -> dict:
     imdb = _stored_rating(movie, "imdb")
+    stored_language = next((item.english_name for item in movie.languages if item.iso_639_1 == movie.original_language), None)
     return {
         "id": movie.id, "title": movie.title,
         "original_title": movie.original_title, "overview": movie.overview,
@@ -57,7 +71,9 @@ def _card(movie: Movie) -> dict:
         "backdrop_path": movie.backdrop_path,
         "rating": imdb.rating if imdb else None, "rating_source": "IMDb" if imdb and imdb.rating is not None else None,
         "vote_count": imdb.vote_count if imdb else None, "popularity": movie.popularity,
-        "language": movie.original_language, "genres": [g.name for g in movie.genres],
+        "language": movie.original_language,
+        "language_name": language_name(movie.original_language, stored_language),
+        "genres": [g.name for g in movie.genres],
     }
 
 
@@ -109,10 +125,10 @@ def _queue_on_demand_repair(db: Session, movie: Movie, credits: list[MovieCredit
 def _ratings_payload(movie: Movie) -> list[dict]:
     imdb_id = next((item.external_id for item in movie.external_ids if item.provider.lower() == "imdb"), None)
     payload = []
-    has_tmdb = False
+    has_source_rating = False
     for item in movie.ratings:
-        source = "IMDb" if item.source.lower() == "imdb" else "TMDB" if item.source.lower() == "tmdb" else item.source
-        has_tmdb = has_tmdb or source == "TMDB"
+        source = "IMDb" if item.source.lower() == "imdb" else "Source Rating" if _is_metadata_provider(item.source) else item.source
+        has_source_rating = has_source_rating or source == "Source Rating"
         payload.append({
             "source": source,
             "rating": item.rating,
@@ -120,8 +136,8 @@ def _ratings_payload(movie: Movie) -> list[dict]:
             "source_id": imdb_id if source == "IMDb" else None,
             "checked_at": item.last_updated_at,
         })
-    if movie.vote_average is not None and not has_tmdb:
-        payload.append({"source": "TMDB", "rating": movie.vote_average, "votes": movie.vote_count, "source_id": None, "checked_at": None})
+    if movie.vote_average is not None and not has_source_rating:
+        payload.append({"source": "Source Rating", "rating": movie.vote_average, "votes": movie.vote_count, "source_id": None, "checked_at": None})
     return sorted(payload, key=lambda item: (item["source"] != "IMDb", item["source"]))
 
 
@@ -148,7 +164,10 @@ def _apply_filters(query, **values):
         alternative_match = exists(select(AlternativeTitle.id).where(AlternativeTitle.movie_id == Movie.id, AlternativeTitle.title.ilike(term)))
         query = query.filter(or_(Movie.title.ilike(term), Movie.original_title.ilike(term), alternative_match, credit_match, keyword_match))
     if values.get("language"):
-        query = query.filter(or_(Movie.original_language == values["language"], Movie.languages.any(Language.iso_639_1 == values["language"])))
+        # Public language filters and /languages/:code pages represent a movie's
+        # original language.  Spoken-language associations must not make a Hindi
+        # movie appear in the English browse results, for example.
+        query = query.filter(Movie.original_language == values["language"].strip().lower())
     if values.get("genre"):
         query = query.filter(Movie.genres.any(Genre.slug == values["genre"]))
     if values.get("year"):
@@ -248,6 +267,15 @@ def discover(
         "roles": list(ROLE_ALIASES),
     }
     return result
+
+
+@router.get("/languages")
+def public_languages(db: Session = Depends(get_db)):
+    """Return stored language metadata with broad ISO fallbacks for public forms."""
+    values = {code: name for code, name in LANGUAGE_NAMES.items()}
+    for item in db.query(Language).all():
+        values[item.iso_639_1] = language_name(item.iso_639_1, item.english_name)
+    return [{"code": code, "name": name} for code, name in sorted(values.items(), key=lambda item: item[1])]
 
 
 @router.get("/search")
@@ -415,14 +443,18 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
             "ott_platform": ott_summary.provider if ott_summary else None,
             "ott_release_date": ott_summary.ott_release_date if ott_summary else None,
             "ott_status": "Confirmed" if confirmed_ott else "Not announced" if classification.code != "UNKNOWN" else "Unknown",
-            "ott_research_status": research_status_label(latest_evidence, eligibility.code),
+            "ott_research_status": _public_operational_label(research_status_label(latest_evidence, eligibility.code)),
             "certification": certification, "budget": movie.budget, "revenue": movie.revenue,
             "collection": {"name": movie.collection_name, "poster_path": movie.collection_poster_path, "backdrop_path": movie.collection_backdrop_path} if movie.collection_name else None,
             "original_language": movie.original_language,
-            "spoken_languages": [{"code": x.iso_639_1, "name": x.english_name} for x in movie.languages],
+            "original_language_name": language_name(
+                movie.original_language,
+                next((x.english_name for x in movie.languages if x.iso_639_1 == movie.original_language), None),
+            ),
+            "spoken_languages": [{"code": x.iso_639_1, "name": language_name(x.iso_639_1, x.english_name)} for x in movie.languages],
             "production_countries": [{"code": x.iso_3166_1, "name": x.name} for x in countries],
             "production_companies": [{"name": x.name, "logo": x.logo_path, "country": x.origin_country} for x in companies],
-            "ott": [{"provider": x.provider, "logo": x.provider_logo, "watch_type": x.watch_type, "release_date": x.ott_release_date, "country": x.country, "source": x.source_type, "source_url": x.source_url, "confidence": x.confidence, "verification_state": x.status, "last_checked": x.last_checked} for x in movie.ott_availabilities],
+            "ott": [{"provider": x.provider, "logo": x.provider_logo, "watch_type": x.watch_type, "release_date": x.ott_release_date, "country": x.country, "source": "Metadata provider" if _is_metadata_provider(x.source_type) else x.source_type, "source_url": x.source_url, "confidence": x.confidence, "verification_state": x.status, "last_checked": x.last_checked} for x in movie.ott_availabilities],
         },
         "cast": [{"person_id": x.person_id, "name": x.person.name, "profile_path": x.person.profile_path, "character": x.character, "order": x.cast_order} for x in credits if x.credit_type == "cast"],
         "crew": [{"person_id": x.person_id, "name": x.person.name, "profile_path": x.person.profile_path, "job": x.job, "department": x.department, "normalized_role": normalize_role(x.job or x.department)} for x in credits if x.credit_type == "crew"],
@@ -433,7 +465,7 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
         "ratings": _ratings_payload(movie),
         "keywords": [x.name for x in keywords],
         "alternative_titles": [{"title": x.title, "country": x.country, "type": x.title_type} for x in db.query(AlternativeTitle).filter_by(movie_id=movie_id).order_by(AlternativeTitle.country, AlternativeTitle.title).all()],
-        "external_ids": [_external_id_payload(x) for x in db.query(ExternalId).filter_by(movie_id=movie_id).all() if x.provider.lower() != "tmdb"],
+        "external_ids": [_external_id_payload(x) for x in db.query(ExternalId).filter_by(movie_id=movie_id).all() if not _is_metadata_provider(x.provider)],
     }
     payload["repair_queued"] = _queue_on_demand_repair(db, movie, credits)
     return payload
