@@ -7,8 +7,29 @@
 * {
   box-sizing: border-box;
 }
+html,
+body,
+#root {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 100%;
+}
 body {
   margin: 0;
+  overflow-wrap: anywhere;
+}
+#root {
+  display: flex;
+  min-height: 100vh;
+  min-height: 100dvh;
+  flex-direction: column;
+}
+img,
+svg,
+video {
+  max-width: 100%;
+  height: auto;
 }
 a {
   color: inherit;
@@ -21,6 +42,9 @@ footer {
   justify-content: space-between;
   padding: 1rem max(5vw, 1rem);
   background: #171920;
+  width: 100%;
+  min-width: 0;
+  gap: 1rem;
 }
 .brand {
   font-weight: 800;
@@ -33,12 +57,24 @@ footer nav {
   gap: 1.25rem;
   flex-wrap: wrap;
   align-items: center;
+  min-width: 0;
+  max-width: 100%;
 }
 main {
-  max-width: 1280px;
-  margin: auto;
-  padding: 2rem max(5vw, 1rem);
-  min-height: 78vh;
+  width: 100%;
+  max-width: 1440px;
+  min-width: 0;
+  margin-inline: auto;
+  padding: clamp(1.25rem, 3vw, 2.5rem) clamp(1rem, 4vw, 3.5rem);
+  flex: 1;
+}
+main > *,
+header > *,
+footer > *,
+.detail > *,
+.deep-detail-lead > *,
+.deep-result-card > * {
+  min-width: 0;
 }
 .hero {
   padding: 4rem 2rem;
@@ -51,6 +87,7 @@ h1 {
 }
 h2 {
   margin-top: 2.5rem;
+  font-size: clamp(1.35rem, 3vw, 2rem);
 }
 h2 small {
   color: #aeb1bc;
@@ -70,6 +107,13 @@ button {
 button:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+button,
+input,
+select,
+textarea {
+  max-width: 100%;
+  min-width: 0;
 }
 .link-button {
   padding: 0;
@@ -117,7 +161,7 @@ td small,
 }
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(145px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(145px, 100%), 1fr));
   gap: 1.25rem;
 }
 .grid .card {
@@ -132,10 +176,11 @@ td small,
 .filters {
   display: grid;
   gap: 0.8rem;
+  width: 100%;
   max-width: 1000px;
 }
 .filters {
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
   padding: 1rem;
   background: #191b22;
   border-radius: 0.65rem;
@@ -157,6 +202,7 @@ td small,
 .toolbar select,
 main > label select,
 td select {
+  width: 100%;
   padding: 0.7rem;
   border-radius: 0.4rem;
   border: 1px solid #4a4c57;
@@ -169,7 +215,7 @@ td select {
 }
 .detail {
   display: grid;
-  grid-template-columns: minmax(180px, 300px) 1fr;
+  grid-template-columns: minmax(180px, 300px) minmax(0, 1fr);
   gap: 2rem;
 }
 .poster {
@@ -181,6 +227,7 @@ td select {
   object-fit: cover;
 }
 .detail article {
+  min-width: 0;
   max-width: 760px;
 }
 .hero-backdrop {
@@ -227,7 +274,7 @@ td select {
 }
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(145px, 100%), 1fr));
   gap: 0.65rem;
   margin: 1rem 0;
 }
@@ -260,7 +307,7 @@ td select {
 }
 .image-gallery {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
   gap: 1rem;
 }
 .image-gallery img {
@@ -271,7 +318,7 @@ td select {
   border-radius: 0.5rem;
 }
 .image-gallery.backdrop {
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
 }
 .image-gallery.logo img {
   object-fit: contain;
@@ -313,7 +360,7 @@ td select {
 }
 .platforms {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
   gap: 1rem;
 }
 .platforms > a {
@@ -331,7 +378,7 @@ td select {
 }
 .person-results {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
   gap: 1rem;
 }
 .person-results > a {
@@ -386,11 +433,18 @@ td select {
   color: #ffbf47;
 }
 .table-wrap {
-  overflow: auto;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
 }
 table {
   width: 100%;
   border-collapse: collapse;
+}
+.table-wrap table {
+  min-width: 640px;
 }
 th,
 td {
@@ -433,6 +487,7 @@ th {
 }
 .search-modes {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.55rem;
   margin: 0 0 1.25rem;
 }
@@ -451,6 +506,7 @@ th {
   gap: 0.35rem;
 }
 .request select {
+  width: 100%;
   padding: 0.7rem;
   border-radius: 0.4rem;
   border: 1px solid #4a4c57;
@@ -460,6 +516,7 @@ th {
 }
 .deep-search-page,
 .deep-detail {
+  width: 100%;
   max-width: 1180px;
 }
 .deep-notice {
@@ -478,6 +535,7 @@ th {
 }
 .deep-tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   margin-bottom: 1rem;
 }
@@ -491,7 +549,7 @@ th {
 }
 .deep-search-form {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(120px, 180px) minmax(150px, 210px) auto;
+  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
   gap: 0.8rem;
   align-items: end;
   padding: 1rem;
@@ -518,7 +576,7 @@ th {
 }
 .deep-result-card {
   display: grid;
-  grid-template-columns: 150px 1fr;
+  grid-template-columns: minmax(92px, 150px) minmax(0, 1fr);
   gap: 1.1rem;
   margin: 1rem 0;
   padding: 1rem;
@@ -545,7 +603,7 @@ th {
 }
 .deep-inline-facts > div,
 .deep-facts > div {
-  min-width: 100px;
+  min-width: min(100px, 100%);
   padding: 0.55rem 0.7rem;
   border-radius: 0.4rem;
   background: #242630;
@@ -598,7 +656,7 @@ th {
 }
 .deep-people-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(270px, 100%), 1fr));
   gap: 1rem;
 }
 .deep-person-card {
@@ -649,7 +707,7 @@ th {
 .deep-detail-lead {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(180px, 290px) 1fr;
+  grid-template-columns: minmax(180px, 290px) minmax(0, 1fr);
   gap: 2rem;
 }
 .deep-detail-lead article {
@@ -678,7 +736,7 @@ th {
 .deep-credit-grid,
 .deep-mini-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(125px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(125px, 100%), 1fr));
   gap: 1rem;
 }
 .deep-credit-grid > a,
@@ -696,7 +754,7 @@ th {
 }
 .deep-gallery {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(170px, 100%), 1fr));
   gap: 0.8rem;
 }
 .deep-gallery img {
@@ -707,7 +765,7 @@ th {
   background: #20222b;
 }
 .deep-gallery.backdrops {
-  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(270px, 100%), 1fr));
 }
 .deep-gallery.backdrops img {
   aspect-ratio: 16 / 9;
@@ -738,7 +796,7 @@ th {
 }
 .deep-provider-grid article {
   display: grid;
-  min-width: 130px;
+  min-width: min(130px, 100%);
   gap: 0.35rem;
   padding: 0.7rem;
   border-radius: 0.45rem;
@@ -751,7 +809,7 @@ th {
 }
 .deep-filmography {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(225px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(225px, 100%), 1fr));
   gap: 0.8rem;
 }
 .deep-filmography > a {
@@ -766,6 +824,161 @@ th {
   aspect-ratio: 2 / 3;
   object-fit: cover;
   border-radius: 0.35rem;
+}
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
+  gap: 1rem;
+}
+.calendar-entry {
+  display: grid;
+  grid-template-columns: minmax(100px, 145px) minmax(0, 1fr);
+  gap: 0.8rem;
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid #30333f;
+  border-radius: 0.55rem;
+  background: #191b22;
+}
+.calendar-entry .card,
+.calendar-entry .card img {
+  width: 100%;
+}
+.request-success {
+  display: grid;
+  grid-template-columns: minmax(110px, 180px) minmax(0, 1fr);
+  gap: 1.25rem;
+  width: 100%;
+  max-width: 760px;
+  padding: 1rem;
+  border: 1px solid #397c5b;
+  border-radius: 0.65rem;
+  background: #18231d;
+}
+.request-success h2,
+.request-success h3 {
+  margin-top: 0;
+}
+.request-poster {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 0.45rem;
+}
+.request-error,
+.admin-error {
+  max-width: 760px;
+  padding: 0.85rem 1rem;
+  border: 1px solid #744347;
+  border-radius: 0.55rem;
+  background: #27191b;
+}
+.admin-request-list {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+.admin-request-card {
+  display: grid;
+  grid-template-columns: minmax(100px, 150px) minmax(0, 1fr);
+  gap: 1rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid #30333f;
+  border-radius: 0.65rem;
+  background: #191b22;
+}
+.admin-request-poster {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 0.45rem;
+  background: #292b35;
+}
+.admin-request-content,
+.admin-request-heading > * {
+  min-width: 0;
+}
+.admin-request-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.admin-request-heading h2,
+.admin-request-heading p {
+  margin: 0 0 0.4rem;
+}
+.request-status {
+  padding: 0.35rem 0.55rem;
+  border-radius: 2rem;
+  background: #35313f;
+  color: #ffcf71;
+}
+.admin-request-facts,
+.email-states {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+  gap: 0.65rem;
+}
+.admin-request-facts > div,
+.email-states > div {
+  min-width: 0;
+  padding: 0.65rem;
+  border-radius: 0.45rem;
+  background: #242630;
+}
+.admin-request-facts dt {
+  color: #b8bbc7;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+.admin-request-facts dd {
+  margin: 0.2rem 0 0;
+  overflow-wrap: anywhere;
+}
+.email-states > div {
+  display: grid;
+  gap: 0.35rem;
+}
+.email-states small {
+  color: #b8bbc7;
+  overflow-wrap: anywhere;
+}
+.admin-request-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+.admin-request-actions input {
+  flex: 1 1 240px;
+  width: 100%;
+  padding: 0.7rem;
+  border: 1px solid #4a4c57;
+  border-radius: 0.4rem;
+  background: #20222b;
+  color: white;
+}
+@media (max-width: 820px) {
+  header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  header nav {
+    width: 100%;
+    gap: 0.65rem 1rem;
+  }
+  .detail,
+  .deep-detail-lead {
+    grid-template-columns: 1fr;
+  }
+  .detail > .poster,
+  .deep-detail-lead > .poster {
+    width: min(260px, 100%);
+  }
 }
 @media (max-width: 640px) {
   .detail {
@@ -806,5 +1019,20 @@ th {
   }
   .deep-hero {
     margin-bottom: -2rem;
+  }
+  .request-success,
+  .admin-request-card,
+  .calendar-entry {
+    grid-template-columns: 1fr;
+  }
+  .request-poster,
+  .admin-request-poster,
+  .calendar-entry .card {
+    width: min(150px, 100%);
+  }
+  .search-modes a,
+  .deep-tabs button {
+    flex: 1 1 auto;
+    text-align: center;
   }
 }

@@ -1,5 +1,6 @@
 import secrets
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -11,6 +12,8 @@ from app.database.connection import get_db
 from app.models.movie import Movie
 from app.core.rate_limit import limit
 from app.models.operations import DataQualityIssue, MovieRequest, OttEvidence
+from app.services.deep_search import DeepSearchService
+from app.services.movie_requests import ACTIVE_REQUEST_STATUSES, MovieRequestEmailService
 
 router = APIRouter(prefix="/api/v1", tags=["Operations"])
 class RequestMovie(BaseModel):
@@ -30,7 +33,10 @@ class RequestMovie(BaseModel):
 
 @router.post("/movie-requests", status_code=201)
 def request_movie(payload: RequestMovie, request: Request, db: Session = Depends(get_db)):
-    limit(request,"movie-request",5,3600)
+    limit(request, "movie-request", 5, 3600)
+    limit(request, "movie-request-email-hour", 8, 3600, identity=payload.email)
+    limit(request, "movie-request-email-day", 20, 86400, identity=payload.email)
+    limit(request, "movie-request-id", 8, 3600, identity=payload.movie_external_id)
     local = db.query(Movie).filter(Movie.tmdb_id == payload.movie_external_id).first()
     if local:
         return JSONResponse(
@@ -39,14 +45,61 @@ def request_movie(payload: RequestMovie, request: Request, db: Session = Depends
         )
     duplicate = db.query(MovieRequest).filter(
         MovieRequest.external_movie_id == payload.movie_external_id,
-        MovieRequest.status.in_(["PENDING", "REVIEWING"]),
+        MovieRequest.status.in_(ACTIVE_REQUEST_STATUSES),
     ).first()
     if duplicate:
         return JSONResponse(
             status_code=409,
-            content={"detail": "This movie has already been requested.", "request_id": duplicate.request_id, "status": duplicate.status},
+            content={"detail": "This movie has already been requested and is being processed.", "status": duplicate.status},
         )
-    item = MovieRequest(request_id=f"REQ-{secrets.token_hex(5).upper()}", movie_name=payload.movie_name.strip(), email=str(payload.email), external_movie_id=payload.movie_external_id, release_year=payload.release_year, language=payload.language, details=payload.details.strip() if payload.details else None)
+    try:
+        snapshot = DeepSearchService(db).verify_movie(payload.movie_external_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(404, "Movie could not be found. Please check the ID or use Deep Search.") from exc
+        raise HTTPException(503, "Movie verification is temporarily unavailable. Please try again later.") from exc
+    except ValueError as exc:
+        raise HTTPException(404, "Movie could not be found. Please check the ID or use Deep Search.") from exc
+    except Exception as exc:
+        raise HTTPException(503, "Movie verification is temporarily unavailable. Please try again later.") from exc
+    local = db.query(Movie).filter(Movie.tmdb_id == payload.movie_external_id).first()
+    if local:
+        return JSONResponse(status_code=409, content={"detail": "This movie is already available.", "local_movie_id": local.id})
+    duplicate = db.query(MovieRequest).filter(
+        MovieRequest.external_movie_id == payload.movie_external_id,
+        MovieRequest.status.in_(ACTIVE_REQUEST_STATUSES),
+    ).first()
+    if duplicate:
+        return JSONResponse(status_code=409, content={"detail": "This movie has already been requested and is being processed.", "status": duplicate.status})
+    release_date = None
+    if snapshot.get("release_date"):
+        try:
+            release_date = date.fromisoformat(snapshot["release_date"])
+        except (TypeError, ValueError):
+            release_date = None
+    verified_title = snapshot["verified_title"].strip()
+    item = MovieRequest(
+        request_id=f"REQ-{secrets.token_hex(5).upper()}",
+        movie_name=verified_title,
+        email=str(payload.email),
+        external_movie_id=payload.movie_external_id,
+        release_year=release_date.year if release_date else None,
+        language=snapshot.get("original_language"),
+        details=payload.details.strip() if payload.details else None,
+        verified_title=verified_title,
+        original_title=snapshot.get("original_title"),
+        verified_release_date=release_date,
+        verified_original_language=snapshot.get("original_language"),
+        verified_language_name=snapshot.get("language_name"),
+        poster_path=snapshot.get("poster_path"),
+        backdrop_path=snapshot.get("backdrop_path"),
+        verified_overview=snapshot.get("overview"),
+        verified_genres=snapshot.get("genres") or [],
+        verified_status=snapshot.get("status"),
+        imdb_id=snapshot.get("imdb_id"),
+        director=snapshot.get("director"),
+        verified_at=datetime.now(timezone.utc),
+    )
     db.add(item)
     try:
         db.commit()
@@ -54,14 +107,32 @@ def request_movie(payload: RequestMovie, request: Request, db: Session = Depends
         db.rollback()
         duplicate = db.query(MovieRequest).filter(
             MovieRequest.external_movie_id == payload.movie_external_id,
-            MovieRequest.status.in_(["PENDING", "REVIEWING"]),
+            MovieRequest.status.in_(ACTIVE_REQUEST_STATUSES),
         ).first()
         if duplicate:
-            return JSONResponse(status_code=409, content={"detail": "This movie has already been requested.", "request_id": duplicate.request_id, "status": duplicate.status})
+            return JSONResponse(status_code=409, content={"detail": "This movie has already been requested and is being processed.", "status": duplicate.status})
         raise
+    email_result = MovieRequestEmailService(db).send(item, "confirmation", respect_cooldown=False)
     from app.services.notification_service import NotificationService
-    NotificationService(db).notify(f"New movie request: {item.movie_name} (ID {item.external_movie_id}; {item.request_id})", severity="info", fingerprint=f"movie-request:{item.request_id}")
-    return {"request_id": item.request_id, "status": item.status, "movie_external_id": item.external_movie_id, "duplicate": False}
+    try:
+        NotificationService(db).notify(f"New movie request: {item.movie_name} (ID {item.external_movie_id}; {item.request_id})", severity="info", fingerprint=f"movie-request:{item.request_id}")
+    except Exception:
+        # Requester confirmation and the committed request are independent of
+        # administrator-channel availability.
+        db.rollback()
+    return {
+        "request_id": item.request_id,
+        "status": item.status,
+        "movie_external_id": item.external_movie_id,
+        "verified_title": item.verified_title,
+        "original_title": item.original_title,
+        "release_date": item.verified_release_date,
+        "language": item.verified_original_language,
+        "language_name": item.verified_language_name,
+        "poster_path": item.poster_path,
+        "confirmation_email_status": email_result["status"],
+        "duplicate": False,
+    }
 
 @router.get("/admin/health", dependencies=[Depends(require_admin)])
 def data_health(db: Session = Depends(get_db)):

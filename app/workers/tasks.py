@@ -162,6 +162,12 @@ def notifications():
         return NotificationService(db).notify(f"Daily health summary: {open_issues} serious data issues; {failed} failed OTT research items", "info", "daily-health-summary", 1380)
     return _run(run)
 
+
+@celery_app.task(name="operations.movie_requests", autoretry_for=(Exception,), retry_backoff=True, max_retries=3)
+def movie_requests():
+    from app.services.movie_requests import MovieRequestAutomationService
+    return _run(lambda db: MovieRequestAutomationService(db).maintain())
+
 @celery_app.task(name="operations.cleanup")
 def cleanup():
     def run(db):

@@ -13,6 +13,7 @@ from app.services.operations import DataHealthService, OttResearchService
 from app.core.rate_limit import limit
 from fastapi import HTTPException
 from starlette.requests import Request
+from app.workers.celery_app import celery_app
 
 
 def test_data_health_cursor_and_deduplication(database):
@@ -72,3 +73,17 @@ def test_rate_limit_rejects_after_fixed_window(monkeypatch):
     with pytest.raises(HTTPException) as raised:
         limit(request, "test", 1, 60)
     assert raised.value.status_code == 429
+
+
+def test_identity_rate_limit_is_private_and_request_maintenance_is_scheduled(monkeypatch):
+    keys = []
+    class FakeRedis:
+        def incr(self, key): keys.append(key); return 1
+        def expire(self, *_): return True
+    monkeypatch.setattr("app.core.rate_limit.redis.from_url", lambda *args, **kwargs: FakeRedis())
+    request = Request({"type": "http", "method": "POST", "path": "/", "headers": [], "client": ("127.0.0.1", 1000)})
+    limit(request, "movie-request-email", 8, 3600, identity="private@example.com")
+    assert "private@example.com" not in keys[0]
+    schedule = celery_app.conf.beat_schedule["movie-request-maintenance"]
+    assert schedule["task"] == "operations.movie_requests"
+    assert schedule["schedule"] == 1800

@@ -3,7 +3,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
-import { Dashboard, Jobs, OttResearch } from "./Admin";
+import { Dashboard, Jobs, OttResearch, Requests } from "./Admin";
 import { Request } from "./Public";
 
 afterEach(() => {
@@ -41,6 +41,32 @@ it("renders the validated movie request form", () => {
   expect(
     screen.getByRole("button", { name: "Submit request" }),
   ).toBeInTheDocument();
+});
+
+it("renders responsive request snapshots, SLA state and email actions", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      items: [{
+        request_id: "REQ-123", verified_title: "A Very Long Verified Movie Title", original_title: "Original",
+        movie_external_id: 123, imdb_id: "tt1234567", release_date: "2026-01-02", language: "ml", language_name: "Malayalam",
+        poster_path: "/poster.jpg", director: "Director", email: "a-very-long-requester-address@example.com", details: "Details",
+        status: "FOUND", created_at: "2026-01-01T00:00:00Z", age_seconds: 50000, target_seconds: 120000, local_movie_id: null,
+        emails: {
+          confirmation: { status: "FAILED", sent_at: null, last_error: "SMTP unavailable" },
+          completion: { status: "PENDING", sent_at: null, last_error: null },
+          rejection: { status: "PENDING", sent_at: null, last_error: null },
+        },
+      }],
+    }),
+  }));
+  render(<MemoryRouter><Requests /></MemoryRouter>);
+  expect(await screen.findByText("A Very Long Verified Movie Title")).toBeInTheDocument();
+  expect(screen.getByText("Malayalam")).toBeInTheDocument();
+  expect(screen.getByText(/remaining/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Retry confirmation" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Add Movie" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Mark Added" })).toBeInTheDocument();
 });
 
 it("shows real backfill coverage and queues a selected repair", async () => {

@@ -1,6 +1,6 @@
 """Additive operational models for requests, evidence, health and notifications."""
 from datetime import date, datetime
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database.base import Base
 from app.models.mixins import TimestampMixin
@@ -17,6 +17,36 @@ class MovieRequest(TimestampMixin, Base):
     language: Mapped[str | None] = mapped_column(String(20))
     details: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    verified_title: Mapped[str | None] = mapped_column(String(500))
+    original_title: Mapped[str | None] = mapped_column(String(500))
+    verified_release_date: Mapped[date | None] = mapped_column(Date)
+    verified_original_language: Mapped[str | None] = mapped_column(String(20))
+    verified_language_name: Mapped[str | None] = mapped_column(String(100))
+    poster_path: Mapped[str | None] = mapped_column(String(1000))
+    backdrop_path: Mapped[str | None] = mapped_column(String(1000))
+    verified_overview: Mapped[str | None] = mapped_column(Text)
+    verified_genres: Mapped[list | None] = mapped_column(JSON)
+    verified_status: Mapped[str | None] = mapped_column(String(100))
+    imdb_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    director: Mapped[str | None] = mapped_column(String(500))
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    local_movie_id: Mapped[int | None] = mapped_column(ForeignKey("movies.id", ondelete="SET NULL"), index=True)
+    public_rejection_reason: Mapped[str | None] = mapped_column(Text)
+    internal_rejection_reason: Mapped[str | None] = mapped_column(Text)
+    confirmation_email_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    confirmation_email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmation_email_last_error: Mapped[str | None] = mapped_column(Text)
+    confirmation_email_last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completion_email_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    completion_email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completion_email_last_error: Mapped[str | None] = mapped_column(Text)
+    completion_email_last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_email_status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    rejection_email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rejection_email_last_error: Mapped[str | None] = mapped_column(Text)
+    rejection_email_last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sla_36_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sla_48_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class OttEvidence(TimestampMixin, Base):

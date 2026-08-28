@@ -1138,15 +1138,20 @@ export function Request() {
   const [params] = useSearchParams();
   const [languages] = useData("/api/v1/languages");
   const [result, setResult] = useState();
+  const [submitting, setSubmitting] = useState(false);
   const submit = (event) => {
     event.preventDefault();
+    setSubmitting(true);
+    setResult(undefined);
     const body = Object.fromEntries(new FormData(event.target));
     body.movie_external_id = Number(body.movie_external_id);
     if (body.release_year) body.release_year = Number(body.release_year);
     post("/api/v1/movie-requests", body)
       .then(setResult)
-      .catch((error) => setResult({ error: error.message, ...(error.data || {}) }));
+      .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
+      .finally(() => setSubmitting(false));
   };
+  const received = Boolean(result?.request_id);
   return (
     <main>
       <Seo title="Request a movie" />
@@ -1156,19 +1161,36 @@ export function Request() {
         request.
       </p>
       <p><Link to="/search?mode=deep">Don&apos;t know the ID? Use Deep Search.</Link></p>
-      <form className="request" onSubmit={submit}>
+      {!received && <form className="request" onSubmit={submit}>
         <label>Movie Name *<input name="movie_name" required maxLength="500" defaultValue={params.get("movie_name") || ""} /></label>
         <label>Email *<input name="email" type="email" required maxLength="320" /></label>
         <label>ID *<input name="movie_external_id" type="number" required min="1" max="2147483647" step="1" inputMode="numeric" defaultValue={params.get("movie_external_id") || ""} /></label>
         <label>Year<input name="release_year" type="number" min="1888" max="2100" defaultValue={params.get("release_year") || ""} /></label>
         <label>Language<select name="language" defaultValue={params.get("language") || ""}><option value="">Not specified</option>{(languages || COMMON_LANGUAGE_OPTIONS.map(([code, name]) => ({ code, name }))).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
         <label>Additional Details<textarea name="details" maxLength="2000" placeholder="Any details that help identify it" /></label>
-        <button>Submit request</button>
-      </form>
-      {result && (
-        <div role="status">
-          <p>{result.error || `Request ${result.request_id} is ${result.status.toLowerCase()}.`}</p>
-          {result.local_movie_id && <Link to={`/movies/${result.local_movie_id}`}>Open Local Movie</Link>}
+        <button disabled={submitting}>{submitting ? "Verifying movie…" : "Submit request"}</button>
+      </form>}
+      {received && (
+        <section className="request-success" role="status">
+          {result.poster_path && <Art className="request-poster" path={result.poster_path} alt={`${result.verified_title} poster`} />}
+          <div>
+            <h2>Request received</h2>
+            <h3>{result.verified_title}</h3>
+            {result.original_title && result.original_title !== result.verified_title && <p>{result.original_title}</p>}
+            <p>We aim to add this movie within 48 hours. We’ll email you once it becomes available.</p>
+            {result.confirmation_email_status === "SENT" ? (
+              <p>Confirmation email sent.</p>
+            ) : (
+              <p>Your request was received, but we could not send the confirmation email.</p>
+            )}
+            <small>Request reference: {result.request_id}</small>
+          </div>
+        </section>
+      )}
+      {result?.error && (
+        <div className="request-error" role="alert">
+          <p>{result.error}</p>
+          {result.local_movie_id && <Link className="button-link" to={`/movies/${result.local_movie_id}`}>View Movie</Link>}
         </div>
       )}
     </main>

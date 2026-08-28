@@ -17,6 +17,8 @@ from app.models.movie_metadata import ExternalId, MovieCredit, MovieRating, Pers
 from app.models.operations import BackfillRecord, DataQualityIssue, MovieRequest, NotificationLog, OperationState, OttEvidence
 from app.models.ott_availability import OttAvailability
 from app.services.image_fallback import ImageFallbackService
+from app.services.languages import language_name
+from app.services.movie_requests import ACTIVE_REQUEST_STATUSES, EMAIL_KINDS, MovieRequestAutomationService, MovieRequestEmailService
 from app.services.operations import OttResearchService, ResearchUsageService
 from app.services.release_status import (
     ELIGIBILITY_LABELS,
@@ -42,6 +44,8 @@ class Login(BaseModel):
 
 class RequestStatus(BaseModel):
     status: str
+    public_rejection_reason: str | None = Field(default=None, max_length=1000)
+    internal_reason: str | None = Field(default=None, max_length=2000)
 
 
 class OttAction(BaseModel):
@@ -108,7 +112,51 @@ def requests(search: str | None = None, status: str | None = None, page: int = Q
 
 
 def _request(item: MovieRequest):
-    return {"request_id": item.request_id, "movie_name": item.movie_name, "movie_external_id": item.external_movie_id, "email": item.email, "release_year": item.release_year, "language": item.language, "details": item.details, "status": item.status, "created_at": item.created_at, "updated_at": item.updated_at}
+    now = datetime.now(timezone.utc)
+    created = item.created_at if item.created_at.tzinfo else item.created_at.replace(tzinfo=timezone.utc)
+    age_seconds = max(0, int((now - created).total_seconds()))
+    target_at = created + timedelta(hours=48)
+    return {
+        "request_id": item.request_id,
+        "movie_name": item.movie_name,
+        "verified_title": item.verified_title or item.movie_name,
+        "original_title": item.original_title,
+        "movie_external_id": item.external_movie_id,
+        "email": item.email,
+        "release_year": item.release_year,
+        "release_date": item.verified_release_date,
+        "language": item.verified_original_language or item.language,
+        "language_name": language_name(item.verified_original_language or item.language, item.verified_language_name),
+        "poster_path": item.poster_path,
+        "backdrop_path": item.backdrop_path,
+        "overview": item.verified_overview,
+        "genres": item.verified_genres or [],
+        "movie_status": item.verified_status,
+        "imdb_id": item.imdb_id,
+        "director": item.director,
+        "verified_at": item.verified_at,
+        "details": item.details,
+        "status": item.status,
+        "local_movie_id": item.local_movie_id,
+        "public_rejection_reason": item.public_rejection_reason,
+        "internal_rejection_reason": item.internal_rejection_reason,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+        "age_seconds": age_seconds,
+        "target_at": target_at,
+        "target_seconds": int((target_at - now).total_seconds()),
+        "sla_36_notified_at": item.sla_36_notified_at,
+        "sla_48_notified_at": item.sla_48_notified_at,
+        "emails": {
+            kind: {
+                "status": getattr(item, f"{kind}_email_status"),
+                "sent_at": getattr(item, f"{kind}_email_sent_at"),
+                "last_error": getattr(item, f"{kind}_email_last_error"),
+                "last_attempt_at": getattr(item, f"{kind}_email_last_attempt_at"),
+            }
+            for kind in EMAIL_KINDS
+        },
+    }
 
 
 @router.get("/requests/{request_id}")
@@ -123,7 +171,45 @@ def update_request(request_id: str, payload: RequestStatus, db: Session = Depend
     if payload.status not in REQUEST_STATUSES: raise HTTPException(422, "Unknown request status")
     item = db.query(MovieRequest).filter_by(request_id=request_id).first()
     if not item: raise HTTPException(404, "Request not found")
-    item.status = payload.status; db.commit(); return _request(item)
+    item.public_rejection_reason = payload.public_rejection_reason
+    item.internal_rejection_reason = payload.internal_reason
+    if payload.status == "ADDED":
+        movie = db.query(Movie).filter(Movie.tmdb_id == item.external_movie_id).first()
+        if not movie:
+            raise HTTPException(409, "Cannot mark this request added until the matching movie exists locally")
+        MovieRequestAutomationService(db)._complete(item, movie)
+        return _request(item)
+    item.status = payload.status
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "Another active request already exists for this movie") from exc
+    if payload.status == "REJECTED":
+        MovieRequestEmailService(db).send(item, "rejection", respect_cooldown=False)
+    return _request(item)
+
+
+@router.post("/requests/{request_id}/emails/{kind}/retry", dependencies=[Depends(require_same_origin)])
+def retry_request_email(request_id: str, kind: str, request: Request, db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    if kind not in EMAIL_KINDS:
+        raise HTTPException(422, "Unknown email type")
+    item = db.query(MovieRequest).filter_by(request_id=request_id).first()
+    if not item:
+        raise HTTPException(404, "Request not found")
+    if kind == "completion":
+        movie = db.query(Movie).filter(Movie.tmdb_id == item.external_movie_id).first()
+        if item.status != "ADDED" or not movie or item.local_movie_id != movie.id:
+            raise HTTPException(409, "Completion email requires an added local movie")
+    if kind == "rejection" and item.status != "REJECTED":
+        raise HTTPException(409, "Rejection email requires a rejected request")
+    limit(request, "movie-request-email-retry", 6, 3600, identity=f"{request_id}:{kind}")
+    result = MovieRequestEmailService(db).send(item, kind)
+    if result.get("skipped") == "already_sent":
+        raise HTTPException(409, "This email was already sent")
+    if result.get("skipped") == "cooldown":
+        raise HTTPException(429, "Please wait before retrying this email")
+    return result | {"request": _request(item)}
 
 
 @router.get("/data-health")
@@ -336,6 +422,7 @@ def import_deep_search_movie(
     limit(request, "deep-search-import", 10, 3600)
     existing = db.query(Movie).filter_by(tmdb_id=tmdb_id).first()
     if existing:
+        MovieRequestAutomationService(db).reconcile_for_movie(existing)
         return {
             "created": False,
             "queued": False,
@@ -389,6 +476,7 @@ def import_deep_search_movie(
         db.rollback()
         existing = db.query(Movie).filter_by(tmdb_id=tmdb_id).first()
         if existing:
+            MovieRequestAutomationService(db).reconcile_for_movie(existing)
             return {
                 "created": False,
                 "queued": False,
@@ -397,6 +485,7 @@ def import_deep_search_movie(
                 "display_id": existing.tmdb_id,
             }
         raise
+    MovieRequestAutomationService(db).reconcile_for_movie(movie)
     return {"created": True, "status": "imported"} | _queue_deep_repair(movie)
 
 

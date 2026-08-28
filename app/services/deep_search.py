@@ -33,6 +33,7 @@ class DeepSearchService:
 
     SEARCH_TTL = 600
     DETAIL_TTL = 2700
+    VERIFICATION_TTL = 300
 
     def __init__(
         self,
@@ -364,6 +365,37 @@ class DeepSearchService:
             "recommendations": [self._movie_summary(item) for item in ((payload.get("recommendations") or {}).get("results") or [])],
             "similar": [self._movie_summary(item) for item in ((payload.get("similar") or {}).get("results") or [])],
             "watch_providers": {"country": "IN", "link": india.get("link"), "items": providers},
+        }
+
+    def verify_movie(self, movie_id: int) -> dict:
+        """Return the small authoritative snapshot required by movie requests."""
+        payload = self._get(
+            f"/movie/{movie_id}",
+            ttl=self.VERIFICATION_TTL,
+            append_to_response="external_ids,credits",
+        )
+        title = payload.get("title") or payload.get("original_title")
+        if payload.get("id") != movie_id or not title:
+            raise ValueError("Invalid live movie record")
+        directors = [
+            item.get("name")
+            for item in ((payload.get("credits") or {}).get("crew") or [])
+            if item.get("job") == "Director" and item.get("name")
+        ]
+        return {
+            "external_movie_id": movie_id,
+            "verified_title": title,
+            "original_title": payload.get("original_title") or None,
+            "release_date": (payload.get("release_date") or "")[:10] or None,
+            "original_language": payload.get("original_language") or None,
+            "language_name": language_name(payload.get("original_language")),
+            "poster_path": payload.get("poster_path") or None,
+            "backdrop_path": payload.get("backdrop_path") or None,
+            "overview": payload.get("overview") or None,
+            "genres": [item.get("name") for item in (payload.get("genres") or []) if item.get("name")],
+            "status": payload.get("status") or None,
+            "imdb_id": ((payload.get("external_ids") or {}).get("imdb_id") or None),
+            "director": ", ".join(dict.fromkeys(directors)) or None,
         }
 
     def person_detail(self, person_id: int) -> dict:
