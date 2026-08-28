@@ -72,6 +72,7 @@ def test_movie_people_find_detail_and_cache(database, monkeypatch):
 
     search = service.search_movies("Example", year=2026, language="ml")
     assert search["results"][0]["id"] == 101
+    assert search["results"][0]["original_language_name"] == "Malayalam"
     assert search["results"][0]["local_movie_id"] == 1
     assert len(search["results"]) == 1
     assert provider.calls[-1][1]["year"] == 2026
@@ -84,6 +85,7 @@ def test_movie_people_find_detail_and_cache(database, monkeypatch):
     assert service.find_imdb("tt1234567")["movies"][0]["in_library"] is True
 
     detail = service.movie_detail(101)
+    assert detail["source"] == "live"
     assert detail["movie"]["id"] == 101 and detail["movie"]["local_movie_id"] == 1
     assert detail["cast"][0]["character"] == "Hero"
     assert detail["crew"]["Cinematography"][0]["job"] == "Director of Photography"

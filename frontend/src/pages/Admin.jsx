@@ -225,6 +225,7 @@ export function Requests() {
                 <small>
                   {item.release_year} {item.language}
                 </small>
+                {item.movie_external_id && <small>ID {item.movie_external_id}</small>}
                 <small>{item.request_id}</small>
               </td>
               <td>{item.email}</td>

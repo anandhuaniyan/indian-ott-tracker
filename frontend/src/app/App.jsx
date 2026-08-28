@@ -1,24 +1,25 @@
 import React, { lazy, Suspense } from "react";
-import { Link, Route, Routes } from "react-router-dom";
+import { Link, Navigate, Route, Routes } from "react-router-dom";
 
 const page = name => lazy(() => import("../pages/Public").then(module => ({ default: module[name] })));
 const admin = name => lazy(() => import("../pages/Admin").then(module => ({ default: module[name] })));
 const deep = name => lazy(() => import("../pages/DeepSearch").then(module => ({ default: module[name] })));
+const SearchPage = lazy(() => import("../pages/Search"));
 const Home = page("Home"), Discover = page("Discover"), Browse = page("Browse"), Ott = page("Ott"), OttPlatform = page("OttPlatform"), Movie = page("Movie"), Person = page("Person"), Calendar = page("Calendar"), Request = page("Request"), Legal = page("Legal");
 const Login = admin("Login"), Dashboard = admin("Dashboard"), Requests = admin("Requests"), DataHealth = admin("DataHealth"), Images = admin("Images"), OttResearch = admin("OttResearch"), Jobs = admin("Jobs"), Notifications = admin("Notifications");
-const DeepSearch = deep("DeepSearch"), DeepMovie = deep("DeepMovie"), DeepPerson = deep("DeepPerson");
+const DeepMovie = deep("DeepMovie"), DeepPerson = deep("DeepPerson");
 
 const Missing = () => <main className="loading"><h1>Page not found</h1><Link to="/">Return home</Link></main>;
-const Shell = ({ children }) => <><header><Link className="brand" to="/">Indian OTT Tracker</Link><nav><Link to="/discover">Discover</Link><Link to="/search">Search</Link><Link className="deep-nav" to="/deep-search">Deep Search</Link><Link to="/ott">OTT</Link><Link to="/calendar/this-week">Calendar</Link><Link to="/request-movie">Request a movie</Link></nav></header>{children}<footer><nav><Link to="/about">About</Link><Link to="/contact">Contact</Link><Link to="/privacy">Privacy</Link><Link to="/terms">Terms</Link><Link to="/cookies">Cookies</Link><button className="link-button" onClick={() => window.dispatchEvent(new Event("open-cookie-preferences"))}>Cookie preferences</button></nav></footer></>;
+const Shell = ({ children }) => <><header><Link className="brand" to="/">Indian OTT Tracker</Link><nav><Link to="/discover">Discover</Link><Link to="/search">Search</Link><Link to="/ott">OTT</Link><Link to="/calendar/this-week">Calendar</Link><Link to="/request-movie">Request a movie</Link></nav></header>{children}<footer><nav><Link to="/about">About</Link><Link to="/contact">Contact</Link><Link to="/privacy">Privacy</Link><Link to="/terms">Terms</Link><Link to="/cookies">Cookies</Link><button className="link-button" onClick={() => window.dispatchEvent(new Event("open-cookie-preferences"))}>Cookie preferences</button></nav></footer></>;
 
 export default function App() {
   const contact = import.meta.env.VITE_SITE_CONTACT_EMAIL;
   return <Shell><Suspense fallback={<main className="loading">Loading…</main>}><Routes>
-    <Route path="/" element={<Home/>}/><Route path="/discover" element={<Discover/>}/><Route path="/search" element={<Discover/>}/>
+    <Route path="/" element={<Home/>}/><Route path="/discover" element={<Discover/>}/><Route path="/search" element={<SearchPage/>}/>
     <Route path="/genres/:slug" element={<Browse/>}/><Route path="/languages/:code" element={<Browse/>}/>
     <Route path="/ott" element={<Ott/>}/><Route path="/ott/:platform" element={<OttPlatform/>}/>
     <Route path="/movies/:id" element={<Movie/>}/><Route path="/people/:id" element={<Person/>}/><Route path="/calendar/:period" element={<Calendar/>}/><Route path="/request-movie" element={<Request/>}/>
-    <Route path="/deep-search" element={<DeepSearch/>}/><Route path="/deep-search/movie/:tmdbId" element={<DeepMovie/>}/><Route path="/deep-search/person/:tmdbPersonId" element={<DeepPerson/>}/>
+    <Route path="/deep-search" element={<Navigate to="/search?mode=deep" replace/>}/><Route path="/deep-search/movie/:tmdbId" element={<DeepMovie/>}/><Route path="/deep-search/person/:tmdbPersonId" element={<DeepPerson/>}/>
     <Route path="/admin/login" element={<Login/>}/><Route path="/admin" element={<Dashboard/>}/><Route path="/admin/requests" element={<Requests/>}/><Route path="/admin/data-health" element={<DataHealth/>}/><Route path="/admin/images" element={<Images/>}/><Route path="/admin/ott-research" element={<OttResearch/>}/><Route path="/admin/jobs" element={<Jobs/>}/><Route path="/admin/notifications" element={<Notifications/>}/>
     <Route path="/about" element={<Legal title="About"><p>Indian OTT Tracker is an independent discovery service for Indian films. It brings together movie metadata, release calendars and lawful streaming availability so viewers can decide what to watch and where to watch it.</p><p>TV titles and YouTube availability are outside the current movie-only V1 scope. Provider availability changes frequently, so every outbound source should be checked before making a purchase or subscription decision.</p></Legal>}/>
     <Route path="/contact" element={<Legal title="Contact"><p>Use the movie request form to report a missing title. For privacy, correction, rights or general enquiries, contact {contact ? <a href={`mailto:${contact}`}>{contact}</a> : "the email published by the site operator"}.</p><p>Please include the movie title and the page URL when reporting incorrect metadata. Do not send passwords, payment details or other sensitive information.</p></Legal>}/>

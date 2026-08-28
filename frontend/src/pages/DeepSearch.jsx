@@ -2,12 +2,9 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import Seo from "../components/Seo";
 import { adminGet, adminPost, get, imageUrl } from "../services/api";
+import { COMMON_LANGUAGE_OPTIONS, languageName } from "../services/languages";
 
-const LANGUAGES = [
-  ["", "Any language"], ["ml", "Malayalam"], ["ta", "Tamil"],
-  ["te", "Telugu"], ["hi", "Hindi"], ["kn", "Kannada"],
-  ["en", "English"],
-];
+const DEFAULT_LANGUAGES = COMMON_LANGUAGE_OPTIONS.map(([code, name]) => ({ code, name }));
 
 const Art = ({ path, alt, className = "", size = "w500" }) => (
   <img
@@ -24,12 +21,12 @@ const Art = ({ path, alt, className = "", size = "w500" }) => (
 
 const SourceNotice = () => (
   <aside className="deep-notice">
-    <strong>Live TMDB Search</strong>
-    <span>Data shown here is fetched directly from TMDB and may differ from locally stored movie data.</span>
+    <strong>Live Movie Search</strong>
+    <span>External details are fetched live and may differ from locally stored movie data.</span>
   </aside>
 );
 
-const Empty = ({ children = "No TMDB results matched this search." }) => <p className="empty deep-empty">{children}</p>;
+const Empty = ({ children = "No live results matched this search." }) => <p className="empty deep-empty">{children}</p>;
 const ErrorState = ({ message }) => <div className="deep-error" role="alert"><strong>Deep Search unavailable</strong><p>{message}</p></div>;
 
 function Pager({ page, pages, onPage }) {
@@ -40,6 +37,13 @@ function Pager({ page, pages, onPage }) {
     <button disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</button>
   </nav>;
 }
+
+const requestMovieHref = (movie) => {
+  const params = new URLSearchParams({ movie_name: movie.title, movie_external_id: String(movie.id) });
+  if (movie.release_date) params.set("release_year", movie.release_date.slice(0, 4));
+  if (movie.original_language) params.set("language", movie.original_language);
+  return `/request-movie?${params}`;
+};
 
 function MovieResult({ movie }) {
   return <article className="deep-result-card">
@@ -52,7 +56,7 @@ function MovieResult({ movie }) {
       <dl className="deep-inline-facts">
         <div><dt>ID</dt><dd>{movie.id}</dd></div>
         {movie.release_date && <div><dt>Release</dt><dd>{movie.release_date}</dd></div>}
-        {movie.original_language && <div><dt>Language</dt><dd>{movie.original_language.toUpperCase()}</dd></div>}
+        {movie.original_language && <div><dt>Language</dt><dd>{languageName(movie.original_language, movie.original_language_name)}</dd></div>}
         {movie.popularity != null && <div><dt>Popularity</dt><dd>{Number(movie.popularity).toFixed(1)}</dd></div>}
       </dl>
       {movie.overview && <p className="deep-snippet">{movie.overview}</p>}
@@ -60,6 +64,7 @@ function MovieResult({ movie }) {
       <div className="deep-actions">
         <Link className="button-link" to={`/deep-search/movie/${movie.id}`}>View live details</Link>
         {movie.local_movie_id && <Link to={`/movies/${movie.local_movie_id}`}>Open Local Movie</Link>}
+        {!movie.in_library && <Link to={requestMovieHref(movie)}>Request Movie</Link>}
       </div>
     </div>
   </article>;
@@ -77,7 +82,7 @@ function PersonResult({ person }) {
   </Link>;
 }
 
-export function DeepSearch() {
+export function DeepSearch({ modeTabs = null }) {
   const [params, setParams] = useSearchParams();
   const initialType = ["movies", "people", "imdb"].includes(params.get("type")) ? params.get("type") : "movies";
   const [type, setType] = useState(initialType);
@@ -88,6 +93,9 @@ export function DeepSearch() {
   const [data, setData] = useState();
   const [error, setError] = useState();
   const [loading, setLoading] = useState(false);
+  const [languages, setLanguages] = useState(DEFAULT_LANGUAGES);
+
+  useEffect(() => { get("/api/v1/languages").then((value) => Array.isArray(value) && setLanguages(value)).catch(() => {}); }, []);
 
   const path = useMemo(() => {
     const q = query.trim();
@@ -103,7 +111,7 @@ export function DeepSearch() {
   const run = (event) => {
     event?.preventDefault();
     if (!path) { setError("Enter a movie, person, or IMDb ID."); return; }
-    const next = { type, q: query.trim() };
+    const next = { mode: "deep", type, q: query.trim() };
     if (type === "movies" && year) next.year = year;
     if (type === "movies" && language) next.language = language;
     if (page > 1) next.page = String(page);
@@ -126,8 +134,9 @@ export function DeepSearch() {
   const personResults = type === "imdb" ? data?.people || [] : type === "people" ? data?.results || [] : [];
   const total = data?.total_results ?? movieResults.length + personResults.length;
   return <main className="deep-search-page">
-    <Seo title="Deep Search" description="Live TMDB movie and people lookup." noindex />
+    <Seo title="Deep Search" description="Live movie and people lookup for titles missing from the local library." noindex />
     <h1>Deep Search</h1>
+    {modeTabs}
     <SourceNotice />
     <div className="deep-tabs" role="tablist" aria-label="Search type">
       {[['movies', 'Movies'], ['people', 'People'], ['imdb', 'IMDb ID']].map(([value, label]) =>
@@ -140,13 +149,13 @@ export function DeepSearch() {
       </label>
       {type === "movies" && <>
         <label>Year<input type="number" min="1870" max="2200" value={year} onChange={(event) => setYear(event.target.value)} placeholder="Optional" /></label>
-        <label>Language<select value={language} onChange={(event) => setLanguage(event.target.value)}>{LANGUAGES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <label>Language<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="">Any language</option>{languages.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
       </>}
-      <button disabled={loading}>{loading ? "Searching…" : "Search TMDB"}</button>
+      <button disabled={loading}>{loading ? "Searching…" : "Search live source"}</button>
     </form>
     {error && <ErrorState message={error} />}
     {data && <section aria-live="polite">
-      <p className="deep-count">{total} result{total === 1 ? "" : "s"} from TMDB</p>
+      <p className="deep-count">{total} live result{total === 1 ? "" : "s"}</p>
       {movieResults.map((movie) => <MovieResult key={movie.id} movie={movie} />)}
       {personResults.length > 0 && <div className="deep-people-grid">{personResults.map((person) => <PersonResult key={person.id} person={person} />)}</div>}
       {!movieResults.length && !personResults.length && <Empty />}
@@ -193,7 +202,7 @@ const DeepMovieRail = ({ title, items }) => items?.length ? <section><h2>{title}
 export function DeepMovie() {
   const { tmdbId } = useParams();
   const { data, error, loading } = useLive(`/api/v1/deep-search/movies/${tmdbId}`);
-  if (loading) return <main className="loading">Loading live TMDB movie…</main>;
+  if (loading) return <main className="loading">Loading live movie details…</main>;
   if (error) return <main><Seo title="Deep movie" noindex/><ErrorState message={error}/></main>;
   const movie = data.movie;
   const externalLabels = { imdb_id: "IMDb", wikidata_id: "Wikidata", facebook_id: "Facebook", instagram_id: "Instagram", twitter_id: "Twitter" };
@@ -203,7 +212,7 @@ export function DeepMovie() {
     twitter_id: `https://x.com/${value}`,
   })[key];
   return <main className="deep-detail">
-    <Seo title={`${movie.title} live details`} description={movie.overview || `Live TMDB details for ${movie.title}.`} image={imageUrl(movie.backdrop_path || movie.poster_path, "original")} noindex />
+    <Seo title={`${movie.title} live details`} description={movie.overview || `Live details for ${movie.title}.`} image={imageUrl(movie.backdrop_path || movie.poster_path, "original")} noindex />
     <SourceNotice />
     {movie.backdrop_path && <Art className="deep-hero" path={movie.backdrop_path} size="original" alt={`${movie.title} backdrop`}/>} 
     <div className="deep-detail-lead">
@@ -216,17 +225,18 @@ export function DeepMovie() {
         {movie.overview && <p>{movie.overview}</p>}
         <dl className="deep-facts">
           <div><dt>ID</dt><dd>{movie.id}</dd></div>
-          {movie.vote_average != null && <div><dt>TMDB Rating</dt><dd>{Number(movie.vote_average).toFixed(1)}{movie.vote_count != null && ` (${movie.vote_count} votes)`}</dd></div>}
+          {movie.vote_average != null && <div><dt>Source Rating</dt><dd>{Number(movie.vote_average).toFixed(1)}{movie.vote_count != null && ` (${movie.vote_count} votes)`}</dd></div>}
           {movie.release_date && <div><dt>Release date</dt><dd>{movie.release_date}</dd></div>}
           {movie.status && <div><dt>Status</dt><dd>{movie.status}</dd></div>}
           {movie.runtime && <div><dt>Runtime</dt><dd>{movie.runtime} min</dd></div>}
-          {movie.original_language && <div><dt>Original language</dt><dd>{movie.original_language.toUpperCase()}</dd></div>}
+          {movie.original_language && <div><dt>Original language</dt><dd><Link to={`/languages/${movie.original_language}`}>{languageName(movie.original_language, movie.original_language_name)}</Link></dd></div>}
           {movie.popularity != null && <div><dt>Popularity</dt><dd>{Number(movie.popularity).toFixed(1)}</dd></div>}
           {movie.budget > 0 && <div><dt>Budget</dt><dd>${movie.budget.toLocaleString()}</dd></div>}
           {movie.revenue > 0 && <div><dt>Revenue</dt><dd>${movie.revenue.toLocaleString()}</dd></div>}
         </dl>
         <div className="deep-actions">
           {movie.local_movie_id && <Link className="button-link" to={`/movies/${movie.local_movie_id}`}>Open Local Movie</Link>}
+          {!movie.in_library && <Link className="button-link" to={requestMovieHref(movie)}>Request Movie</Link>}
           {movie.homepage && <a href={movie.homepage} rel="nofollow noreferrer">Official homepage</a>}
         </div>
         <AdminMovieAction movie={movie}/>
@@ -243,7 +253,7 @@ export function DeepMovie() {
     {data.cast?.length > 0 && <section><h2>Cast</h2><div className="deep-credit-grid">{data.cast.slice(0, 40).map((person, index) => <Link key={`${person.id}-${index}`} to={`/deep-search/person/${person.id}`}><Art path={person.profile_path} alt={`${person.name} profile`}/><strong>{person.name}</strong>{person.character && <small>{person.character}</small>}</Link>)}</div></section>}
     {Object.entries(data.crew || {}).map(([group, people]) => <section key={group}><h2>{group}</h2><div className="deep-crew-list">{people.map((person, index) => <Link key={`${person.id}-${person.job}-${index}`} to={`/deep-search/person/${person.id}`}><strong>{person.name}</strong><small>{person.job}</small></Link>)}</div></section>)}
     {data.releases?.length > 0 && <section><h2>Country release information</h2><div className="deep-release-list">{data.releases.map((country) => <article key={country.country}><h3>{country.country === "IN" ? "India (IN)" : country.country}</h3>{country.releases.map((item, index) => <p key={`${item.date}-${item.type}-${index}`}><strong>{item.type}</strong> · {item.date}{item.certification && ` · ${item.certification}`}{item.note && ` · ${item.note}`}</p>)}</article>)}</div></section>}
-    {data.watch_providers?.items?.length > 0 && <section><h2>TMDB Watch Providers — India</h2><p className="muted">Provider availability does not establish an OTT release date.</p><div className="deep-provider-grid">{data.watch_providers.items.map((provider, index) => <article key={`${provider.id}-${provider.type}-${index}`}><Art path={provider.logo_path} alt=""/><strong>{provider.name}</strong><small>{provider.type}</small></article>)}</div>{data.watch_providers.link && <a href={data.watch_providers.link} rel="nofollow noreferrer">View provider information on TMDB</a>}</section>}
+    {data.watch_providers?.items?.length > 0 && <section><h2>Watch Providers — India</h2><p className="muted">Provider availability does not establish an OTT release date.</p><div className="deep-provider-grid">{data.watch_providers.items.map((provider, index) => <article key={`${provider.id}-${provider.type}-${index}`}><Art path={provider.logo_path} alt=""/><strong>{provider.name}</strong><small>{provider.type}</small></article>)}</div>{data.watch_providers.link && <a href={data.watch_providers.link} rel="nofollow noreferrer">View external provider information</a>}</section>}
     {data.keywords?.length > 0 && <section><h2>Keywords</h2><div className="chips">{data.keywords.map((keyword) => <Link key={keyword.id} to={`/search?q=${encodeURIComponent(keyword.name)}`}>{keyword.name}</Link>)}</div></section>}
     {data.alternative_titles?.length > 0 && <section><h2>Alternative titles</h2><div className="deep-alt-titles">{data.alternative_titles.slice(0, 40).map((item, index) => <span key={`${item.country}-${item.title}-${index}`}><strong>{item.title}</strong><small>{[item.country, item.type].filter(Boolean).join(" · ")}</small></span>)}</div></section>}
     {Object.entries(data.images || {}).map(([type, images]) => images.length > 0 && <section key={type}><h2>{type[0].toUpperCase() + type.slice(1)}</h2><div className={`deep-gallery ${type}`}>{images.map((item, index) => <Art key={`${item.file_path}-${index}`} path={item.file_path} size={type === "backdrops" ? "w780" : "w500"} alt={`${movie.title} ${type.slice(0, -1)}`}/>)}</div></section>)}
@@ -255,11 +265,11 @@ export function DeepMovie() {
 export function DeepPerson() {
   const { tmdbPersonId } = useParams();
   const { data, error, loading } = useLive(`/api/v1/deep-search/people/${tmdbPersonId}`);
-  if (loading) return <main className="loading">Loading live TMDB person…</main>;
+  if (loading) return <main className="loading">Loading live person details…</main>;
   if (error) return <main><Seo title="Deep person" noindex/><ErrorState message={error}/></main>;
   const person = data.person;
   return <main className="deep-detail">
-    <Seo title={`${person.name} live details`} description={person.biography || `Live TMDB details for ${person.name}.`} image={imageUrl(person.profile_path, "original")} noindex />
+    <Seo title={`${person.name} live details`} description={person.biography || `Live details for ${person.name}.`} image={imageUrl(person.profile_path, "original")} noindex />
     <SourceNotice />
     <div className="deep-detail-lead person-lead">
       <Art className="poster" path={person.profile_path} alt={`${person.name} profile`}/>

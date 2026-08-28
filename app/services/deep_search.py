@@ -14,6 +14,7 @@ from app.config.settings import settings
 from app.models.movie import Movie
 from app.models.movie_metadata import Person
 from app.services.roles import normalize_role
+from app.services.languages import language_name
 from app.services.tmdb.client import TMDbClient
 
 
@@ -110,6 +111,7 @@ class DeepSearchService:
             "original_title": item.get("original_title"),
             "release_date": item.get("release_date") or None,
             "original_language": item.get("original_language") or None,
+            "original_language_name": language_name(item.get("original_language")),
             "overview": item.get("overview") or None,
             "poster_path": item.get("poster_path") or None,
             "backdrop_path": item.get("backdrop_path") or None,
@@ -190,7 +192,7 @@ class DeepSearchService:
             raw = [item for item in raw if item.get("original_language") == language]
         matches = self._movie_matches(raw)
         return {
-            "source": "TMDB",
+            "source": "live",
             "page": payload.get("page", page),
             "total_pages": min(payload.get("total_pages") or 0, 500),
             "total_results": len(raw) if language else payload.get("total_results") or 0,
@@ -208,7 +210,7 @@ class DeepSearchService:
         raw = payload.get("results") or []
         matches = self._person_matches(raw)
         return {
-            "source": "TMDB",
+            "source": "live",
             "page": payload.get("page", page),
             "total_pages": min(payload.get("total_pages") or 0, 500),
             "total_results": payload.get("total_results") or 0,
@@ -226,7 +228,7 @@ class DeepSearchService:
         movie_matches = self._movie_matches(movie_raw)
         person_matches = self._person_matches(person_raw)
         return {
-            "source": "TMDB",
+            "source": "live",
             "external_id": external_id,
             "movies": [self._movie_summary(item, movie_matches.get(item.get("id"))) for item in movie_raw],
             "people": [self._person_summary(item, person_matches.get(item.get("id"))) for item in person_raw],
@@ -326,14 +328,17 @@ class DeepSearchService:
                     }
                 )
         return {
-            "source": "TMDB",
+            "source": "live",
             "movie": self._movie_summary(payload, local.id if local else None)
             | {
                 "tagline": payload.get("tagline") or None,
                 "status": payload.get("status") or None,
                 "runtime": payload.get("runtime"),
                 "genres": payload.get("genres") or [],
-                "spoken_languages": payload.get("spoken_languages") or [],
+                "spoken_languages": [
+                    item | {"english_name": language_name(item.get("iso_639_1"), item.get("english_name") or item.get("name"))}
+                    for item in payload.get("spoken_languages") or []
+                ],
                 "production_countries": payload.get("production_countries") or [],
                 "production_companies": payload.get("production_companies") or [],
                 "budget": payload.get("budget"),
@@ -384,7 +389,7 @@ class DeepSearchService:
         for items in groups.values():
             items.sort(key=lambda item: item.get("release_date") or "", reverse=True)
         return {
-            "source": "TMDB",
+            "source": "live",
             "person": {
                 "id": payload.get("id"),
                 "name": payload.get("name") or "Unknown",

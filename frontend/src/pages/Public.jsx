@@ -1,17 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Link, useLocation, useParams } from "react-router-dom";
+import { Link, useLocation, useParams, useSearchParams } from "react-router-dom";
 import { get, imageUrl, post } from "../services/api";
 import { Card, Failure, Loading } from "../components/ui";
 import Seo, { breadcrumbJsonLd } from "../components/Seo";
 import AdSlot from "../components/AdSlot";
+import { COMMON_LANGUAGE_OPTIONS, languageName } from "../services/languages";
 
-const LANGUAGE_NAMES = {
-  ml: "Malayalam",
-  ta: "Tamil",
-  te: "Telugu",
-  hi: "Hindi",
-  kn: "Kannada",
-};
 const SORTS = [
   ["latest", "Latest"],
   ["oldest", "Oldest"],
@@ -202,7 +196,7 @@ const initialFilters = {
   sort: "latest",
 };
 
-export function Discover() {
+export function Discover({ modeTabs = null }) {
   const location = useLocation();
   const isSearch = location.pathname === "/search";
   const initial = useMemo(
@@ -245,6 +239,7 @@ export function Discover() {
     <main>
       <Seo title={isSearch ? "Search" : "Discover movies"} />
       <h1>{isSearch ? "Search movies and people" : "Discover movies"}</h1>
+      {isSearch && modeTabs}
       <form className="filters" onSubmit={submit}>
         <label className="wide">
           Search
@@ -261,7 +256,7 @@ export function Discover() {
               Language
               <select name="language" value={filters.language} onChange={set}>
                 <option value="">All</option>
-                {Object.entries(LANGUAGE_NAMES).map(([code, name]) => (
+                {(data?.filters?.languages?.map((item) => [item.code, item.name]) || COMMON_LANGUAGE_OPTIONS).map(([code, name]) => (
                   <option key={code} value={code}>
                     {name}
                   </option>
@@ -433,7 +428,7 @@ export function Browse() {
   if (error) return <Failure error={error} />;
   const title = slug
     ? `${slug.replaceAll("-", " ")} movies`
-    : `${LANGUAGE_NAMES[code] || code} movies`;
+    : `${languageName(code)} movies`;
   return (
     <main>
       <Seo
@@ -713,7 +708,7 @@ export function Movie() {
                 : "IMDb rating unavailable"}
             </span>
             {movie.original_language && (
-              <span>Original language: {movie.original_language}</span>
+              <span>Original language: <Link to={`/languages/${movie.original_language}`}>{languageName(movie.original_language, movie.original_language_name)}</Link></span>
             )}
             {movie.spoken_languages.length > 0 && (
               <span>
@@ -1140,14 +1135,17 @@ export function Calendar() {
 }
 
 export function Request() {
+  const [params] = useSearchParams();
+  const [languages] = useData("/api/v1/languages");
   const [result, setResult] = useState();
   const submit = (event) => {
     event.preventDefault();
     const body = Object.fromEntries(new FormData(event.target));
+    body.movie_external_id = Number(body.movie_external_id);
     if (body.release_year) body.release_year = Number(body.release_year);
     post("/api/v1/movie-requests", body)
       .then(setResult)
-      .catch((error) => setResult({ error: error.message }));
+      .catch((error) => setResult({ error: error.message, ...(error.data || {}) }));
   };
   return (
     <main>
@@ -1157,40 +1155,21 @@ export function Request() {
         Tell us about a missing movie. Your email is used only to process this
         request.
       </p>
+      <p><Link to="/search?mode=deep">Don&apos;t know the ID? Use Deep Search.</Link></p>
       <form className="request" onSubmit={submit}>
-        <input
-          name="movie_name"
-          required
-          maxLength="500"
-          placeholder="Movie name"
-        />
-        <input
-          name="email"
-          type="email"
-          required
-          maxLength="320"
-          placeholder="Email"
-        />
-        <input
-          name="release_year"
-          type="number"
-          min="1888"
-          max="2100"
-          placeholder="Release year"
-        />
-        <input name="language" maxLength="20" placeholder="Language" />
-        <textarea
-          name="details"
-          maxLength="2000"
-          placeholder="Any details that help identify it"
-        />
+        <label>Movie Name *<input name="movie_name" required maxLength="500" defaultValue={params.get("movie_name") || ""} /></label>
+        <label>Email *<input name="email" type="email" required maxLength="320" /></label>
+        <label>ID *<input name="movie_external_id" type="number" required min="1" max="2147483647" step="1" inputMode="numeric" defaultValue={params.get("movie_external_id") || ""} /></label>
+        <label>Year<input name="release_year" type="number" min="1888" max="2100" defaultValue={params.get("release_year") || ""} /></label>
+        <label>Language<select name="language" defaultValue={params.get("language") || ""}><option value="">Not specified</option>{(languages || COMMON_LANGUAGE_OPTIONS.map(([code, name]) => ({ code, name }))).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
+        <label>Additional Details<textarea name="details" maxLength="2000" placeholder="Any details that help identify it" /></label>
         <button>Submit request</button>
       </form>
       {result && (
-        <p role="status">
-          {result.error ||
-            `Request ${result.request_id} is ${result.status.toLowerCase()}.`}
-        </p>
+        <div role="status">
+          <p>{result.error || `Request ${result.request_id} is ${result.status.toLowerCase()}.`}</p>
+          {result.local_movie_id && <Link to={`/movies/${result.local_movie_id}`}>Open Local Movie</Link>}
+        </div>
       )}
     </main>
   );

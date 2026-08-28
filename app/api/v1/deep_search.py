@@ -18,12 +18,12 @@ def _service_error(exc: Exception) -> HTTPException:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status == 404:
-            return HTTPException(404, "TMDB record not found")
+            return HTTPException(404, "Live record not found")
         if status == 429:
-            return HTTPException(503, "TMDB is temporarily rate-limited; try again shortly")
+            return HTTPException(503, "Live search is temporarily unavailable; try again shortly")
     if isinstance(exc, RuntimeError) and "not configured" in str(exc):
-        return HTTPException(503, "Live TMDB search is not configured")
-    return HTTPException(502, "TMDB is temporarily unavailable")
+        return HTTPException(503, "Live search is not configured")
+    return HTTPException(502, "Live search is temporarily unavailable")
 
 
 def _run(request: Request, callback):

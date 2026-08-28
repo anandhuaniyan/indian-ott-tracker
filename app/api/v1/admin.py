@@ -100,14 +100,15 @@ def requests(search: str | None = None, status: str | None = None, page: int = Q
         query = query.filter(MovieRequest.status == status)
     if search:
         term = f"%{search.strip()}%"
-        query = query.filter(or_(MovieRequest.movie_name.ilike(term), MovieRequest.email.ilike(term), MovieRequest.request_id.ilike(term)))
+        request_id_match = MovieRequest.external_movie_id == int(search) if search.strip().isdigit() else False
+        query = query.filter(or_(MovieRequest.movie_name.ilike(term), MovieRequest.email.ilike(term), MovieRequest.request_id.ilike(term), request_id_match))
     total = query.count()
     rows = query.order_by(MovieRequest.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
     return _pagination(total, page, page_size) | {"items": [_request(item) for item in rows]}
 
 
 def _request(item: MovieRequest):
-    return {"request_id": item.request_id, "movie_name": item.movie_name, "email": item.email, "release_year": item.release_year, "language": item.language, "details": item.details, "status": item.status, "created_at": item.created_at, "updated_at": item.updated_at}
+    return {"request_id": item.request_id, "movie_name": item.movie_name, "movie_external_id": item.external_movie_id, "email": item.email, "release_year": item.release_year, "language": item.language, "details": item.details, "status": item.status, "created_at": item.created_at, "updated_at": item.updated_at}
 
 
 @router.get("/requests/{request_id}")
