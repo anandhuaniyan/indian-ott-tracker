@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { API } from "../services/api";
+import { API, imageUrl } from "../services/api";
 
 const call = (path, options) =>
   fetch(`${API}${path}`, { credentials: "include", ...options }).then(
@@ -73,6 +73,13 @@ const Table = ({ headers, rows }) => (
     </table>
   </div>
 );
+
+const duration = (seconds) => {
+  const value = Math.max(0, Math.abs(seconds || 0));
+  const hours = Math.floor(value / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  return `${hours}h ${minutes}m`;
+};
 
 export function Login() {
   const navigate = useNavigate(),
@@ -175,11 +182,21 @@ export function Requests() {
   const [status, setStatus] = useState(""),
     [search, setSearch] = useState(""),
     [query, setQuery] = useState("");
+  const [reasons, setReasons] = useState({});
+  const [actionError, setActionError] = useState();
   const [data, error, reload] = useAdmin(`/api/v1/admin/requests?${query}`);
-  const update = (id, value) =>
-    call(`/api/v1/admin/requests/${id}`, json("PATCH", { status: value })).then(
-      reload,
-    );
+  const action = (path, options) => {
+    setActionError(undefined);
+    return call(path, options).then(reload).catch((reason) => setActionError(reason.message));
+  };
+  const update = (id, value, extra = {}) => action(
+    `/api/v1/admin/requests/${id}`,
+    json("PATCH", { status: value, ...extra }),
+  );
+  const retry = (id, kind) => action(
+    `/api/v1/admin/requests/${id}/emails/${kind}/retry`,
+    { method: "POST" },
+  );
   if (error) return <Guard error={error} />;
   return (
     <Page title="Movie requests">
@@ -213,41 +230,66 @@ export function Requests() {
         </select>
         <button>Filter</button>
       </form>
+      {actionError && <p className="admin-error" role="alert">{actionError}</p>}
       {!data ? (
         <p>Loading…</p>
       ) : (
-        <Table
-          headers={["Request", "Contact", "Details", "Status"]}
-          rows={data.items.map((item) => (
-            <tr key={item.request_id}>
-              <td>
-                <strong>{item.movie_name}</strong>
-                <small>
-                  {item.release_year} {item.language}
-                </small>
-                {item.movie_external_id && <small>ID {item.movie_external_id}</small>}
-                <small>{item.request_id}</small>
-              </td>
-              <td>{item.email}</td>
-              <td>{item.details || "—"}</td>
-              <td>
-                <select
-                  aria-label={`Status for ${item.movie_name}`}
-                  value={item.status}
-                  onChange={(event) =>
-                    update(item.request_id, event.target.value)
-                  }
-                >
-                  {["PENDING", "REVIEWING", "FOUND", "ADDED", "REJECTED"].map(
-                    (value) => (
-                      <option key={value}>{value}</option>
-                    ),
+        <div className="admin-request-list">
+          {data.items.map((item) => (
+            <article className="admin-request-card" key={item.request_id}>
+              <img className="admin-request-poster" src={imageUrl(item.poster_path)} alt={`${item.verified_title} poster`} loading="lazy" />
+              <div className="admin-request-content">
+                <div className="admin-request-heading">
+                  <div>
+                    <h2>{item.verified_title}</h2>
+                    {item.original_title && item.original_title !== item.verified_title && <p>{item.original_title}</p>}
+                  </div>
+                  <strong className="request-status">{item.status}</strong>
+                </div>
+                <dl className="admin-request-facts">
+                  <div><dt>ID</dt><dd>{item.movie_external_id || "Historical request"}</dd></div>
+                  <div><dt>IMDb</dt><dd>{item.imdb_id || "—"}</dd></div>
+                  <div><dt>Release</dt><dd>{item.release_date || item.release_year || "—"}</dd></div>
+                  <div><dt>Language</dt><dd>{item.language_name || item.language || "—"}</dd></div>
+                  <div><dt>Director</dt><dd>{item.director || "—"}</dd></div>
+                  <div><dt>Requester</dt><dd>{item.email}</dd></div>
+                  <div><dt>Reference</dt><dd>{item.request_id}</dd></div>
+                  <div><dt>Created</dt><dd>{new Date(item.created_at).toLocaleString()}</dd></div>
+                  <div><dt>Age</dt><dd>{duration(item.age_seconds)}</dd></div>
+                  <div><dt>48-hour target</dt><dd>{duration(item.target_seconds)} {item.target_seconds < 0 ? "overdue" : "remaining"}</dd></div>
+                </dl>
+                {item.details && <p><strong>User details:</strong> {item.details}</p>}
+                <div className="email-states">
+                  {Object.entries(item.emails).map(([kind, delivery]) => (
+                    <div key={kind}>
+                      <strong>{kind} email</strong>
+                      <span>{delivery.status}</span>
+                      <small>{delivery.sent_at ? new Date(delivery.sent_at).toLocaleString() : delivery.last_error || "Not sent"}</small>
+                      {delivery.status !== "SENT" && (kind === "confirmation" || kind === "completion" && item.status === "ADDED" || kind === "rejection" && item.status === "REJECTED") && (
+                        <button onClick={() => retry(item.request_id, kind)}>Retry {kind}</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="admin-request-actions">
+                  {item.status === "PENDING" && <button onClick={() => update(item.request_id, "REVIEWING")}>Review</button>}
+                  {["PENDING", "REVIEWING"].includes(item.status) && <button onClick={() => update(item.request_id, "FOUND")}>Mark Found</button>}
+                  {["PENDING", "REVIEWING", "FOUND"].includes(item.status) && item.movie_external_id && !item.local_movie_id && (
+                    <button onClick={() => action(`/api/v1/admin/deep-search/movies/${item.movie_external_id}/import`, { method: "POST" })}>Add Movie</button>
                   )}
-                </select>
-              </td>
-            </tr>
+                  {["PENDING", "REVIEWING", "FOUND"].includes(item.status) && <button onClick={() => update(item.request_id, "ADDED")}>Mark Added</button>}
+                  {["PENDING", "REVIEWING", "FOUND"].includes(item.status) && (
+                    <>
+                      <input aria-label={`Public rejection reason for ${item.verified_title}`} value={reasons[item.request_id] || ""} onChange={(event) => setReasons({ ...reasons, [item.request_id]: event.target.value })} placeholder="Optional public rejection reason" />
+                      <button onClick={() => update(item.request_id, "REJECTED", { public_rejection_reason: reasons[item.request_id] || null })}>Reject</button>
+                    </>
+                  )}
+                  {item.local_movie_id && <Link className="button-link" to={`/movies/${item.local_movie_id}`}>View Movie</Link>}
+                </div>
+              </div>
+            </article>
           ))}
-        />
+        </div>
       )}
     </Page>
   );

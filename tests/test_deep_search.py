@@ -46,7 +46,7 @@ class FakeTMDB:
             return {"posters": [{"file_path": "/poster.jpg", "iso_639_1": "ml"}], "backdrops": [{"file_path": "/backdrop.jpg", "iso_639_1": None}], "logos": [{"file_path": "/logo.png", "iso_639_1": "en"}]}
         if endpoint == "/movie/101":
             return {
-                "id": 101, "title": "Example Film", "original_title": "Original Example", "original_language": "ml", "release_date": "2026-01-02", "overview": "Movie", "vote_average": 7.9, "vote_count": 123,
+                "id": 101, "title": "Example Film", "original_title": "Original Example", "original_language": "ml", "release_date": "2026-01-02", "overview": "Movie", "poster_path": "/poster.jpg", "backdrop_path": "/backdrop.jpg", "status": "Released", "genres": [{"id": 18, "name": "Drama"}], "vote_average": 7.9, "vote_count": 123,
                 "credits": {"cast": [{"id": 10, "name": "Example Actor", "character": "Hero", "profile_path": "/actor.jpg"}], "crew": [{"id": 11, "name": "Example Director", "job": "Director", "department": "Directing"}, {"id": 12, "name": "Camera Person", "job": "Director of Photography", "department": "Camera"}]},
                 "release_dates": {"results": [{"iso_3166_1": "US", "release_dates": [{"release_date": "2026-02-01T00:00:00Z", "type": 3}]}, {"iso_3166_1": "IN", "release_dates": [{"release_date": "2026-01-02T00:00:00Z", "type": 3, "certification": "U/A"}]}]},
                 "external_ids": {"imdb_id": "tt1234567", "wikidata_id": "Q1"},
@@ -97,6 +97,23 @@ def test_movie_people_find_detail_and_cache(database, monkeypatch):
     assert detail["recommendations"][0]["id"] == 201
     assert detail["similar"][0]["id"] == 202
     assert detail["watch_providers"]["items"][0]["name"] == "Provider"
+
+    verified = service.verify_movie(101)
+    assert verified == {
+        "external_movie_id": 101,
+        "verified_title": "Example Film",
+        "original_title": "Original Example",
+        "release_date": "2026-01-02",
+        "original_language": "ml",
+        "language_name": "Malayalam",
+        "poster_path": "/poster.jpg",
+        "backdrop_path": "/backdrop.jpg",
+        "overview": "Movie",
+        "genres": ["Drama"],
+        "status": "Released",
+        "imdb_id": "tt1234567",
+        "director": "Example Director",
+    }
 
     person = service.person_detail(10)
     assert person["person"]["id"] == 10 and person["person"]["local_person_id"] == 1

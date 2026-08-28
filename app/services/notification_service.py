@@ -35,7 +35,7 @@ class NotificationService:
         if not (settings.SMTP_HOST and settings.SMTP_FROM and settings.ADMIN_NOTIFICATION_EMAIL): return False
         email = EmailMessage(); email["Subject"] = "Indian OTT Tracker notification"; email["From"] = settings.SMTP_FROM; email["To"] = settings.ADMIN_NOTIFICATION_EMAIL; email.set_content(message)
         with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as client:
-            client.starttls()
+            if settings.SMTP_USE_TLS: client.starttls()
             if settings.SMTP_USERNAME: client.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
             client.send_message(email)
         return True

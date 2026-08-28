@@ -193,7 +193,7 @@ it("renders stored movie metadata and galleries without fabricating empty fields
 
 it("requires the external movie ID and preserves Deep Search prefills", async () => {
   get.mockResolvedValue([{ code: "ml", name: "Malayalam" }]);
-  post.mockResolvedValue({ request_id: "REQ-1", status: "PENDING" });
+  post.mockResolvedValue({ request_id: "REQ-1", status: "PENDING", verified_title: "Aadu", original_title: "ആട്", poster_path: "/aadu.jpg", confirmation_email_status: "SENT" });
   render(
     <MemoryRouter initialEntries={["/request-movie?movie_name=Aadu&movie_external_id=326282&release_year=2015&language=ml"]}>
       <Routes><Route path="/request-movie" element={<Request/>}/></Routes>
@@ -207,6 +207,21 @@ it("requires the external movie ID and preserves Deep Search prefills", async ()
   fireEvent.change(screen.getByLabelText("Email *"), { target: { value: "viewer@example.com" } });
   fireEvent.click(screen.getByRole("button", { name: "Submit request" }));
   await waitFor(() => expect(post).toHaveBeenCalledWith("/api/v1/movie-requests", expect.objectContaining({ movie_name: "Aadu", movie_external_id: 326282, release_year: 2015, language: "ml" })));
+  expect(await screen.findByRole("heading", { name: "Request received" })).toBeInTheDocument();
+  expect(screen.getByAltText("Aadu poster")).toBeInTheDocument();
+  expect(screen.getByText("Confirmation email sent.")).toBeInTheDocument();
+});
+
+it("keeps a successful request when confirmation email delivery fails", async () => {
+  get.mockResolvedValue([]);
+  post.mockResolvedValue({ request_id: "REQ-2", status: "PENDING", verified_title: "Verified Film", poster_path: "/verified.jpg", confirmation_email_status: "FAILED" });
+  render(<MemoryRouter><Request /></MemoryRouter>);
+  fireEvent.change(screen.getByLabelText("Movie Name *"), { target: { value: "Typo Film" } });
+  fireEvent.change(screen.getByLabelText("Email *"), { target: { value: "viewer@example.com" } });
+  fireEvent.change(screen.getByLabelText("ID *"), { target: { value: "123" } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit request" }));
+  expect(await screen.findByRole("heading", { name: "Verified Film" })).toBeInTheDocument();
+  expect(screen.getByText(/request was received, but we could not send/i)).toBeInTheDocument();
 });
 
 it("supports person credit controls and separates normalized roles", async () => {
