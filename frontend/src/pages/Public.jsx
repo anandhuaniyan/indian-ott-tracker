@@ -30,6 +30,7 @@ const formatDate = (value) =>
 const useData = (path) => {
   const [data, setData] = useState();
   const [error, setError] = useState();
+  const [revision, setRevision] = useState(0);
   useEffect(() => {
     let current = true;
     setData(undefined);
@@ -40,8 +41,8 @@ const useData = (path) => {
     return () => {
       current = false;
     };
-  }, [path]);
-  return [data, error];
+  }, [path, revision]);
+  return [data, error, () => setRevision((value) => value + 1)];
 };
 
 const Rail = ({ title, items = [], more }) =>
@@ -122,14 +123,9 @@ export function Home() {
         <Link to="/discover">Explore movies</Link>
       </div>
       <Rail
-        title="Trending"
-        items={data.trending}
-        more="/discover?sort=popularity"
-      />
-      <Rail
         title="Popular"
         items={data.popular}
-        more="/discover?sort=highest-rated"
+        more="/discover?sort=popularity"
       />
       <Rail title="Latest theatrical" items={data.latest_theatrical} />
       <Rail title="Upcoming theatrical" items={data.upcoming_theatrical} />
@@ -564,6 +560,95 @@ const Values = ({ title, children }) =>
     </section>
   ) : null;
 
+const relativeTime = (value) => {
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 1000));
+  if (seconds < 60) return "Just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} ${days === 1 ? "day" : "days"} ago`;
+};
+
+const TrailerSection = ({ trailer, title }) => (
+  <section className="trailer-section" aria-labelledby="trailer-heading">
+    <h2 id="trailer-heading">Trailer</h2>
+    {trailer ? (
+      <div className="trailer-frame">
+        <iframe
+          src={trailer.embed_url}
+          title={trailer.name || `${title} official trailer`}
+          loading="lazy"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowFullScreen
+          referrerPolicy="strict-origin-when-cross-origin"
+        />
+      </div>
+    ) : (
+      <p className="empty">Trailer not available.</p>
+    )}
+  </section>
+);
+
+const CommentsSection = ({ movieId }) => {
+  const [data, setData] = useState();
+  const [page, setPage] = useState(1);
+  const [error, setError] = useState();
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState();
+  const load = (nextPage = 1) => {
+    setError(undefined);
+    get(`/api/v1/movies/${movieId}/comments?page=${nextPage}&page_size=10`, { maxAge: 0 })
+      .then((value) => {
+        setData((current) => nextPage === 1 ? value : { ...value, items: [...(current?.items || []), ...value.items] });
+        setPage(nextPage);
+      })
+      .catch((reason) => setError(reason.message));
+  };
+  useEffect(() => { load(1); }, [movieId]);
+  const submit = (event) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setError(undefined);
+    setMessage(undefined);
+    const form = event.currentTarget;
+    const body = Object.fromEntries(new FormData(form));
+    if (!body.email) delete body.email;
+    post(`/api/v1/movies/${movieId}/comments`, body)
+      .then((result) => {
+        setMessage(result.message);
+        form.reset();
+      })
+      .catch((reason) => setError(reason.message))
+      .finally(() => setSubmitting(false));
+  };
+  return (
+    <section className="comments-section" aria-labelledby="comments-heading">
+      <h2 id="comments-heading">Comments</h2>
+      <form className="comment-form" onSubmit={submit}>
+        <label>Display Name *<input name="display_name" minLength="2" maxLength="50" required autoComplete="name" /></label>
+        <label>Email <input name="email" type="email" maxLength="320" autoComplete="email" /><small>Optional and never displayed publicly.</small></label>
+        <label>Comment *<textarea name="comment" minLength="2" maxLength="2000" required rows="5" /></label>
+        <button disabled={submitting}>{submitting ? "Submitting…" : "Submit comment"}</button>
+      </form>
+      {message && <p className="comment-success" role="status">{message}</p>}
+      {error && <div className="request-error" role="alert"><p>{error}</p><button onClick={() => load(1)}>Retry</button></div>}
+      {!data ? <p>Loading comments…</p> : data.items.length ? (
+        <div className="comment-list">
+          {data.items.map((item) => (
+            <article className="comment" key={item.id}>
+              <header><strong>{item.display_name}</strong><time dateTime={item.created_at}>{relativeTime(item.created_at)}</time></header>
+              <p>{item.comment}</p>
+            </article>
+          ))}
+          {page < data.pages && <button onClick={() => load(page + 1)}>Load more comments</button>}
+        </div>
+      ) : <p className="empty">No comments yet. Be the first to comment.</p>}
+    </section>
+  );
+};
+
 export function Movie() {
   const { id } = useParams();
   const [data, error] = useData(`/api/v1/movies/${id}/detail`);
@@ -678,20 +763,24 @@ export function Movie() {
             </span>
             <span data-testid="ott-platform">
               <small>OTT Platform</small>
-              <strong>
-                {movie.ott_platform ||
-                  (movie.release_status === "Unknown"
-                    ? "Unknown"
-                    : "Not announced")}
-              </strong>
+              <strong>{movie.ott_platform || "Information not found"}</strong>
             </span>
             <span data-testid="ott-release">
               <small>OTT Release</small>
               <strong>
                 {formatDate(movie.ott_release_date) ||
-                  (movie.release_status === "Unknown"
-                    ? "Unknown"
-                    : "Not announced")}
+                  (movie.ott_platform ? "Not confirmed" : "Information not found")}
+              </strong>
+            </span>
+            <span data-testid="ott-status">
+              <small>OTT Availability</small>
+              <strong>
+                {({
+                  AVAILABLE_NOW: "Available now",
+                  COMING_TO_OTT: "Coming to OTT",
+                  PLATFORM_KNOWN_DATE_UNKNOWN: "Platform known — date unknown",
+                  OTT_INFORMATION_NOT_FOUND: "OTT information not found",
+                })[movie.ott_status] || "OTT information not found"}
               </strong>
             </span>
             {movie.ott_research_status && (
@@ -705,7 +794,9 @@ export function Movie() {
             <span>
               {movie.rating != null
                 ? `IMDb ★ ${Number(movie.rating).toFixed(1)}${movie.vote_count != null ? ` (${movie.vote_count} votes)` : ""}`
-                : "IMDb rating unavailable"}
+                : movie.rating_status === "pending"
+                  ? "IMDb rating pending"
+                  : "IMDb rating unavailable"}
             </span>
             {movie.original_language && (
               <span>Original language: <Link to={`/languages/${movie.original_language}`}>{languageName(movie.original_language, movie.original_language_name)}</Link></span>
@@ -750,7 +841,7 @@ export function Movie() {
                   item.watch_type,
                   item.release_date,
                   item.country,
-                  item.verification_state,
+                  item.release_date ? item.availability_state : "date not confirmed",
                   item.confidence != null && `${item.confidence}% confidence`,
                 ]
                   .filter(Boolean)
@@ -758,7 +849,9 @@ export function Movie() {
               </p>
               {item.source_url && (
                 <a href={item.source_url} rel="nofollow noreferrer">
-                  View source ({item.source})
+                  {item.source === "official_platform"
+                    ? `Watch on ${item.provider}`
+                    : `View source (${item.source})`}
                 </a>
               )}
             </div>
@@ -768,7 +861,7 @@ export function Movie() {
       <Values title="Ratings">
         {data.ratings.map((item, index) => (
           <p key={`${item.source}-${index}`}>
-            <strong>{item.source}</strong>: {item.rating ?? "Unavailable"}
+            <strong>{item.source}</strong>: {item.rating ?? (item.status === "pending" ? "Pending" : "Unavailable")}
             {item.votes != null && ` (${item.votes} votes)`}
           </p>
         ))}
@@ -805,6 +898,7 @@ export function Movie() {
           ))}
         </div>
       </Values>
+      <TrailerSection trailer={data.trailer} title={movie.title} />
       {["poster", "backdrop", "logo"].map((type) =>
         images(type).length ? (
           <Values
@@ -866,6 +960,7 @@ export function Movie() {
             </p>
           ))}
       </Values>
+      <CommentsSection movieId={movie.id} />
       <AdSlot slot={import.meta.env.VITE_ADSENSE_SLOT_ID} />
     </main>
   );
@@ -1020,116 +1115,320 @@ export function Person() {
   );
 }
 
-const CalendarMovie = ({ movie, type }) => (
-  <article className="calendar-entry">
-    <Card movie={movie} />
-    <div>
-      {type === "theatrical" ? (
-        <>
-          {movie.certification && (
-            <small>Certification: {movie.certification}</small>
+const calendarDate = (movie, type) =>
+  type === "ott" ? movie.ott_release_date : movie.theatrical_release_date;
+
+const CalendarMovie = ({ movie, type }) => {
+  const releaseDate = calendarDate(movie, type);
+  const language = movie.language_name || languageName(movie.language);
+  const isOtt = type === "ott";
+  return (
+    <article className="calendar-movie">
+      <Link
+        className="calendar-movie-link"
+        to={`/movies/${movie.id}`}
+        aria-label={`${movie.title}, ${isOtt ? "OTT" : "theatrical"} release ${formatDate(releaseDate)}`}
+      >
+        <span className="calendar-poster">
+          <img
+            loading="lazy"
+            decoding="async"
+            src={imageUrl(movie.poster_path, "w342")}
+            srcSet={
+              movie.poster_path
+                ? `${imageUrl(movie.poster_path, "w185")} 185w, ${imageUrl(movie.poster_path, "w342")} 342w, ${imageUrl(movie.poster_path, "w500")} 500w`
+                : undefined
+            }
+            sizes="(max-width: 600px) 46vw, (max-width: 1024px) 30vw, 210px"
+            alt={`${movie.title} poster`}
+            onError={(event) => {
+              event.currentTarget.onerror = null;
+              event.currentTarget.src = "/placeholder.svg";
+              event.currentTarget.removeAttribute("srcset");
+            }}
+          />
+        </span>
+        <span className="calendar-movie-info">
+          <strong className="calendar-movie-title" title={movie.title}>
+            {movie.title}
+          </strong>
+          <time dateTime={releaseDate}>{formatDate(releaseDate)}</time>
+          <span>{language || "Language unavailable"}</span>
+          <span className={`release-kind ${isOtt ? "ott" : "theatrical"}`}>
+            {isOtt ? "OTT" : "Theatrical"}
+          </span>
+          {isOtt && movie.ott_platform && (
+            <span className="calendar-platform">{movie.ott_platform}</span>
           )}
-          <small>Release: {movie.theatrical_release_date}</small>
-        </>
-      ) : (
-        <>
-          {movie.ott_platform_logo && (
-            <Art
-              path={movie.ott_platform_logo}
-              alt={`${movie.ott_platform} logo`}
-            />
+          {movie.rating != null && (
+            <span className="calendar-rating">
+              IMDb ★ {Number(movie.rating).toFixed(1)}
+            </span>
           )}
-          <Link
-            className="platform-link"
-            to={`/ott/${movie.ott_platform_slug}`}
-          >
-            {movie.ott_platform}
-          </Link>
-          <small>OTT release: {movie.ott_release_date}</small>
-          {movie.verification_state && (
-            <small className="capitalize">
-              {movie.verification_state} release
-            </small>
-          )}
-        </>
-      )}
-    </div>
-  </article>
+        </span>
+      </Link>
+    </article>
+  );
+};
+
+const CalendarLoading = () => (
+  <main className="calendar-page" aria-busy="true" aria-live="polite">
+    <div className="calendar-heading-skeleton skeleton" />
+    <div className="calendar-controls-skeleton skeleton" />
+    <span className="sr-only">Loading release calendar…</span>
+    <section className="calendar-date-group calendar-skeleton-group">
+      <div className="calendar-date-skeleton skeleton" />
+      <div className="calendar-grid">
+        {Array.from({ length: 6 }, (_, index) => (
+          <div className="calendar-card-skeleton" key={index}>
+            <div className="calendar-poster-skeleton skeleton" />
+            <div className="calendar-line-skeleton skeleton" />
+            <div className="calendar-line-skeleton short skeleton" />
+          </div>
+        ))}
+      </div>
+    </section>
+  </main>
 );
+
+const monthValue = (value, offset) => {
+  const current = new Date(`${value.slice(0, 7)}-01T00:00:00Z`);
+  current.setUTCMonth(current.getUTCMonth() + offset);
+  return current.toISOString().slice(0, 7);
+};
+
+const monthLabel = (value) =>
+  new Intl.DateTimeFormat(undefined, {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(`${value.slice(0, 7)}-01T00:00:00Z`));
 
 export function Calendar() {
   const { period } = useParams();
-  const pageLocation = useLocation();
-  const tab =
-    new URLSearchParams(pageLocation.search).get("tab") === "ott"
-      ? "ott"
-      : "theatrical";
-  const [data, error] = useData(`/api/v1/calendar/${period}`);
-  if (error) return <Failure error={error} />;
-  if (!data) return <Loading />;
+  const [calendarParams, setCalendarParams] = useSearchParams();
+  const tab = calendarParams.get("tab") === "ott" ? "ott" : "theatrical";
+  const selectedLanguage = calendarParams.get("language") || "";
+  const requestedMonth = calendarParams.get("month") || "";
+  const focusToday = calendarParams.get("focus") === "today";
+  const [todayRequest, setTodayRequest] = useState(0);
+  const endpoint = `/api/v1/calendar/${requestedMonth ? "this-month" : period}${
+    requestedMonth ? `?month=${encodeURIComponent(requestedMonth)}` : ""
+  }`;
+  const [data, error, retry] = useData(endpoint);
+  useEffect(() => {
+    if (!data?.today || !focusToday) return;
+    const section = document.getElementById(`release-date-${data.today}`);
+    if (!section) return;
+    const reducedMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    section.scrollIntoView?.({
+      behavior: reducedMotion ? "auto" : "smooth",
+      block: "start",
+    });
+    section.focus?.({ preventScroll: true });
+  }, [data?.today, focusToday, selectedLanguage, tab, todayRequest]);
+  if (error)
+    return (
+      <main className="calendar-page">
+        <Seo title="Release calendar" />
+        <h1>Release calendar</h1>
+        <div className="calendar-error" role="alert">
+          <h2>Release information could not be loaded</h2>
+          <p>Please try again.</p>
+          <button type="button" onClick={retry}>Retry</button>
+        </div>
+      </main>
+    );
+  if (!data) return <CalendarLoading />;
   const periods = [
     "previous-week",
     "this-week",
     "next-week",
-    "previous-month",
     "this-month",
-    "next-month",
   ];
-  const periodLabel = period.replaceAll("-", " ");
+  const periodLabel = requestedMonth
+    ? monthLabel(data.start_date)
+    : period.replaceAll("-", " ");
   const selected = data[tab];
+  const items = selected.items.filter(
+    (movie) => !selectedLanguage || movie.language === selectedLanguage,
+  );
+  const groups = items.reduce((result, movie) => {
+    const value = calendarDate(movie, tab);
+    if (!result.has(value)) result.set(value, []);
+    result.get(value).push(movie);
+    return result;
+  }, new Map());
+  const todayIsInRange =
+    data.today && data.start_date <= data.today && data.today <= data.end_date;
+  if (todayIsInRange && !groups.has(data.today)) groups.set(data.today, []);
+  const groupEntries = Array.from(groups.entries()).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  const availableLanguages = COMMON_LANGUAGE_OPTIONS.filter(([code]) =>
+    selected.items.some((movie) => movie.language === code),
+  );
+  const rangeMonth = data.start_date.slice(0, 7);
+  const calendarHref = (targetPeriod, changes = {}) => {
+    const next = new URLSearchParams(calendarParams);
+    Object.entries(changes).forEach(([key, value]) => {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    });
+    const query = next.toString();
+    return `/calendar/${targetPeriod}${query ? `?${query}` : ""}`;
+  };
   const seoTitle =
     tab === "ott"
       ? `OTT Releases ${periodLabel}`
       : `Movies Releasing ${periodLabel}`;
   return (
-    <main>
+    <main className="calendar-page">
       <Seo title={seoTitle} />
-      <h1 className="capitalize">{periodLabel} release calendar</h1>
-      <p>
-        {data.start_date} to {data.end_date}
-      </p>
+      <header className="calendar-hero">
+        <p className="eyebrow">Movie release calendar</p>
+        <h1 className="capitalize">{periodLabel} releases</h1>
+        <p>Browse movie releases by date, language, and release type.</p>
+      </header>
+      <nav className="calendar-month-nav" aria-label="Month navigation">
+        <Link
+          to={calendarHref("this-month", {
+            month: monthValue(rangeMonth, -1),
+            focus: null,
+          })}
+          aria-label={`Previous month, ${monthLabel(monthValue(rangeMonth, -1))}`}
+        >
+          <span aria-hidden="true">←</span> Previous month
+        </Link>
+        <strong>{monthLabel(rangeMonth)}</strong>
+        <Link
+          to={calendarHref("this-month", {
+            month: monthValue(rangeMonth, 1),
+            focus: null,
+          })}
+          aria-label={`Next month, ${monthLabel(monthValue(rangeMonth, 1))}`}
+        >
+          Next month <span aria-hidden="true">→</span>
+        </Link>
+        <Link
+          className="calendar-today"
+          to={calendarHref("this-month", {
+            month: null,
+            focus: "today",
+            tab,
+          })}
+          aria-label={`Today, ${formatDate(data.today)}`}
+          onClick={() => setTodayRequest((value) => value + 1)}
+        >
+          Today
+        </Link>
+      </nav>
       <nav className="chips period-nav" aria-label="Calendar period">
         {periods.map((item) => (
           <Link
             className={item === period ? "active" : ""}
             key={item}
-            to={`/calendar/${item}?tab=${tab}`}
+            to={calendarHref(item, { month: null, focus: null })}
           >
             {item.replaceAll("-", " ")}
           </Link>
         ))}
       </nav>
-      <nav className="calendar-tabs" aria-label="Release type">
+      <div className="calendar-toolbar">
+        <nav className="calendar-tabs" aria-label="Release type">
         <Link
           className={tab === "theatrical" ? "active" : ""}
-          to={`/calendar/${period}?tab=theatrical`}
+          to={calendarHref(requestedMonth ? "this-month" : period, { tab: "theatrical" })}
         >
           Theatrical Releases
         </Link>
         <Link
           className={tab === "ott" ? "active" : ""}
-          to={`/calendar/${period}?tab=ott`}
+          to={calendarHref(requestedMonth ? "this-month" : period, { tab: "ott" })}
         >
           OTT Releases
         </Link>
-      </nav>
-      {selected.items.length ? (
-        <div className="calendar-grid">
-          {selected.items.map((movie, index) => (
-            <CalendarMovie
-              key={`${movie.id}-${movie.ott_platform || "theatrical"}-${index}`}
-              movie={movie}
-              type={tab}
-            />
-          ))}
-        </div>
-      ) : (
-        <Empty>
-          {tab === "ott"
-            ? "No confirmed OTT releases found for this period yet."
-            : "No theatrical releases found for this period."}
-        </Empty>
-      )}
+        </nav>
+        <label className="calendar-language-filter">
+          <span>Language</span>
+          <select
+            value={selectedLanguage}
+            onChange={(event) => {
+              const next = new URLSearchParams(calendarParams);
+              if (event.target.value) next.set("language", event.target.value);
+              else next.delete("language");
+              setCalendarParams(next, { replace: true });
+            }}
+          >
+            <option value="">All languages</option>
+            {availableLanguages.map(([code, name]) => (
+              <option value={code} key={code}>{name}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <section className="calendar-content" aria-live="polite">
+        {groupEntries.length ? (
+          groupEntries.map(([releaseDate, movies]) => {
+            const dateId = `release-date-${releaseDate}`;
+            const date = new Date(`${releaseDate}T00:00:00Z`);
+            const weekday = new Intl.DateTimeFormat(undefined, {
+              weekday: "long", timeZone: "UTC",
+            }).format(date);
+            const isToday = releaseDate === data.today;
+            const timing = releaseDate > data.today
+              ? "Upcoming"
+              : isToday
+                ? "Releasing today"
+                : "Released";
+            return (
+              <section
+                className={`calendar-date-group${isToday ? " today" : ""}`}
+                aria-labelledby={`${dateId}-heading`}
+                aria-label={isToday ? `Today, ${formatDate(releaseDate)}` : undefined}
+                id={dateId}
+                key={releaseDate}
+                tabIndex={isToday ? -1 : undefined}
+              >
+                <header className="calendar-date-heading">
+                  <div>
+                    <span>{isToday ? "Today" : timing} · {weekday}</span>
+                    <h2 id={`${dateId}-heading`}>
+                      <time dateTime={releaseDate}>{formatDate(releaseDate)}</time>
+                    </h2>
+                  </div>
+                  <small>{movies.length} {movies.length === 1 ? "release" : "releases"}</small>
+                </header>
+                {movies.length ? (
+                  <div className="calendar-grid">
+                    {movies.map((movie, index) => (
+                      <CalendarMovie
+                        key={`${movie.id}-${movie.ott_platform || "theatrical"}-${index}`}
+                        movie={movie}
+                        type={tab}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="calendar-today-empty">
+                    <strong>No releases today.</strong>
+                    <span>
+                      No {tab === "ott" ? "confirmed OTT" : "theatrical"} releases match the selected filters.
+                    </span>
+                  </div>
+                )}
+              </section>
+            );
+          })
+        ) : (
+          <div className="calendar-empty">
+            <h2>No releases found for this period</h2>
+            <p>Try another month, release type, or language.</p>
+          </div>
+        )}
+      </section>
     </main>
   );
 }
@@ -1157,8 +1456,8 @@ export function Request() {
       <Seo title="Request a movie" />
       <h1>Request a movie</h1>
       <p>
-        Tell us about a missing movie. Your email is used only to process this
-        request.
+        Ask us to review any movie, including one that is already listed here.
+        Your email is used only to process this request.
       </p>
       <p><Link to="/search?mode=deep">Don&apos;t know the ID? Use Deep Search.</Link></p>
       {!received && <form className="request" onSubmit={submit}>
@@ -1177,7 +1476,7 @@ export function Request() {
             <h2>Request received</h2>
             <h3>{result.verified_title}</h3>
             {result.original_title && result.original_title !== result.verified_title && <p>{result.original_title}</p>}
-            <p>We aim to add this movie within 48 hours. We’ll email you once it becomes available.</p>
+            <p>We aim to review your request within 48 hours. We’ll email you when its status changes.</p>
             {result.confirmation_email_status === "SENT" ? (
               <p>Confirmation email sent.</p>
             ) : (

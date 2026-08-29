@@ -89,7 +89,7 @@ class OttAvailabilityService:
                 )
             )
 
-            if rec.ott_release_date:
+            if rec.ott_release_date and rec.verification_status == "CONFIRMED":
                 if earliest_release_date is None or rec.ott_release_date < earliest_release_date:
                     earliest_release_date = rec.ott_release_date
 

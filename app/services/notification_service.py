@@ -8,7 +8,7 @@ from app.models.operations import NotificationLog
 
 class NotificationService:
     def __init__(self, db: Session): self.db = db
-    def notify(self, message: str, severity="warning", fingerprint=None, cooldown_minutes=360):
+    def notify(self, message: str, severity="warning", fingerprint=None, cooldown_minutes=360, channels=None):
         fingerprint = fingerprint or hashlib.sha256(f"{severity}:{message}".encode()).hexdigest()
         old = self.db.query(NotificationLog).filter_by(fingerprint=fingerprint).filter(NotificationLog.last_notified_at.is_not(None)).order_by(NotificationLog.last_notified_at.desc()).first()
         now = datetime.now(timezone.utc)
@@ -16,7 +16,10 @@ class NotificationService:
             last_notified = old.last_notified_at if old.last_notified_at.tzinfo else old.last_notified_at.replace(tzinfo=timezone.utc)
             if last_notified > now - timedelta(minutes=cooldown_minutes): return False
         deliveries = []
+        enabled = set(channels or ("discord", "telegram", "email"))
         for channel, send in (("discord", self._discord), ("telegram", self._telegram), ("email", self._email)):
+            if channel not in enabled:
+                continue
             try:
                 sent = bool(send(message)); deliveries.append((channel, sent))
             except Exception:

@@ -61,6 +61,7 @@ it("renders live movie detail, images, credits, releases, providers, recommendat
   expect(screen.getByRole("heading", { name: "Similar Movies" })).toBeInTheDocument();
   expect(screen.getByText(/does not establish an OTT release date/i)).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Open Local Movie" })).toHaveAttribute("href", "/movies/91");
+  expect(screen.getByRole("link", { name: "Request Movie" })).toHaveAttribute("href", "/request-movie?movie_name=Aadu&movie_external_id=1469458&language=ml");
   expect(screen.getByRole("link", { name: "Malayalam" })).toHaveAttribute("href", "/languages/ml");
   expect(document.body).not.toHaveTextContent(/TMDB/i);
 });

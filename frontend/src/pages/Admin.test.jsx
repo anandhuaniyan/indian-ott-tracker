@@ -3,7 +3,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
-import { Dashboard, Jobs, OttResearch, Requests } from "./Admin";
+import { Comments, Dashboard, DataHealth, Jobs, OttResearch, Requests } from "./Admin";
 import { Request } from "./Public";
 
 afterEach(() => {
@@ -108,6 +108,42 @@ it("shows real backfill coverage and queues a selected repair", async () => {
       expect.objectContaining({ method: "POST" }),
     ),
   );
+});
+
+it("renders and moderates pending comments from the admin route", async () => {
+  const fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ items: [{ id: 7, movie_id: 1, movie_title: "Example Film", display_name: "Anand", email: "private@example.com", comment: "Great movie", status: "PENDING", created_at: "2026-08-29T00:00:00Z" }] }),
+  });
+  vi.stubGlobal("fetch", fetch);
+  render(<MemoryRouter><Comments /></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "Comments" })).toBeInTheDocument();
+  expect(await screen.findByText("Great movie")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Example Film" })).toHaveAttribute("href", "/movies/1");
+  fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/v1/admin/comments/7"), expect.objectContaining({ method: "PATCH" })));
+});
+
+it("shows IMDb lifecycle coverage on Data Health", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      total: 0,
+      items: [],
+      imdb: {
+        movies_total: 12281,
+        imdb_id_available: 9999,
+        imdb_id_missing: 2282,
+        imdb_rating_available: 0,
+        imdb_rating_pending: 9999,
+        imdb_provider_configured: false,
+      },
+    }),
+  }));
+  render(<MemoryRouter><DataHealth /></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "IMDb coverage" })).toBeInTheDocument();
+  expect(screen.getAllByText("9999")).toHaveLength(2);
+  expect(screen.getByText("imdb rating pending")).toBeInTheDocument();
 });
 
 it("explains release eligibility on the OTT research page", async () => {

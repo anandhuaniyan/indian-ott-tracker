@@ -1,4 +1,18 @@
-export const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const configuredApi = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+const browserHostname = typeof window === "undefined" ? "" : window.location.hostname;
+const configuredHostname = (() => {
+  try {
+    return configuredApi ? new URL(configuredApi).hostname : "";
+  } catch {
+    return "";
+  }
+})();
+const configuredIsLoopback = ["localhost", "127.0.0.1", "::1"].includes(configuredHostname);
+const browserIsLoopback = ["localhost", "127.0.0.1", "::1"].includes(browserHostname);
+
+// A phone opening the site over LAN must use the site's reverse proxy, not its
+// own localhost. Explicit non-loopback API origins remain supported.
+export const API = configuredIsLoopback && !browserIsLoopback ? "" : configuredApi;
 const cache = new Map();
 export async function get(path, { maxAge = 60000 } = {}) {
   const existing = cache.get(path);

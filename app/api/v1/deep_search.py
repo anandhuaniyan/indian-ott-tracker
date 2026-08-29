@@ -9,12 +9,17 @@ from sqlalchemy.orm import Session
 from app.core.rate_limit import limit
 from app.database.connection import get_db
 from app.services.deep_search import DeepSearchService
+from app.services.tmdb.client import TMDbRequestError
 
 
 router = APIRouter(prefix="/api/v1/deep-search", tags=["Deep Search"])
 
 
 def _service_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, TMDbRequestError):
+        if exc.status_code == 404:
+            return HTTPException(404, "Live record not found")
+        return HTTPException(503, "Live search is temporarily unavailable; try again shortly")
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
         if status == 404:

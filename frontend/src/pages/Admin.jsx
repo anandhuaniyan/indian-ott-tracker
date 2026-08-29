@@ -20,16 +20,19 @@ const json = (method, body) => ({
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
-const useAdmin = (path) => {
+const useAdmin = (path, refreshMilliseconds = 0) => {
   const [data, setData] = useState(),
     [error, setError] = useState();
   const load = () =>
     call(path)
-      .then(setData)
+      .then((value) => { setData(value); setError(undefined); })
       .catch((reason) => setError(reason.message));
   useEffect(() => {
     load();
-  }, [path]);
+    if (!refreshMilliseconds) return undefined;
+    const timer = window.setInterval(load, refreshMilliseconds);
+    return () => window.clearInterval(timer);
+  }, [path, refreshMilliseconds]);
   return [data, error, load];
 };
 
@@ -37,6 +40,7 @@ const Nav = () => (
   <nav className="admin-nav">
     <Link to="/admin">Dashboard</Link>
     <Link to="/admin/requests">Requests</Link>
+    <Link to="/admin/comments">Comments</Link>
     <Link to="/admin/data-health">Data health</Link>
     <Link to="/admin/images">Images</Link>
     <Link to="/admin/ott-research">OTT research</Link>
@@ -140,6 +144,7 @@ export function Dashboard() {
           ["OTT queue", data.ott_queue],
           ["Failed research", data.failed_research],
           ["Pending requests", data.pending_requests],
+          ["Pending comments", data.pending_comments],
         ].map(([label, value]) => (
           <article key={label}>
             <strong>{value}</strong>
@@ -184,7 +189,7 @@ export function Requests() {
     [query, setQuery] = useState("");
   const [reasons, setReasons] = useState({});
   const [actionError, setActionError] = useState();
-  const [data, error, reload] = useAdmin(`/api/v1/admin/requests?${query}`);
+  const [data, error, reload] = useAdmin(`/api/v1/admin/requests?${query}`, 15000);
   const action = (path, options) => {
     setActionError(undefined);
     return call(path, options).then(reload).catch((reason) => setActionError(reason.message));
@@ -229,6 +234,7 @@ export function Requests() {
           )}
         </select>
         <button>Filter</button>
+        <button type="button" onClick={reload}>Refresh</button>
       </form>
       {actionError && <p className="admin-error" role="alert">{actionError}</p>}
       {!data ? (
@@ -245,6 +251,7 @@ export function Requests() {
                     {item.original_title && item.original_title !== item.verified_title && <p>{item.original_title}</p>}
                   </div>
                   <strong className="request-status">{item.status}</strong>
+                  {item.movie_existed_at_submission && <span className="local-info">Movie exists locally</span>}
                 </div>
                 <dl className="admin-request-facts">
                   <div><dt>ID</dt><dd>{item.movie_external_id || "Historical request"}</dd></div>
@@ -262,10 +269,10 @@ export function Requests() {
                 <div className="email-states">
                   {Object.entries(item.emails).map(([kind, delivery]) => (
                     <div key={kind}>
-                      <strong>{kind} email</strong>
+                      <strong>{kind.replaceAll("_", " ")} email</strong>
                       <span>{delivery.status}</span>
-                      <small>{delivery.sent_at ? new Date(delivery.sent_at).toLocaleString() : delivery.last_error || "Not sent"}</small>
-                      {delivery.status !== "SENT" && (kind === "confirmation" || kind === "completion" && item.status === "ADDED" || kind === "rejection" && item.status === "REJECTED") && (
+                      <small>{delivery.sent_at ? new Date(delivery.sent_at).toLocaleString() : delivery.last_error || "Not sent"} · {delivery.attempt_count || 0} attempts</small>
+                      {delivery.status !== "SENT" && (kind === "confirmation" || kind === "admin_notification" || kind === "completion" && item.status === "ADDED" || kind === "rejection" && item.status === "REJECTED") && (
                         <button onClick={() => retry(item.request_id, kind)}>Retry {kind}</button>
                       )}
                     </div>
@@ -289,8 +296,49 @@ export function Requests() {
               </div>
             </article>
           ))}
+          {!data.items.length && <p className="empty">No movie requests match these filters.</p>}
         </div>
       )}
+    </Page>
+  );
+}
+
+export function Comments() {
+  const [status, setStatus] = useState("");
+  const [actionError, setActionError] = useState();
+  const [data, error, reload] = useAdmin(`/api/v1/admin/comments${status ? `?status=${status}` : ""}`, 15000);
+  const action = (id, options) => {
+    setActionError(undefined);
+    call(`/api/v1/admin/comments/${id}`, options).then(reload).catch((reason) => setActionError(reason.message));
+  };
+  if (error) return <Guard error={error} />;
+  return (
+    <Page title="Comments">
+      <div className="toolbar">
+        <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option>{["PENDING", "APPROVED", "HIDDEN", "REJECTED"].map((item) => <option key={item}>{item}</option>)}</select></label>
+        <button type="button" onClick={reload}>Refresh</button>
+      </div>
+      {actionError && <p className="admin-error" role="alert">{actionError}</p>}
+      {!data ? <p>Loading…</p> : data.items.length ? (
+        <div className="admin-comment-list">
+          {data.items.map((item) => (
+            <article className="admin-comment-card" key={item.id}>
+              <header><div><h2>{item.display_name}</h2><Link to={`/movies/${item.movie_id}`}>{item.movie_title}</Link></div><strong className="request-status">{item.status}</strong></header>
+              <p>{item.comment}</p>
+              <dl className="admin-request-facts">
+                <div><dt>Date</dt><dd>{new Date(item.created_at).toLocaleString()}</dd></div>
+                <div><dt>Email (private)</dt><dd>{item.email || "—"}</dd></div>
+              </dl>
+              <div className="admin-request-actions">
+                <button onClick={() => action(item.id, json("PATCH", { status: "APPROVED" }))}>Approve</button>
+                <button onClick={() => action(item.id, json("PATCH", { status: "HIDDEN" }))}>Hide</button>
+                <button onClick={() => action(item.id, json("PATCH", { status: "REJECTED" }))}>Reject</button>
+                <button onClick={() => action(item.id, { method: "DELETE" })}>Delete</button>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : <p className="empty">No comments match this filter.</p>}
     </Page>
   );
 }
@@ -323,6 +371,28 @@ export function DataHealth() {
         <p>Loading…</p>
       ) : (
         <>
+          <h2>IMDb coverage</h2>
+          <div className="metrics">
+            {Object.entries(data.imdb || {}).map(([label, value]) => (
+              <article key={label}>
+                <strong>{typeof value === "boolean" ? (value ? "Yes" : "No") : value ?? "Never"}</strong>
+                <span>{label.replaceAll("_", " ")}</span>
+              </article>
+            ))}
+          </div>
+          <h2>OTT coverage</h2>
+          <div className="metrics">
+            {Object.entries(data.ott || {}).filter(([label]) => label !== "percentages").map(([label, value]) => (
+              <article key={label}>
+                <strong>{value}</strong>
+                <span>{label.replaceAll("_", " ")}</span>
+                {label !== "total_movies" && data.ott?.percentages?.[label] != null && (
+                  <small>{data.ott.percentages[label]}%</small>
+                )}
+              </article>
+            ))}
+          </div>
+          <h2>Data-quality issues</h2>
           <p>{data.total} issues</p>
           <Table
             headers={[
@@ -417,11 +487,44 @@ export function OttResearch() {
     [data, error, reload] = useAdmin(
       `/api/v1/admin/ott-research?status=${status}`,
     );
+  const [detail, setDetail] = useState(null);
+  const [actionError, setActionError] = useState("");
+  const [manual, setManual] = useState({
+    platform: "", ott_release_date: "", source_url: "",
+    source_name: "", country: "IN", summary: "",
+  });
   const action = (id, value) =>
     call(
       `/api/v1/admin/ott-research/${id}/action`,
       json("POST", { action: value }),
     ).then(reload);
+  const inspect = (movieId) =>
+    call(`/api/v1/admin/ott-research/movies/${movieId}`)
+      .then((value) => {
+        setDetail(value);
+        setManual((current) => ({
+          ...current,
+          platform: value.canonical?.platform || "",
+          ott_release_date: value.canonical?.ott_release_date || "",
+        }));
+        setActionError("");
+      })
+      .catch((reason) => setActionError(reason.message));
+  const evidenceAction = (id, value) =>
+    call(`/api/v1/admin/ott-evidence/${id}`, json("PATCH", { action: value }))
+      .then(() => inspect(detail.movie.id))
+      .then(reload)
+      .catch((reason) => setActionError(reason.message));
+  const verify = (event) => {
+    event.preventDefault();
+    call(
+      `/api/v1/admin/ott-research/movies/${detail.movie.id}/verify`,
+      json("POST", manual),
+    )
+      .then(() => inspect(detail.movie.id))
+      .then(reload)
+      .catch((reason) => setActionError(reason.message));
+  };
   if (error) return <Guard error={error} />;
   return (
     <Page title="OTT research">
@@ -432,11 +535,15 @@ export function OttResearch() {
         <option value="">All states</option>
         <option value="ELIGIBLE">Eligible</option>
         <option value="WAITING_RELEASE">Waiting for release</option>
+        <option value="UNKNOWN">Unknown</option>
         <option value="RESEARCHING">Researching</option>
+        <option value="POSSIBLE">Possible</option>
         <option value="CONFIRMED">Confirmed</option>
         <option value="NOT_FOUND">Not found</option>
         <option value="CONFLICTING">Conflicting</option>
+        <option value="NEEDS_REVIEW">Needs review</option>
       </select>
+      {actionError && <p className="admin-error" role="alert">{actionError}</p>}
       {data && (
         <>
           <div className="metrics">
@@ -447,6 +554,22 @@ export function OttResearch() {
             <article>
               <strong>{data.tavily_usage.remaining}</strong>
               <span>Tavily application credits remaining</span>
+            </article>
+            <article>
+              <strong>{data.coverage?.movies_with_confirmed_ott_date ?? 0}</strong>
+              <span>Confirmed OTT dates</span>
+            </article>
+            <article>
+              <strong>{data.coverage?.movies_with_platform_but_missing_date ?? 0}</strong>
+              <span>Platform known, date unknown</span>
+            </article>
+            <article>
+              <strong>{data.coverage?.movies_with_conflicting_evidence ?? 0}</strong>
+              <span>Conflicting</span>
+            </article>
+            <article>
+              <strong>{data.coverage?.movies_needing_review ?? 0}</strong>
+              <span>Needs review</span>
             </article>
           </div>
           <Table
@@ -462,14 +585,18 @@ export function OttResearch() {
             rows={data.items.map((item) => (
               <tr key={item.movie_id}>
                 <td>
-                  {item.movie}
+                  <Link to={`/movies/${item.movie_id}`}>{item.movie}</Link>
+                  <small>{item.original_language || "Unknown language"}</small>
                   <small>{item.theatrical_release_date || "Unknown"}</small>
                 </td>
                 <td>
                   {item.release_status}
                   <small>{item.eligibility_label}</small>
                 </td>
-                <td>{item.status.replaceAll("_", " ")}</td>
+                <td>
+                  {item.status.replaceAll("_", " ")}
+                  <small>{(item.verification_status || "UNKNOWN").replaceAll("_", " ")}</small>
+                </td>
                 <td>
                   {item.platform || "Not announced"}
                   <small>{item.date || "Not announced"}</small>
@@ -483,6 +610,7 @@ export function OttResearch() {
                     item.source || "—"
                   )}
                   <small>{item.confidence}% confidence</small>
+                  <small>{item.sources ?? 0} evidence source{item.sources === 1 ? "" : "s"}</small>
                 </td>
                 <td>
                   {item.attempts}
@@ -505,10 +633,49 @@ export function OttResearch() {
                       Review
                     </button>
                   )}
+                  <button onClick={() => inspect(item.movie_id)}>Inspect evidence</button>
                 </td>
               </tr>
             ))}
           />
+          {detail && (
+            <section className="admin-evidence" aria-label="OTT evidence detail">
+              <header>
+                <h2>{detail.movie.title}: evidence</h2>
+                <button onClick={() => setDetail(null)}>Close</button>
+              </header>
+              <p>{detail.movie.original_language || "Unknown language"} · Theatrical {detail.movie.theatrical_release_date || "unknown"}</p>
+              <h3>Current canonical result</h3>
+              <p>{detail.canonical ? `${detail.canonical.platform} · ${detail.canonical.ott_release_date || "date not confirmed"} · ${detail.canonical.verification_status} · ${detail.canonical.confidence}%` : "No canonical OTT availability"}</p>
+              <div className="admin-evidence-list">
+                {detail.evidence.length ? detail.evidence.map((item) => (
+                  <article key={item.id}>
+                    <strong>{item.source_name || item.source_type}</strong>
+                    <p>{item.platform_found || "No platform"} · {item.release_date_found || "No date"} · {item.result_status} · {item.confidence}%</p>
+                    <p>{item.evidence_summary || "No summary"}</p>
+                    <a href={item.source_url} rel="noreferrer">Open source</a>
+                    {!item.rejected_at && (
+                      <>
+                        <button onClick={() => evidenceAction(item.id, "trust")}>Mark trusted</button>
+                        <button onClick={() => evidenceAction(item.id, "reject")}>Reject</button>
+                      </>
+                    )}
+                    {item.rejected_at && <small>Rejected: {item.rejection_reason || "No reason supplied"}</small>}
+                  </article>
+                )) : <p className="empty">No inspected source evidence yet.</p>}
+              </div>
+              <form onSubmit={verify} className="admin-manual-ott">
+                <h3>Manual verification</h3>
+                <label>Platform<input required value={manual.platform} onChange={(event) => setManual({ ...manual, platform: event.target.value })} /></label>
+                <label>OTT release date<input required type="date" value={manual.ott_release_date} onChange={(event) => setManual({ ...manual, ott_release_date: event.target.value })} /></label>
+                <label>Source URL<input required type="url" pattern="https://.*" value={manual.source_url} onChange={(event) => setManual({ ...manual, source_url: event.target.value })} /></label>
+                <label>Source name<input value={manual.source_name} onChange={(event) => setManual({ ...manual, source_name: event.target.value })} /></label>
+                <label>Country<input required value={manual.country} onChange={(event) => setManual({ ...manual, country: event.target.value.toUpperCase() })} /></label>
+                <label>Verification notes<textarea value={manual.summary} onChange={(event) => setManual({ ...manual, summary: event.target.value })} /></label>
+                <button type="submit">Mark confirmed</button>
+              </form>
+            </section>
+          )}
         </>
       )}
     </Page>
@@ -542,6 +709,7 @@ export function Jobs() {
     metadata: "Metadata",
     people: "People",
     images: "Images",
+    "imdb-ids": "IMDb ID recovery",
     imdb: "IMDb ratings",
     ott: "OTT queue",
     all: "Run sequential repair",

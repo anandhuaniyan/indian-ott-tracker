@@ -3,9 +3,10 @@
 from datetime import date, datetime, timedelta, timezone
 
 from app.models.movie import Movie
-from app.models.movie_metadata import ExternalId, MovieCredit, MovieRating, MovieReleaseDate, Person
+from app.models.movie_metadata import ExternalId, MovieCredit, MovieRating, MovieReleaseDate, MovieTrailer, Person
 from app.models.operations import BackfillRecord, OttEvidence
-from app.services.backfill import IMDbBackfillService, MetadataBackfillService, OttQueueBackfillService, PersonBackfillService, SingleMovieRepairService
+from app.services.backfill import IMDbBackfillService, MetadataBackfillService, OttQueueBackfillService, PersonBackfillService, SingleMovieRepairService, TrailerBackfillService
+from app.config.settings import settings
 from app.services.movie_metadata_service import MovieMetadataService
 from app.services.ott_providers import GoogleProgrammableSearchProvider
 from app.services.rating_provider import RatingResult
@@ -45,6 +46,22 @@ def test_person_backfill_saves_profile_and_practical_metadata(database, monkeypa
     assert result["succeeded"] == 1
     assert person.profile_path == "/real-profile.jpg" and person.biography == "Stored biography"
     assert person.imdb_id == "nm1234567" and person.birthday.isoformat() == "1980-01-02"
+
+
+def test_trailer_backfill_is_resumable_prioritized_and_idempotent(database, monkeypatch):
+    monkeypatch.setattr(settings, "TMDB_API_KEY", "configured")
+    calls = []
+
+    def videos(_self, tmdb_id):
+        calls.append(tmdb_id)
+        return {"results": [{"site": "YouTube", "key": f"Video{tmdb_id:06d}", "type": "Trailer", "name": "Official Trailer", "official": True, "iso_639_1": "ml"}]}
+
+    monkeypatch.setattr("app.services.backfill.TMDbMovieService.get_movie_videos", videos)
+    result = TrailerBackfillService(database).run(batch_size=10)
+    assert result["succeeded"] == 2 and result["complete"] is True
+    assert database.query(MovieTrailer).filter_by(is_primary=True).count() == 2
+    assert TrailerBackfillService(database).run(batch_size=10)["processed"] == 0
+    assert len(calls) == 2
 
 
 def test_imdb_backfill_uses_approved_provider_and_does_not_fabricate(database):

@@ -10,7 +10,11 @@ from app.models.operations import OperationState, OttEvidence
 from app.models.ott_availability import OttAvailability
 from app.services.operations import OttResearchService
 from app.services.ott_providers import TavilySearchProvider, configured_ott_provider
-from app.services.release_status import ReleaseStatusService
+from app.services.release_status import (
+    ReleaseStatusService,
+    classify_release,
+    research_status_label,
+)
 from app.workers.tasks import _ott_research_batch
 
 
@@ -30,6 +34,12 @@ def _theatrical(database, movie: Movie, release_date: date) -> None:
             release_type="3",
         )
     )
+
+
+def test_confirmed_status_overrides_a_stale_queue_checkpoint():
+    latest_queue = SimpleNamespace(status="QUEUED")
+
+    assert research_status_label(latest_queue, "CONFIRMED") == "Confirmed"
 
 
 def test_classifies_required_realistic_record_groups_without_provider_calls(database):
@@ -55,13 +65,16 @@ def test_classifies_required_realistic_record_groups_without_provider_calls(data
                 movie_id=movie.id,
                 provider="Netflix",
                 ott_release_date=today - timedelta(days=2),
-                status="confirmed",
+                status="released",
                 confidence=95,
+                verification_status="CONFIRMED",
             )
         )
         confirmed.append(movie)
 
-    unknown = [_movie(database, 2300 + index, f"Unknown Release {index}") for index in range(2)]
+    unknown = [
+        _movie(database, 2300 + index, f"Unknown Release {index}") for index in range(2)
+    ]
     direct = _movie(database, 2400, "Direct Digital Film")
     database.add(
         MovieReleaseDate(
@@ -75,10 +88,14 @@ def test_classifies_required_realistic_record_groups_without_provider_calls(data
 
     ReleaseStatusService(database).classify_batch(1000)
 
-    assert all(movie.release_status_code == "THEATRICALLY_RELEASED" for movie in released)
+    assert all(
+        movie.release_status_code == "THEATRICALLY_RELEASED" for movie in released
+    )
     assert all(movie.ott_research_eligibility == "ELIGIBLE" for movie in released)
     assert all(movie.release_status_code == "UPCOMING" for movie in upcoming)
-    assert all(movie.ott_research_eligibility == "WAITING_RELEASE" for movie in upcoming)
+    assert all(
+        movie.ott_research_eligibility == "WAITING_RELEASE" for movie in upcoming
+    )
     assert all(movie.ott_research_eligibility == "CONFIRMED" for movie in confirmed)
     assert all(movie.release_status_code == "UNKNOWN" for movie in unknown)
     assert all(movie.ott_research_eligibility == "METADATA_REPAIR" for movie in unknown)
@@ -86,10 +103,114 @@ def test_classifies_required_realistic_record_groups_without_provider_calls(data
     assert direct.ott_research_eligibility == "ELIGIBLE"
 
 
-def test_research_worker_calls_tavily_only_for_released_eligible_movies(database, monkeypatch):
+def test_primary_release_prefers_original_language_india_wide_theatrical(database):
+    movie = _movie(database, 2450, "Domestic First")
+    database.add_all(
+        [
+            MovieReleaseDate(
+                movie_id=movie.id,
+                country="US",
+                release_date=date(2026, 1, 2),
+                release_type="3",
+            ),
+            MovieReleaseDate(
+                movie_id=movie.id,
+                country="IN",
+                release_date=date(2026, 1, 3),
+                release_type="2",
+            ),
+            MovieReleaseDate(
+                movie_id=movie.id,
+                country="IN",
+                release_date=date(2026, 1, 5),
+                release_type="3",
+            ),
+        ]
+    )
+    database.commit()
+    assert classify_release(movie, today=date(2026, 2, 1)).theatrical_date == date(
+        2026, 1, 5
+    )
+
+
+def test_primary_release_uses_india_then_international_fallback(database):
+    india = Movie(tmdb_id=2451, title="India Fallback", original_language="en")
+    international = Movie(
+        tmdb_id=2452, title="International Fallback", original_language="en"
+    )
+    database.add_all([india, international])
+    database.flush()
+    database.add_all(
+        [
+            MovieReleaseDate(
+                movie_id=india.id,
+                country="US",
+                release_date=date(2026, 1, 1),
+                release_type="3",
+            ),
+            MovieReleaseDate(
+                movie_id=india.id,
+                country="IN",
+                release_date=date(2026, 1, 4),
+                release_type="3",
+            ),
+            MovieReleaseDate(
+                movie_id=international.id,
+                country="GB",
+                release_date=date(2026, 2, 3),
+                release_type="3",
+            ),
+            MovieReleaseDate(
+                movie_id=international.id,
+                country="US",
+                release_date=date(2026, 2, 1),
+                release_type="3",
+            ),
+        ]
+    )
+    database.commit()
+    assert classify_release(india, today=date(2026, 3, 1)).theatrical_date == date(
+        2026, 1, 4
+    )
+    assert classify_release(
+        international, today=date(2026, 3, 1)
+    ).theatrical_date == date(2026, 2, 1)
+
+
+def test_general_release_fallback_never_uses_provider_appearance_as_ott_date(database):
+    movie = Movie(
+        tmdb_id=2453,
+        title="General Release",
+        original_language="ta",
+        release_date=date(2026, 1, 10),
+    )
+    database.add(movie)
+    database.flush()
+    database.add(
+        OttAvailability(
+            movie_id=movie.id,
+            provider="Example Stream",
+            status="available",
+            confidence=95,
+            ott_release_date=None,
+        )
+    )
+    database.commit()
+    result = classify_release(movie, today=date(2026, 2, 1))
+    assert result.code == "THEATRICALLY_RELEASED"
+    assert result.theatrical_date == date(2026, 1, 10)
+    assert result.digital_date is None
+
+
+def test_research_worker_calls_tavily_only_for_released_eligible_movies(
+    database, monkeypatch
+):
     today = date.today()
     # Make the shared fixture's released movie complete so it cannot enter this queue.
-    database.query(OttAvailability).filter_by(movie_id=1).one().ott_release_date = today
+    fixture_ott = database.query(OttAvailability).filter_by(movie_id=1).one()
+    fixture_ott.ott_release_date = today
+    fixture_ott.verification_status = "CONFIRMED"
+    fixture_ott.status = "released"
     released = []
     for index in range(2):
         movie = _movie(database, 2500 + index, f"Eligible Research {index}")
@@ -105,8 +226,9 @@ def test_research_worker_calls_tavily_only_for_released_eligible_movies(database
             movie_id=confirmed.id,
             provider="Prime Video",
             ott_release_date=today,
-            status="confirmed",
+            status="released",
             confidence=95,
+            verification_status="CONFIRMED",
         )
     )
     database.commit()
@@ -141,7 +263,10 @@ def test_research_worker_calls_tavily_only_for_released_eligible_movies(database
 
 def test_monthly_budget_stops_tavily_without_paid_fallback(database, monkeypatch):
     today = date.today()
-    database.query(OttAvailability).filter_by(movie_id=1).one().ott_release_date = today
+    fixture_ott = database.query(OttAvailability).filter_by(movie_id=1).one()
+    fixture_ott.ott_release_date = today
+    fixture_ott.verification_status = "CONFIRMED"
+    fixture_ott.status = "released"
     movies = []
     for index in range(2):
         movie = _movie(database, 2600 + index, f"Budget Candidate {index}")
@@ -156,7 +281,9 @@ def test_monthly_budget_stops_tavily_without_paid_fallback(database, monkeypatch
         is_tavily = True
         last_query_count = 0
 
-        def __init__(self): self.calls = []
+        def __init__(self):
+            self.calls = []
+
         def search(self, movie, *, max_queries=None, before_query=None):
             self.last_query_count = 0
             if before_query and before_query():
@@ -167,7 +294,11 @@ def test_monthly_budget_stops_tavily_without_paid_fallback(database, monkeypatch
     provider = FakeTavily()
     monkeypatch.setattr("app.workers.tasks.configured_ott_provider", lambda: provider)
     result = _ott_research_batch(database)
-    usage = database.query(OperationState).filter(OperationState.name.like("tavily_usage:%")).one()
+    usage = (
+        database.query(OperationState)
+        .filter(OperationState.name.like("tavily_usage:%"))
+        .one()
+    )
 
     assert len(provider.calls) == 1
     assert usage.processed_count == usage.total_count == 1
@@ -180,14 +311,25 @@ def test_tavily_uses_at_most_two_disambiguated_queries(monkeypatch):
 
     class Response:
         status_code = 200
-        def raise_for_status(self): return None
+
+        def raise_for_status(self):
+            return None
+
         def json(self):
             content = (
                 "Specific Film is streaming on Netflix"
                 if len(calls) == 1
                 else "Specific Film streams on Netflix from September 12, 2026"
             )
-            return {"results": [{"title": "Specific Film OTT release", "url": f"https://netflix.com/title/{len(calls)}", "content": content}]}
+            return {
+                "results": [
+                    {
+                        "title": "Specific Film OTT release",
+                        "url": f"https://netflix.com/title/{len(calls)}",
+                        "content": content,
+                    }
+                ]
+            }
 
     def fake_post(*args, **kwargs):
         calls.append(kwargs["json"]["query"])
@@ -204,7 +346,10 @@ def test_tavily_uses_at_most_two_disambiguated_queries(monkeypatch):
     results = provider.search(movie, max_queries=2, before_query=lambda: True)
 
     assert len(calls) == provider.last_query_count == 2
-    assert all('"Specific Film"' in query and "2026" in query and "ml" in query for query in calls)
+    assert all(
+        '"Specific Film"' in query and "2026" in query and "ml" in query
+        for query in calls
+    )
     assert results[-1]["platform"] == "Netflix"
     assert results[-1]["release_date"] == "2026-09-12"
 
@@ -213,7 +358,9 @@ def test_tavily_selection_does_not_fall_back_to_google(monkeypatch):
     monkeypatch.setattr(settings, "OTT_RESEARCH_PROVIDER", "tavily")
     monkeypatch.setattr(settings, "TAVILY_API_KEY", "")
     monkeypatch.setattr(settings, "OTT_SEARCH_API_KEY", "")
-    monkeypatch.setattr(settings, "GOOGLE_SEARCH_API_KEY", "configured-but-not-selected")
+    monkeypatch.setattr(
+        settings, "GOOGLE_SEARCH_API_KEY", "configured-but-not-selected"
+    )
     monkeypatch.setattr(settings, "GOOGLE_SEARCH_ENGINE_ID", "engine")
     provider = configured_ott_provider()
     assert isinstance(provider, TavilySearchProvider)

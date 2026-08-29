@@ -10,6 +10,7 @@ from app.models.movie_metadata import (
     Keyword,
     MovieCredit,
     MovieImage,
+    MovieTrailer,
     MovieKeyword,
     MovieProductionCompany,
     MovieProductionCountry,
@@ -24,7 +25,7 @@ from app.models.ott_availability import OttAvailability
 from app.models.ott_platform import OttPlatform
 from app.models.tv_show import TVShow
 from app.models.tv_show_ott import TVShowOtt
-from app.models.operations import BackfillRecord, MovieRequest, OttEvidence, DataQualityIssue, NotificationLog, OperationState
+from app.models.operations import BackfillRecord, MovieComment, MovieRequest, OttEvidence, DataQualityIssue, NotificationLog, OperationState
 
 __all__ = [
     "AvailabilityType",
@@ -36,6 +37,7 @@ __all__ = [
     "Keyword",
     "MovieCredit",
     "MovieImage",
+    "MovieTrailer",
     "MovieKeyword",
     "MovieProductionCompany",
     "MovieProductionCountry",
@@ -53,5 +55,5 @@ __all__ = [
     "movie_languages",
     "tv_show_genres",
     "tv_show_languages",
-    "BackfillRecord", "MovieRequest", "OttEvidence", "DataQualityIssue", "NotificationLog", "OperationState",
+    "BackfillRecord", "MovieComment", "MovieRequest", "OttEvidence", "DataQualityIssue", "NotificationLog", "OperationState",
 ]
