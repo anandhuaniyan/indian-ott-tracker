@@ -20,7 +20,11 @@ from app.models.operations import MovieRequest, OperationState, OttEvidence
 
 THEATRICAL_RELEASE_TYPES = {"2", "3", "limited theatrical", "theatrical"}
 DIGITAL_RELEASE_TYPES = {"4", "digital", "ott", "streaming"}
-CANONICAL_OTT_STATES = {"available", "confirmed", "released"}
+CANONICAL_OTT_STATES = {"available", "confirmed", "released", "upcoming"}
+INDIAN_ORIGINAL_LANGUAGES = {
+    "as", "bn", "gu", "hi", "kn", "ks", "ml", "mr", "ne", "or", "pa",
+    "sa", "sd", "ta", "te", "ur",
+}
 
 RELEASE_LABELS = {
     "THEATRICALLY_RELEASED": "Released",
@@ -99,11 +103,36 @@ def _release_type(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
-def _preferred_date(rows) -> date | None:
+def _preferred_date(movie: Movie, rows) -> date | None:
+    """Choose a primary theatrical event without inventing language metadata.
+
+    Release-event rows do not reliably carry a language.  For an Indian
+    original-language movie, an India event is therefore the strongest
+    defensible domestic signal.  A wide theatrical event is preferred over a
+    limited event inside each tier, followed by the earliest reliable date.
+    """
+
     rows = list(rows)
-    indian = [row.release_date for row in rows if (row.country or "").upper() == "IN"]
-    values = indian or [row.release_date for row in rows]
-    return min(values) if values else None
+    if not rows:
+        return None
+
+    def select(pool) -> date | None:
+        pool = list(pool)
+        wide = [
+            row for row in pool
+            if _release_type(row.release_type) in {"3", "theatrical"}
+        ]
+        candidates = wide or pool
+        return min((row.release_date for row in candidates), default=None)
+
+    if (movie.original_language or "").lower() in INDIAN_ORIGINAL_LANGUAGES:
+        domestic = [row for row in rows if (row.country or "").upper() == "IN"]
+        if domestic:
+            return select(domestic)
+    indian = [row for row in rows if (row.country or "").upper() == "IN"]
+    if indian:
+        return select(indian)
+    return select(rows)
 
 
 def confirmed_canonical_ott(movie: Movie):
@@ -113,6 +142,7 @@ def confirmed_canonical_ott(movie: Movie):
         for item in movie.ott_availabilities
         if item.provider
         and item.ott_release_date
+        and item.verification_status == "CONFIRMED"
         and (item.status or "").lower() in CANONICAL_OTT_STATES
         and (item.confidence or 0) >= settings.OTT_CONFIRMATION_THRESHOLD
     ]
@@ -129,9 +159,9 @@ def best_canonical_ott(movie: Movie):
     return max(
         candidates,
         key=lambda item: (
-            bool(item.ott_release_date),
+            item.verification_status == "CONFIRMED" and bool(item.ott_release_date),
             (item.confidence or 0),
-            item.ott_release_date or date.min,
+            item.ott_release_date if item.verification_status == "CONFIRMED" else date.min,
         ),
         default=None,
     )
@@ -143,7 +173,7 @@ def classify_release(movie: Movie, *, today: date | None = None) -> ReleaseClass
     theatrical = [
         row for row in movie.release_dates if _release_type(row.release_type) in THEATRICAL_RELEASE_TYPES
     ]
-    theatrical_date = _preferred_date(theatrical)
+    theatrical_date = _preferred_date(movie, theatrical)
     if theatrical_date:
         return ReleaseClassification(
             "THEATRICALLY_RELEASED" if theatrical_date <= today else "UPCOMING",
@@ -152,13 +182,23 @@ def classify_release(movie: Movie, *, today: date | None = None) -> ReleaseClass
         )
 
     digital = [row for row in movie.release_dates if _release_type(row.release_type) in DIGITAL_RELEASE_TYPES]
-    digital_date = _preferred_date(digital)
+    digital_date = _preferred_date(movie, digital)
     canonical = confirmed_canonical_ott(movie)
     if digital_date or canonical:
         return ReleaseClassification(
             "DIRECT_TO_OTT",
             None,
             canonical.ott_release_date if canonical else digital_date,
+        )
+    # Preserve the last explicit high-confidence classification if release
+    # history is temporarily incomplete, then fall back to the provider's
+    # general release date. Neither value is ever taken from watch providers.
+    fallback_date = movie.theatrical_release_date or movie.release_date
+    if fallback_date:
+        return ReleaseClassification(
+            "THEATRICALLY_RELEASED" if fallback_date <= today else "UPCOMING",
+            fallback_date,
+            None,
         )
     return ReleaseClassification("UNKNOWN", None, None)
 
@@ -224,7 +264,9 @@ def research_eligibility(
 
 
 class ReleaseStatusService:
-    operation = "release_status_classification"
+    # A versioned cursor applies the improved primary-date policy without
+    # resetting or rewriting the completed V1 checkpoint.
+    operation = "release_status_classification_v2"
 
     def __init__(self, db: Session):
         self.db = db
@@ -232,7 +274,7 @@ class ReleaseStatusService:
     def latest_evidence(self, movie_id: int) -> OttEvidence | None:
         return (
             self.db.query(OttEvidence)
-            .filter(OttEvidence.movie_id == movie_id)
+            .filter(OttEvidence.movie_id == movie_id, OttEvidence.source_url.is_(None))
             .order_by(OttEvidence.updated_at.desc(), OttEvidence.id.desc())
             .first()
         )
@@ -354,7 +396,7 @@ class ReleaseStatusService:
         evidence_by_movie = {}
         evidence_rows = (
             self.db.query(OttEvidence)
-            .filter(OttEvidence.movie_id.in_(movie_ids))
+            .filter(OttEvidence.movie_id.in_(movie_ids), OttEvidence.source_url.is_(None))
             .order_by(OttEvidence.movie_id, OttEvidence.updated_at.desc(), OttEvidence.id.desc())
             .all()
         )
@@ -411,6 +453,11 @@ class ReleaseStatusService:
 def research_status_label(latest: OttEvidence | None, eligibility_code: str | None) -> str | None:
     if eligibility_code in {"WAITING_RELEASE", "MIN_DELAY", "METADATA_REPAIR", "TOO_OLD"}:
         return ELIGIBILITY_LABELS[eligibility_code]
+    # Canonical confirmation is the authoritative state.  A queue row is an
+    # operational checkpoint and may predate a later manual/source-backed
+    # confirmation, so it must never make a confirmed title look queued.
+    if eligibility_code == "CONFIRMED":
+        return RESEARCH_STATUS_LABELS["CONFIRMED"]
     if latest and latest.status in RESEARCH_STATUS_LABELS:
         return RESEARCH_STATUS_LABELS[latest.status]
     if eligibility_code in ELIGIBILITY_LABELS:

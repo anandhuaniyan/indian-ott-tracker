@@ -10,6 +10,7 @@ from app.repositories.genre_repository import GenreRepository
 from app.repositories.language_repository import LanguageRepository
 from app.repositories.movie_repository import MovieRepository
 from app.services.tmdb.movie_service import TMDbMovieService
+from app.services.trailers import TrailerService
 
 service = TMDbMovieService()
 
@@ -104,6 +105,8 @@ def sync_movies():
                                 db.flush()
                             movie.languages.append(language_obj)
 
+                        TrailerService(db).upsert(movie, details.get("videos", {}))
+
                     db.commit()
                     time.sleep(0.25)
 
@@ -114,6 +117,13 @@ def sync_movies():
         raise
     finally:
         db.close()
+
+
+def sync_latest_movies(max_pages: int = 5):
+    """Run the bounded incremental importer used by the daily worker."""
+    from app.services.tmdb.incremental_sync import IncrementalTMDbSync
+
+    return IncrementalTMDbSync().run(max_pages=max_pages)
 
 if __name__ == "__main__":
     sync_movies()

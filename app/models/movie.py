@@ -100,5 +100,6 @@ class Movie(TimestampMixin, Base):
     external_ids: Mapped[list["ExternalId"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
     release_dates: Mapped[list["MovieReleaseDate"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
     images: Mapped[list["MovieImage"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
+    trailers: Mapped[list["MovieTrailer"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
     ratings: Mapped[list["MovieRating"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
     alternative_titles: Mapped[list["AlternativeTitle"]] = relationship(back_populates="movie", cascade="all, delete-orphan")

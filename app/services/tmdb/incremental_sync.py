@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.database.session import SessionLocal
 from app.models.movie import Movie
 from app.services.tmdb.movie_service import TMDbMovieService
+from app.services.trailers import TrailerService
 
 
 class IncrementalTMDbSync:
@@ -35,6 +36,8 @@ class IncrementalTMDbSync:
 
                 for item in movies:
 
+                    details = self.client.get_movie_details(item["id"])
+
                     movie = (
                         db.query(Movie)
                         .filter(Movie.tmdb_id == item["id"])
@@ -42,39 +45,42 @@ class IncrementalTMDbSync:
                     )
 
                     if movie:
-                        movie.title = item["title"]
-                        movie.original_title = item.get("original_title")
-                        movie.overview = item.get("overview")
-                        movie.release_date = item.get("release_date") or None
-                        movie.poster_path = item.get("poster_path")
-                        movie.backdrop_path = item.get("backdrop_path")
-                        movie.popularity = item.get("popularity")
-                        movie.vote_average = item.get("vote_average")
-                        movie.vote_count = item.get("vote_count")
-                        movie.original_language = item.get("original_language")
-                        movie.adult = item.get("adult", False)
+                        movie.title = details["title"]
+                        movie.original_title = details.get("original_title")
+                        movie.overview = details.get("overview")
+                        movie.release_date = details.get("release_date") or None
+                        movie.poster_path = details.get("poster_path")
+                        movie.backdrop_path = details.get("backdrop_path")
+                        movie.popularity = details.get("popularity")
+                        movie.vote_average = details.get("vote_average")
+                        movie.vote_count = details.get("vote_count")
+                        movie.original_language = details.get("original_language")
+                        movie.adult = details.get("adult", False)
+
+                        TrailerService(db).upsert(movie, details.get("videos", {}))
 
                         updated += 1
                         continue
 
                     page_has_new_movie = True
 
-                    db.add(
-                        Movie(
-                            tmdb_id=item["id"],
-                            title=item["title"],
-                            original_title=item.get("original_title"),
-                            overview=item.get("overview"),
-                            release_date=item.get("release_date") or None,
-                            poster_path=item.get("poster_path"),
-                            backdrop_path=item.get("backdrop_path"),
-                            popularity=item.get("popularity"),
-                            vote_average=item.get("vote_average"),
-                            vote_count=item.get("vote_count"),
-                            original_language=item.get("original_language"),
-                            adult=item.get("adult", False),
-                        )
+                    movie = Movie(
+                        tmdb_id=item["id"],
+                        title=details["title"],
+                        original_title=details.get("original_title"),
+                        overview=details.get("overview"),
+                        release_date=details.get("release_date") or None,
+                        poster_path=details.get("poster_path"),
+                        backdrop_path=details.get("backdrop_path"),
+                        popularity=details.get("popularity"),
+                        vote_average=details.get("vote_average"),
+                        vote_count=details.get("vote_count"),
+                        original_language=details.get("original_language"),
+                        adult=details.get("adult", False),
                     )
+                    db.add(movie)
+                    db.flush()
+                    TrailerService(db).upsert(movie, details.get("videos", {}))
 
                     inserted += 1
 

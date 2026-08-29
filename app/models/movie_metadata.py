@@ -156,6 +156,25 @@ class MovieImage(TimestampMixin, Base):
     movie: Mapped["Movie"] = relationship(back_populates="images")
 
 
+class MovieTrailer(TimestampMixin, Base):
+    __tablename__ = "movie_trailers"
+    __table_args__ = (UniqueConstraint("movie_id", "provider", "video_key", name="uq_movie_trailer_provider_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id", ondelete="CASCADE"), index=True)
+    provider: Mapped[str] = mapped_column(String(30), default="YouTube", nullable=False)
+    video_key: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    video_type: Mapped[str | None] = mapped_column(String(50))
+    name: Mapped[str | None] = mapped_column(String(500))
+    official: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    language: Mapped[str | None] = mapped_column(String(10))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    movie: Mapped["Movie"] = relationship(back_populates="trailers")
+
+
 class MovieRating(TimestampMixin, Base):
     __tablename__ = "movie_ratings"
     __table_args__ = (UniqueConstraint("movie_id", "source", name="uq_movie_rating_source"),)
@@ -165,6 +184,11 @@ class MovieRating(TimestampMixin, Base):
     source: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     rating: Mapped[float | None] = mapped_column(Float)
     vote_count: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    last_error: Mapped[str | None] = mapped_column(Text)
     last_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     movie: Mapped["Movie"] = relationship(back_populates="ratings")

@@ -43,6 +43,10 @@ class OttAvailabilityBase(BaseModel):
     source_url: str | None = Field(default=None, max_length=1000)
     confidence: float = Field(default=100.0, ge=0.0, le=100.0)
     last_checked: datetime | None = None
+    verification_status: str = Field(default="UNKNOWN", max_length=20)
+    verified_at: datetime | None = None
+    manually_verified: bool = False
+    evidence_id: int | None = None
 
 
 class OttAvailabilityCreate(OttAvailabilityBase):

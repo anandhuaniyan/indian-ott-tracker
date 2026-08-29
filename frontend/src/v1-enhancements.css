@@ -12,75 +12,8 @@
   border-radius: .35rem;
 }
 
-.calendar-tabs {
-  display: flex;
-  gap: .7rem;
-  margin: 1.5rem 0;
-  border-bottom: 1px solid #343640;
-}
-
-.calendar-tabs a {
-  padding: .85rem 1.2rem;
-  border-radius: .45rem .45rem 0 0;
-  font-weight: 800;
-}
-
-.calendar-tabs a.active {
-  background: #ffbf47;
-  color: #111;
-}
-
-.calendar-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-  gap: 1.25rem;
-}
-
-.calendar-entry {
-  background: #1b1d25;
-  border: 1px solid #30323d;
-  border-radius: .6rem;
-  padding: .75rem;
-}
-
-.calendar-entry .card,
-.calendar-entry .card img {
-  width: 100%;
-}
-
-.calendar-entry .card img {
-  height: auto;
-  aspect-ratio: 2 / 3;
-}
-
-.calendar-entry > div {
-  display: grid;
-  gap: .3rem;
-  margin-top: .7rem;
-  color: #b8bbc7;
-}
-
-.calendar-entry > div > img {
-  width: 40px;
-  height: 40px;
-  object-fit: contain;
-}
-
 .platform-link,
 .filmography-group h3 {
   color: #ffbf47;
   font-weight: 700;
-}
-
-@media (max-width: 640px) {
-  .calendar-tabs {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 0;
-  }
-
-  .calendar-tabs a {
-    padding: .75rem .4rem;
-    text-align: center;
-  }
 }

@@ -30,7 +30,7 @@ def database():
         MovieCredit(movie_id=first.id, person_id=director.id, credit_type="crew", department="Directing", job="Director"),
         MovieReleaseDate(movie_id=first.id, country="IN", release_date=date.today() - timedelta(days=10), release_type="3"),
         MovieReleaseDate(movie_id=second.id, country="IN", release_date=date.today() + timedelta(days=20), release_type="3"),
-        OttAvailability(movie_id=first.id, provider="Netflix", status="confirmed", confidence=95),
+        OttAvailability(movie_id=first.id, provider="Netflix", status="available", confidence=95, verification_status="UNKNOWN"),
     ])
     session.commit()
     try: yield session

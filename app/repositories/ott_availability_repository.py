@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.movie import Movie
 from app.models.ott_availability import OttAvailability
+from app.services.ott_providers import normalize_platform
 
 
 class OttAvailabilityRepository:
@@ -37,31 +38,46 @@ class OttAvailabilityRepository:
         source_url: str | None = None,
         confidence: float = 100.0,
         last_checked: datetime | None = None,
+        verification_status: str = "UNKNOWN",
+        manually_verified: bool = False,
     ) -> OttAvailability:
         """Insert or update an OTT availability record."""
         now = datetime.now(timezone.utc)
         check_time = last_checked or now
 
-        record = (
-            self.db.query(OttAvailability)
-            .filter(
-                OttAvailability.movie_id == movie_id,
-                OttAvailability.provider == provider,
-                OttAvailability.country == country,
-                OttAvailability.watch_type == watch_type,
-            )
-            .first()
+        provider = normalize_platform(provider)
+        record = next(
+            (
+                item
+                for item in self.db.query(OttAvailability)
+                .filter(
+                    OttAvailability.movie_id == movie_id,
+                    OttAvailability.country == country,
+                    OttAvailability.watch_type == watch_type,
+                )
+                .all()
+                if normalize_platform(item.provider) == provider
+            ),
+            None,
         )
 
         if record:
+            record.provider = provider
             record.provider_logo = provider_logo or record.provider_logo
-            if ott_release_date:
+            if ott_release_date and not record.manually_verified:
                 record.ott_release_date = ott_release_date
-            record.status = status
-            record.source_type = source_type
-            if source_url:
-                record.source_url = source_url
-            record.confidence = confidence
+                record.verification_status = (
+                    verification_status
+                    if verification_status == "CONFIRMED"
+                    else "NEEDS_REVIEW"
+                )
+            if not record.manually_verified:
+                record.status = status
+                record.source_type = source_type
+                if source_url:
+                    record.source_url = source_url
+                record.confidence = confidence
+                record.manually_verified = manually_verified
             record.last_checked = check_time
         else:
             record = OttAvailability(
@@ -76,6 +92,12 @@ class OttAvailabilityRepository:
                 source_url=source_url,
                 confidence=confidence,
                 last_checked=check_time,
+                verification_status=(
+                    verification_status
+                    if verification_status == "CONFIRMED" or ott_release_date is None
+                    else "NEEDS_REVIEW"
+                ),
+                manually_verified=manually_verified,
             )
             self.db.add(record)
 
@@ -125,12 +147,16 @@ class OttAvailabilityRepository:
                     and_(
                         Movie.release_date < d30,
                         Movie.release_date >= d180,
-                        or_(subq.c.last_checked == None, subq.c.last_checked <= t3_days),
+                        or_(
+                            subq.c.last_checked == None, subq.c.last_checked <= t3_days
+                        ),
                     ),
                     # Tier 3: Older release (>180 days) and unchecked in >30 days
                     and_(
                         Movie.release_date < d180,
-                        or_(subq.c.last_checked == None, subq.c.last_checked <= t30_days),
+                        or_(
+                            subq.c.last_checked == None, subq.c.last_checked <= t30_days
+                        ),
                     ),
                     # Tier 4: Movies with no release date or never checked
                     subq.c.last_checked == None,

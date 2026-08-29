@@ -7,34 +7,45 @@ entity so a worker restart never loses successful work.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-import time
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import case, exists, func, or_
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy.orm import Session
 
 from app.config.settings import settings
+from app.core.secrets import sanitize_error
 from app.models.movie import Movie
-from app.models.movie_metadata import ExternalId, MovieCredit, MovieImage, MovieRating, Person
-from app.models.operations import BackfillRecord, OperationState, OttEvidence
+from app.models.movie_metadata import ExternalId, MovieCredit, MovieImage, MovieRating, MovieTrailer, Person
+from app.models.operations import BackfillRecord, MovieRequest, OperationState, OttEvidence
 from app.models.ott_availability import OttAvailability
 from app.services.image_fallback import ImageFallbackService
 from app.services.movie_metadata_service import MovieMetadataService
 from app.services.operations import DataHealthService, OttResearchService
 from app.services.release_status import ReleaseStatusService
 from app.services.rating_provider import (
+    IMDB_ID,
+    IMDbRatingRefreshService,
     MovieRatingProvider,
     ProviderQuotaExhausted,
     ProviderRateLimited,
+    RATING_BLOCKED_BY_QUOTA,
+    RATING_TEMPORARY_FAILURE,
+    apply_rating_result,
     configured_rating_provider,
+    ensure_pending_rating,
+    mark_rating_failure,
 )
+from app.services.tmdb.client import TMDbRequestError
 from app.services.tmdb.movie_service import TMDbMovieService
+from app.services.trailers import TrailerService
 
 
 METADATA = "tmdb.metadata_backfill"
 PEOPLE = "tmdb.person_backfill"
 IMAGES = "operations.image_backfill"
+TRAILERS = "tmdb.trailer_backfill"
 IMDB = "ratings.imdb_backfill"
+IMDB_IDS = "ratings.imdb_id_backfill"
 OTT = "operations.ott_eligibility_backfill"
 
 
@@ -95,7 +106,7 @@ class ResumableBackfill:
     def _finish(self, entity_type: str, entity_id: int, error: Exception | None = None) -> None:
         record = self._record(entity_type, entity_id)
         record.status = "FAILED" if error else "DONE"
-        record.last_error = str(error)[:2000] if error else None
+        record.last_error = sanitize_error(error) if error else None
         self.db.commit()
 
     def _summary(self, state: OperationState, processed: int, succeeded: int, failed: int, complete: bool) -> dict:
@@ -253,7 +264,260 @@ class ImageBackfillService(ResumableBackfill):
         return self._summary(state, len(movies) + len(people), succeeded, failed, not remaining)
 
 
+class TrailerBackfillService(ResumableBackfill):
+    """Checkpointed trailer-only backfill that never restarts metadata work."""
+
+    operation = TRAILERS
+
+    def run(self, batch_size: int | None = None) -> dict:
+        batch_size = max(1, min(batch_size or settings.TRAILER_BACKFILL_BATCH_SIZE, 100))
+        total = self.db.query(Movie).count()
+        state = self.state(total)
+        if not (settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN):
+            state.status = "BLOCKED"
+            state.last_error = "External metadata integration is not configured"
+            self.db.commit()
+            return {"operation": self.operation, "configured": False, "processed": 0, "complete": False}
+        has_trailer = exists().where(
+            (MovieTrailer.movie_id == Movie.id) & (MovieTrailer.is_primary.is_(True))
+        )
+        requested = exists().where(
+            (MovieRequest.external_movie_id == Movie.tmdb_id)
+            & (MovieRequest.status.in_(["PENDING", "REVIEWING", "FOUND"]))
+        )
+        today = date.today()
+        movies = self.db.query(Movie).filter(
+            ~has_trailer,
+            self._eligible("movie", Movie.id),
+        ).order_by(
+            case(
+                (requested, 0),
+                (Movie.release_date >= today, 1),
+                (Movie.release_date >= today - timedelta(days=730), 2),
+                else_=3,
+            ),
+            Movie.popularity.desc().nullslast(),
+            Movie.id,
+        ).limit(batch_size).all()
+        if not movies:
+            return self._summary(state, 0, 0, 0, True)
+        state.status = "RUNNING"
+        state.completed_at = None
+        self.db.commit()
+        provider = TMDbMovieService()
+        service = TrailerService(self.db)
+        succeeded = failed = 0
+        stopped = None
+        for movie in movies:
+            movie_id = movie.id
+            self._start("movie", movie_id)
+            try:
+                payload = provider.get_movie_videos(movie.tmdb_id)
+                service.upsert(self.db.get(Movie, movie_id), payload, commit=True)
+                self._finish("movie", movie_id)
+                succeeded += 1
+            except TMDbRequestError as exc:
+                self.db.rollback()
+                self._finish("movie", movie_id, exc)
+                failed += 1
+                if exc.status_code == 429:
+                    stopped = "provider_rate_limited"
+                    break
+            except Exception as exc:
+                self.db.rollback()
+                self._finish("movie", movie_id, exc)
+                failed += 1
+            state = self.state()
+            state.cursor = movie_id
+            self.db.commit()
+        remaining = self.db.query(Movie.id).filter(
+            ~has_trailer,
+            self._eligible("movie", Movie.id),
+        ).first() is not None
+        result = self._summary(state, succeeded + failed, succeeded, failed, not remaining)
+        if stopped:
+            state = self.state()
+            state.status = "PAUSED"
+            state.last_error = stopped
+            self.db.commit()
+            result.update({"complete": False, "stopped": stopped})
+        return result
+
+
+class IMDbIdRecoveryService(ResumableBackfill):
+    """Recover missing IMDb IDs without reopening completed metadata work."""
+
+    operation = IMDB_IDS
+
+    def _due(self, record: BackfillRecord | None, now: datetime) -> bool:
+        if record is None:
+            return True
+        if record.status in {"DONE", "PERMANENT"}:
+            return False
+        attempted = record.last_attempt_at
+        if attempted and attempted.tzinfo is None:
+            attempted = attempted.replace(tzinfo=timezone.utc)
+        if not attempted:
+            return True
+        if record.status == "PENDING":
+            return attempted <= now - timedelta(days=90)
+        delay_days = min(30, max(1, 2 ** min(record.attempts or 0, 5)))
+        return attempted <= now - timedelta(days=delay_days)
+
+    def run(self, batch_size: int | None = None) -> dict:
+        batch_size = max(1, min(batch_size or settings.IMDB_ID_BACKFILL_BATCH_SIZE, 100))
+        total = self.db.query(Movie).count()
+        known_ids = self.db.query(func.count(func.distinct(ExternalId.movie_id))).filter(
+            func.lower(ExternalId.provider) == "imdb"
+        ).scalar() or 0
+        state = self.state(total)
+        state.processed_count = known_ids
+        if not (settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN):
+            state.status = "BLOCKED"
+            state.last_error = "External metadata integration is not configured"
+            self.db.commit()
+            return {"operation": self.operation, "configured": False, "processed": 0, "recovered": 0, "complete": False}
+
+        missing_id = ~exists().where(
+            (ExternalId.movie_id == Movie.id) & (func.lower(ExternalId.provider) == "imdb")
+        )
+        requested = exists().where(
+            (MovieRequest.external_movie_id == Movie.tmdb_id)
+            & (MovieRequest.status.in_(["PENDING", "REVIEWING", "FOUND"]))
+        )
+        today = date.today()
+        candidates = self.db.query(Movie).filter(missing_id).order_by(
+            case(
+                ((Movie.release_date <= today) & (Movie.popularity >= 50), 0),
+                ((Movie.release_date <= today) & (Movie.release_date >= today - timedelta(days=730)), 1),
+                (requested, 2),
+                (Movie.release_date <= today, 3),
+                else_=4,
+            ),
+            Movie.popularity.desc().nullslast(),
+            Movie.release_date.desc().nullslast(),
+            Movie.id,
+        ).limit(batch_size * 10).all()
+        now = _now()
+        rows = []
+        for movie in candidates:
+            record = self.db.query(BackfillRecord).filter_by(
+                operation=self.operation, entity_type="movie", entity_id=movie.id
+            ).first()
+            if self._due(record, now):
+                rows.append(movie)
+            if len(rows) >= batch_size:
+                break
+
+        if not rows:
+            state.status = "COMPLETE" if known_ids == total else "PAUSED"
+            state.last_success_at = now
+            state.last_error = None
+            self.db.commit()
+            return {
+                "operation": self.operation,
+                "configured": True,
+                "processed": 0,
+                "recovered": 0,
+                "complete": True,
+                "catalog_complete": known_ids == total,
+            }
+
+        service = TMDbMovieService()
+        state.status = "RUNNING"
+        state.completed_at = None
+        self.db.commit()
+        processed = recovered = permanent = failed = 0
+        stopped = None
+        for candidate in rows:
+            movie_id = candidate.id
+            tmdb_id = candidate.tmdb_id
+            self._start("movie", movie_id)
+            try:
+                payload = service.get_movie_external_ids(tmdb_id)
+                imdb_id = (payload.get("imdb_id") or "").strip()
+                record = self._record("movie", movie_id)
+                if IMDB_ID.fullmatch(imdb_id):
+                    duplicate = self.db.query(ExternalId.id).filter_by(
+                        provider="imdb", external_id=imdb_id
+                    ).first()
+                    if not duplicate:
+                        self.db.add(ExternalId(movie_id=movie_id, provider="imdb", external_id=imdb_id))
+                        ensure_pending_rating(self.db, movie_id)
+                        record.status = "DONE"
+                        record.last_error = None
+                    else:
+                        record.status = "PERMANENT"
+                        record.last_error = "IMDb ID is already attached to another movie"
+                        permanent += 1
+                    recovered += int(not duplicate)
+                else:
+                    record.status = "PENDING"
+                    record.last_error = "No IMDb ID is currently available"
+                self.db.commit()
+                processed += 1
+            except TMDbRequestError as exc:
+                self.db.rollback()
+                record = self._record("movie", movie_id)
+                if exc.status_code == 404 or (exc.permanent and exc.status_code not in {401, 403}):
+                    record.status = "PERMANENT"
+                    record.last_error = f"External metadata record unavailable (HTTP {exc.status_code})"
+                    permanent += 1
+                    processed += 1
+                    self.db.commit()
+                else:
+                    record.status = "PENDING" if exc.status_code in {401, 403, 429} else "FAILED"
+                    record.last_error = sanitize_error(exc)
+                    state = self.state()
+                    state.status = "BLOCKED" if exc.status_code in {401, 403, 429} else "PAUSED"
+                    state.last_failure_at = now
+                    state.last_error = sanitize_error(exc)
+                    self.db.commit()
+                    stopped = "provider_blocked" if state.status == "BLOCKED" else "provider_unavailable"
+                    break
+            except Exception as exc:
+                self.db.rollback()
+                record = self._record("movie", movie_id)
+                record.status = "FAILED"
+                record.last_error = sanitize_error(exc)
+                state = self.state()
+                state.status = "PAUSED"
+                state.last_failure_at = now
+                state.last_error = sanitize_error(exc)
+                self.db.commit()
+                failed += 1
+                stopped = "provider_unavailable"
+                break
+            state = self.state()
+            state.cursor = movie_id
+            self.db.commit()
+
+        known_ids = self.db.query(func.count(func.distinct(ExternalId.movie_id))).filter(
+            func.lower(ExternalId.provider) == "imdb"
+        ).scalar() or 0
+        state = self.state(total)
+        state.processed_count = known_ids
+        if not stopped:
+            state.status = "PAUSED"
+            state.last_success_at = _now()
+            state.last_error = None
+        self.db.commit()
+        return {
+            "operation": self.operation,
+            "configured": True,
+            "processed": processed,
+            "recovered": recovered,
+            "permanent": permanent,
+            "failed": failed,
+            "complete": not stopped and len(rows) < batch_size,
+            "catalog_complete": known_ids == total,
+            "stopped": stopped,
+        }
+
+
 class IMDbBackfillService(ResumableBackfill):
+    """Drain the current due IMDb rating queue using lifecycle checkpoints."""
+
     operation = IMDB
 
     def __init__(self, db: Session, provider: MovieRatingProvider | None = None):
@@ -261,46 +525,14 @@ class IMDbBackfillService(ResumableBackfill):
         self.provider = provider if provider is not None else configured_rating_provider()
 
     def run(self, batch_size: int | None = None) -> dict:
-        batch_size = max(1, min(batch_size or settings.IMDB_BACKFILL_BATCH_SIZE, 100))
-        imdb_rating = aliased(MovieRating)
-        base = self.db.query(Movie, ExternalId, imdb_rating).join(
-            ExternalId, (ExternalId.movie_id == Movie.id) & (func.lower(ExternalId.provider) == "imdb")
-        ).outerjoin(
-            imdb_rating, (imdb_rating.movie_id == Movie.id) & (func.lower(imdb_rating.source) == "imdb")
-        ).filter(imdb_rating.id.is_(None))
-        known_ids = self.db.query(func.count(func.distinct(ExternalId.movie_id))).filter(func.lower(ExternalId.provider) == "imdb").scalar() or 0
-        state = self.state(known_ids)
-        if not self.provider:
-            state.status = "BLOCKED"; state.last_error = "IMDb/OMDb provider is not configured"; self.db.commit()
-            return {"operation": self.operation, "configured": False, "processed": 0, "complete": False, "error": state.last_error}
-        rows = base.filter(self._eligible("movie", Movie.id)).order_by(Movie.popularity.desc(), Movie.id).limit(batch_size).all()
-        if not rows:
-            result = self._summary(state, 0, 0, 0, True); result["configured"] = True; return result
-        state.status = "RUNNING"; state.completed_at = None; self.db.commit()
-        succeeded = failed = processed = 0; stop_error = None
-        for movie, external_id, record in rows:
-            movie_id = movie.id; self._start("movie", movie_id)
-            try:
-                result = self.provider.fetch(external_id.external_id)
-                if result is not None:
-                    rating = MovieRating(movie_id=movie_id, source="IMDb")
-                    rating.rating = result.rating; rating.vote_count = result.vote_count; rating.last_updated_at = result.checked_at
-                    self.db.add(rating)
-                self.db.commit(); self._finish("movie", movie_id); succeeded += 1; processed += 1
-                if settings.IMDB_BACKFILL_DELAY_SECONDS > 0:
-                    time.sleep(settings.IMDB_BACKFILL_DELAY_SECONDS)
-            except (ProviderRateLimited, ProviderQuotaExhausted) as exc:
-                self.db.rollback()
-                record = self._record("movie", movie_id); record.status = "PENDING"; record.last_error = str(exc)[:2000]
-                state = self.state(); state.status = "BLOCKED"; state.last_error = str(exc)[:2000]; state.last_failure_at = _now()
-                self.db.commit(); stop_error = exc; break
-            except Exception as exc:
-                self.db.rollback(); self._finish("movie", movie_id, exc); failed += 1; processed += 1
-            state = self.state(); state.cursor = movie_id; self.db.commit()
-        if stop_error:
-            return {"operation": self.operation, "configured": True, "processed": processed, "succeeded": succeeded, "failed": failed, "complete": False, "stopped": str(stop_error)}
-        remaining = base.filter(self._eligible("movie", Movie.id)).first() is not None
-        result = self._summary(state, processed, succeeded, failed, not remaining); result["configured"] = True; return result
+        service = IMDbRatingRefreshService(self.db, self.provider)
+        service.operation = self.operation
+        result = service.refresh(max(1, min(batch_size or settings.IMDB_BACKFILL_BATCH_SIZE, 100)))
+        return {
+            "operation": self.operation,
+            "succeeded": result.get("processed", 0) if not result.get("stopped") else 0,
+            "failed": 1 if result.get("stopped") == "provider_unavailable" else 0,
+        } | result
 
 
 class OttQueueBackfillService(ResumableBackfill):
@@ -370,13 +602,21 @@ class SingleMovieRepairService:
             result["images"].append(images.recover_movie(movie, image_type))
         external_id = self.db.query(ExternalId).filter(ExternalId.movie_id == movie_id, func.lower(ExternalId.provider) == "imdb").first()
         rating = self.db.query(MovieRating).filter(MovieRating.movie_id == movie_id, func.lower(MovieRating.source) == "imdb").first()
-        if rating:
+        if rating and rating.rating is not None:
             result["imdb"] = "already-present"
         elif self.rating_provider and external_id:
-            provider_result = self.rating_provider.fetch(external_id.external_id)
-            if provider_result:
-                self.db.add(MovieRating(movie_id=movie_id, source="IMDb", rating=provider_result.rating, vote_count=provider_result.vote_count, last_updated_at=provider_result.checked_at))
-                self.db.commit(); result["imdb"] = "updated"
+            rating = rating or ensure_pending_rating(self.db, movie_id)
+            try:
+                provider_result = self.rating_provider.fetch(external_id.external_id)
+                if provider_result:
+                    apply_rating_result(rating, movie, provider_result)
+                    self.db.commit(); result["imdb"] = "updated" if provider_result.rating is not None else "not-yet-rated"
+            except (ProviderRateLimited, ProviderQuotaExhausted) as exc:
+                mark_rating_failure(rating, movie, RATING_BLOCKED_BY_QUOTA, exc, _now())
+                self.db.commit(); result["imdb"] = "quota-blocked"
+            except Exception as exc:
+                mark_rating_failure(rating, movie, RATING_TEMPORARY_FAILURE, exc, _now())
+                self.db.commit(); result["imdb"] = "temporary-failure"
         elif not external_id:
             result["imdb"] = "missing-external-id"
         ott = OttResearchService(self.db, settings.OTT_CONFIRMATION_THRESHOLD)

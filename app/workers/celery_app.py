@@ -2,6 +2,7 @@ from celery import Celery
 from celery.signals import task_failure, task_success
 import logging
 from app.config.settings import settings
+from app.core.secrets import sanitize_error
 
 # httpx's INFO message includes complete request URLs. Provider credentials may
 # be query parameters, so only warnings/errors are allowed into worker logs.
@@ -15,6 +16,7 @@ celery_app.conf.update(
     beat_schedule={
         "tmdb-incremental-sync": {"task": "tmdb.incremental_sync", "schedule": 86400},
         "metadata-enrichment": {"task": "tmdb.metadata_enrichment", "schedule": 900},
+        "imdb-id-recovery": {"task": "ratings.imdb_id_backfill", "schedule": 18000},
         "imdb-rating-refresh": {"task": "ratings.imdb_refresh", "schedule": 21600},
         "data-health": {"task": "operations.data_health", "schedule": 900},
         "image-health": {"task": "operations.image_health", "schedule": 21600},
@@ -42,9 +44,10 @@ def notify_task_failure(sender=None, exception=None, **_):
         name = getattr(sender, "name", "unknown-task")
         state = db.query(OperationState).filter_by(name=name).first()
         if not state: state = OperationState(name=name); db.add(state)
-        state.last_failure_at = datetime.now(timezone.utc); state.last_error = str(exception)[:2000]
+        safe_error = sanitize_error(exception)
+        state.last_failure_at = datetime.now(timezone.utc); state.last_error = safe_error
         db.commit()
-        NotificationService(db).notify(f"Background job failed: {name}: {str(exception)[:500]}", "high", f"task-failure:{name}", 60)
+        NotificationService(db).notify(f"Background job failed: {name}: {safe_error[:500]}", "high", f"task-failure:{name}", 60)
     finally:
         db.close()
 

@@ -64,7 +64,7 @@ function MovieResult({ movie }) {
       <div className="deep-actions">
         <Link className="button-link" to={`/deep-search/movie/${movie.id}`}>View live details</Link>
         {movie.local_movie_id && <Link to={`/movies/${movie.local_movie_id}`}>Open Local Movie</Link>}
-        {!movie.in_library && <Link to={requestMovieHref(movie)}>Request Movie</Link>}
+        <Link to={requestMovieHref(movie)}>Request Movie</Link>
       </div>
     </div>
   </article>;
@@ -236,7 +236,7 @@ export function DeepMovie() {
         </dl>
         <div className="deep-actions">
           {movie.local_movie_id && <Link className="button-link" to={`/movies/${movie.local_movie_id}`}>Open Local Movie</Link>}
-          {!movie.in_library && <Link className="button-link" to={requestMovieHref(movie)}>Request Movie</Link>}
+          <Link className="button-link" to={requestMovieHref(movie)}>Request Movie</Link>
           {movie.homepage && <a href={movie.homepage} rel="nofollow noreferrer">Official homepage</a>}
         </div>
         <AdminMovieAction movie={movie}/>

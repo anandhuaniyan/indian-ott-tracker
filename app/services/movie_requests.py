@@ -10,13 +10,14 @@ import smtplib
 from sqlalchemy.orm import Session
 
 from app.config.settings import settings
+from app.core.secrets import sanitize_error
 from app.models.movie import Movie
 from app.models.operations import MovieRequest
 from app.services.notification_service import NotificationService
 
 
 ACTIVE_REQUEST_STATUSES = ("PENDING", "REVIEWING", "FOUND")
-EMAIL_KINDS = ("confirmation", "completion", "rejection")
+EMAIL_KINDS = ("confirmation", "completion", "rejection", "admin_notification")
 EMAIL_STATUSES = ("PENDING", "SENT", "FAILED", "NOT_CONFIGURED")
 
 
@@ -27,11 +28,7 @@ def _aware(value: datetime | None) -> datetime | None:
 
 
 def _safe_error(exc: Exception) -> str:
-    value = str(exc)
-    for secret in (settings.SMTP_PASSWORD, settings.SMTP_USERNAME):
-        if secret:
-            value = value.replace(secret, "[redacted]")
-    return f"{type(exc).__name__}: {value}"[:1000]
+    return sanitize_error(f"{type(exc).__name__}: {exc}", limit=1000)
 
 
 class MovieRequestEmailService:
@@ -41,8 +38,9 @@ class MovieRequestEmailService:
         self.db = db
 
     @staticmethod
-    def configured() -> bool:
-        return bool(settings.SMTP_HOST and settings.SMTP_FROM)
+    def configured(kind: str = "confirmation") -> bool:
+        recipient_ready = bool(settings.ADMIN_NOTIFICATION_EMAIL) if kind == "admin_notification" else True
+        return bool(settings.SMTP_HOST and settings.SMTP_FROM and recipient_ready)
 
     @staticmethod
     def _title(item: MovieRequest) -> str:
@@ -55,13 +53,17 @@ class MovieRequestEmailService:
         if kind == "confirmation":
             subject = f"Movie Request Received — {title}"
             plain = (
-                f"Your request for {title} has been received. We’ll review it and aim to add it "
-                f"within 48 hours. We’ll email you again once it becomes available.\n\n"
-                f"Request reference: {item.request_id}"
+                f"Your request for {title} has been received. We’ll review your request and aim to make it "
+                f"available within 48 hours. We’ll email you again once it becomes available.\n\n"
+                f"Current status: Pending\nRequest reference: {item.request_id}\n"
+                f"Website: {settings.SITE_URL.rstrip('/')}"
             )
             html = (
                 f"<h2>Request received</h2><p>Your request for <strong>{safe_title}</strong> has been received.</p>"
-                "<p>We’ll review it and aim to add it within 48 hours. We’ll email you again once it becomes available.</p>"
+                "<p>We’ll review your request and aim to make it available within 48 hours. "
+                "We’ll email you again once it becomes available.</p>"
+                "<p>Current status: <strong>Pending</strong></p>"
+                f'<p><a href="{escape(settings.SITE_URL.rstrip("/"), quote=True)}">Visit Indian OTT Tracker</a></p>'
                 f"<p><small>Request reference: {reference}</small></p>"
             )
         elif kind == "completion":
@@ -82,12 +84,40 @@ class MovieRequestEmailService:
                 f"<h2>Request update</h2><p>We’re sorry, but <strong>{safe_title}</strong> cannot currently be added.</p>"
                 f"<p>{escape(reason)}</p><p><small>Request reference: {reference}</small></p>"
             )
+        elif kind == "admin_notification":
+            admin_url = f"{settings.SITE_URL.rstrip('/')}/admin/requests"
+            subject = f"New Movie Request — {title}"
+            fields = [
+                f"Movie title: {title}",
+                f"External ID: {item.external_movie_id or 'Unavailable'}",
+                f"IMDb ID: {item.imdb_id or 'Unavailable'}",
+                f"Language: {item.verified_language_name or item.verified_original_language or item.language or 'Unavailable'}",
+                f"Release date: {item.verified_release_date or item.release_year or 'Unavailable'}",
+                f"Requester email: {item.email}",
+                f"Request ID: {item.request_id}",
+                f"Additional details: {item.details or 'None'}",
+                f"Admin Requests: {admin_url}",
+            ]
+            plain = "\n".join(fields)
+            html = (
+                f"<h2>New movie request</h2><p><strong>{safe_title}</strong></p>"
+                "<dl>"
+                f"<dt>External ID</dt><dd>{item.external_movie_id or 'Unavailable'}</dd>"
+                f"<dt>IMDb ID</dt><dd>{escape(item.imdb_id or 'Unavailable')}</dd>"
+                f"<dt>Language</dt><dd>{escape(item.verified_language_name or item.verified_original_language or item.language or 'Unavailable')}</dd>"
+                f"<dt>Release date</dt><dd>{item.verified_release_date or item.release_year or 'Unavailable'}</dd>"
+                f"<dt>Requester</dt><dd>{escape(item.email)}</dd>"
+                f"<dt>Request ID</dt><dd>{reference}</dd>"
+                f"<dt>Additional details</dt><dd>{escape(item.details or 'None')}</dd>"
+                "</dl>"
+                f'<p><a href="{escape(admin_url, quote=True)}">Open Admin Requests</a></p>'
+            )
         else:
             raise ValueError("Unknown movie-request email kind")
         message = EmailMessage()
         message["Subject"] = subject
         message["From"] = settings.SMTP_FROM
-        message["To"] = item.email
+        message["To"] = settings.ADMIN_NOTIFICATION_EMAIL if kind == "admin_notification" else item.email
         message.set_content(plain)
         message.add_alternative(
             '<div style="max-width:600px;margin:auto;padding:20px;font-family:Arial,sans-serif;line-height:1.55">'
@@ -118,6 +148,7 @@ class MovieRequestEmailService:
         sent_name = f"{kind}_email_sent_at"
         error_name = f"{kind}_email_last_error"
         attempt_name = f"{kind}_email_last_attempt_at"
+        attempt_count_name = f"{kind}_email_attempt_count"
         status = getattr(item, status_name)
         if status == "SENT":
             return {"kind": kind, "status": "SENT", "sent": False, "skipped": "already_sent"}
@@ -126,7 +157,8 @@ class MovieRequestEmailService:
         if respect_cooldown and last_attempt and last_attempt > now - self.RETRY_COOLDOWN:
             return {"kind": kind, "status": status, "sent": False, "skipped": "cooldown"}
         setattr(item, attempt_name, now)
-        if not self.configured():
+        setattr(item, attempt_count_name, (getattr(item, attempt_count_name) or 0) + 1)
+        if not self.configured(kind):
             setattr(item, status_name, "NOT_CONFIGURED")
             setattr(item, error_name, "SMTP is not configured")
             self.db.commit()
@@ -151,8 +183,10 @@ class MovieRequestAutomationService:
         self.db = db
         self.email = MovieRequestEmailService(db)
 
-    def _complete(self, item: MovieRequest, movie: Movie) -> bool:
+    def _complete(self, item: MovieRequest, movie: Movie, *, force: bool = False) -> bool:
         if item.external_movie_id != movie.tmdb_id:
+            return False
+        if item.movie_existed_at_submission and not force:
             return False
         changed = item.status != "ADDED" or item.local_movie_id != movie.id
         item.status = "ADDED"
@@ -165,6 +199,7 @@ class MovieRequestAutomationService:
         requests = self.db.query(MovieRequest).filter(
             MovieRequest.external_movie_id == movie.tmdb_id,
             MovieRequest.status.in_(ACTIVE_REQUEST_STATUSES),
+            MovieRequest.movie_existed_at_submission.is_(False),
         ).all()
         return sum(int(self._complete(item, movie)) for item in requests)
 
@@ -172,7 +207,10 @@ class MovieRequestAutomationService:
         rows = (
             self.db.query(MovieRequest, Movie)
             .join(Movie, Movie.tmdb_id == MovieRequest.external_movie_id)
-            .filter(MovieRequest.status.in_(ACTIVE_REQUEST_STATUSES))
+            .filter(
+                MovieRequest.status.in_(ACTIVE_REQUEST_STATUSES),
+                MovieRequest.movie_existed_at_submission.is_(False),
+            )
             .order_by(MovieRequest.id)
             .limit(batch_size)
             .all()

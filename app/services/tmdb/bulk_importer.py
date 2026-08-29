@@ -14,6 +14,7 @@ from app.repositories.genre_repository import GenreRepository
 from app.repositories.language_repository import LanguageRepository
 from app.repositories.movie_repository import MovieRepository
 from app.services.tmdb.movie_service import TMDbMovieService
+from app.services.trailers import TrailerService
 
 
 SUPPORTED_LANGUAGES = ["ml", "ta", "te", "hi", "kn"]
@@ -198,6 +199,8 @@ class TMDbBulkImporter:
                             db.flush()
                         if language_rec not in movie_obj.languages:
                             movie_obj.languages.append(language_rec)
+
+                        TrailerService(db).upsert(movie_obj, details.get("videos", {}))
 
                     # Commit database transaction per page
                     db.commit()

@@ -19,15 +19,23 @@ class TMDbMovieService:
         """Fetch full movie details with watch providers appended."""
         return self.client.get(
             f"/movie/{movie_id}",
-            append_to_response="watch/providers",
+            append_to_response="watch/providers,videos",
         )
 
     def get_rich_movie_details(self, movie_id: int) -> dict:
         """Fetch the movie payload required by the metadata enrichment service."""
         return self.client.get(
             f"/movie/{movie_id}",
-            append_to_response="credits,external_ids,images,keywords,release_dates,alternative_titles,watch/providers",
+            append_to_response="credits,external_ids,images,keywords,release_dates,alternative_titles,watch/providers,videos",
         )
+
+    def get_movie_videos(self, movie_id: int) -> dict:
+        """Fetch official-provider video metadata without a YouTube search API."""
+        return self.client.get(f"/movie/{movie_id}/videos")
+
+    def get_movie_external_ids(self, movie_id: int) -> dict:
+        """Fetch only lawful external identifiers for a bounded recovery job."""
+        return self.client.get(f"/movie/{movie_id}/external_ids")
 
     def get_person_details(self, person_id: int) -> dict:
         """Fetch practical person metadata and lawful external identifiers."""

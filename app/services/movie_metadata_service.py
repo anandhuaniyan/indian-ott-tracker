@@ -25,6 +25,8 @@ from app.models.movie_metadata import (
 from app.models.ott_availability import OttAvailability
 from app.services.tmdb.movie_service import TMDbMovieService
 from app.services.artwork_service import ArtworkService
+from app.services.trailers import TrailerService
+from app.services.ott_providers import normalize_platform
 
 
 class MovieMetadataService:
@@ -47,14 +49,33 @@ class MovieMetadataService:
         self._upsert_releases(movie, payload.get("release_dates", {}))
         self._upsert_images(movie, payload.get("images", {}))
         self._upsert_watch_providers(movie, payload.get("watch/providers", {}))
+        TrailerService(self.db).upsert(movie, payload.get("videos", {}))
         self.db.flush()
         expected_cast = bool(payload.get("credits", {}).get("cast"))
         expected_crew = bool(payload.get("credits", {}).get("crew"))
-        if expected_cast and not self.db.query(MovieCredit.id).filter_by(movie_id=movie.id, credit_type="cast").first():
-            raise RuntimeError(f"TMDB returned cast for movie {movie.id}, but no cast credit was saved")
-        if expected_crew and not self.db.query(MovieCredit.id).filter_by(movie_id=movie.id, credit_type="crew").first():
-            raise RuntimeError(f"TMDB returned crew for movie {movie.id}, but no crew credit was saved")
-        for image in self.db.query(MovieImage).filter_by(movie_id=movie.id, is_primary=True).all():
+        if (
+            expected_cast
+            and not self.db.query(MovieCredit.id)
+            .filter_by(movie_id=movie.id, credit_type="cast")
+            .first()
+        ):
+            raise RuntimeError(
+                f"TMDB returned cast for movie {movie.id}, but no cast credit was saved"
+            )
+        if (
+            expected_crew
+            and not self.db.query(MovieCredit.id)
+            .filter_by(movie_id=movie.id, credit_type="crew")
+            .first()
+        ):
+            raise RuntimeError(
+                f"TMDB returned crew for movie {movie.id}, but no crew credit was saved"
+            )
+        for image in (
+            self.db.query(MovieImage)
+            .filter_by(movie_id=movie.id, is_primary=True)
+            .all()
+        ):
             self.artwork.cache(image)
         self._upsert_tmdb_rating(movie, payload)
         self.db.commit()
@@ -67,34 +88,60 @@ class MovieMetadataService:
             setattr(instance, field, value)
 
     def _update_movie_scalars(self, movie: Movie, payload: dict) -> None:
-        for field in ("title", "original_title", "overview", "poster_path", "backdrop_path", "original_language"):
+        for field in (
+            "title",
+            "original_title",
+            "overview",
+            "poster_path",
+            "backdrop_path",
+            "original_language",
+        ):
             self._set_if_present(movie, field, payload.get(field))
         if payload.get("release_date"):
             try:
                 movie.release_date = date.fromisoformat(payload["release_date"][:10])
             except (TypeError, ValueError):
                 pass
-        for field in ("tagline", "budget", "revenue", "status", "runtime", "popularity", "vote_average", "vote_count"):
+        for field in (
+            "tagline",
+            "budget",
+            "revenue",
+            "status",
+            "runtime",
+            "popularity",
+            "vote_average",
+            "vote_count",
+        ):
             target = "runtime_minutes" if field == "runtime" else field
             self._set_if_present(movie, target, payload.get(field))
         collection = payload.get("belongs_to_collection") or {}
         if collection:
             self._set_if_present(movie, "collection_tmdb_id", collection.get("id"))
             self._set_if_present(movie, "collection_name", collection.get("name"))
-            self._set_if_present(movie, "collection_poster_path", collection.get("poster_path"))
-            self._set_if_present(movie, "collection_backdrop_path", collection.get("backdrop_path"))
+            self._set_if_present(
+                movie, "collection_poster_path", collection.get("poster_path")
+            )
+            self._set_if_present(
+                movie, "collection_backdrop_path", collection.get("backdrop_path")
+            )
 
     def _upsert_genres_and_languages(self, movie: Movie, payload: dict) -> None:
         from slugify import slugify
+
         for item in payload.get("genres", []):
             if not item.get("id") or not item.get("name"):
                 continue
             genre = self.db.query(Genre).filter_by(tmdb_id=item["id"]).first()
             if not genre:
                 base_slug = slugify(item["name"])
-                slug = base_slug if not self.db.query(Genre.id).filter_by(slug=base_slug).first() else f"{base_slug}-{item['id']}"
+                slug = (
+                    base_slug
+                    if not self.db.query(Genre.id).filter_by(slug=base_slug).first()
+                    else f"{base_slug}-{item['id']}"
+                )
                 genre = Genre(tmdb_id=item["id"], name=item["name"], slug=slug)
-                self.db.add(genre); self.db.flush()
+                self.db.add(genre)
+                self.db.flush()
             if genre not in movie.genres:
                 movie.genres.append(genre)
         for item in payload.get("spoken_languages", []):
@@ -103,8 +150,13 @@ class MovieMetadataService:
                 continue
             language = self.db.query(Language).filter_by(iso_639_1=code).first()
             if not language:
-                language = Language(iso_639_1=code, english_name=item.get("english_name") or item.get("name") or code, native_name=item.get("name") or None)
-                self.db.add(language); self.db.flush()
+                language = Language(
+                    iso_639_1=code,
+                    english_name=item.get("english_name") or item.get("name") or code,
+                    native_name=item.get("name") or None,
+                )
+                self.db.add(language)
+                self.db.flush()
             if language not in movie.languages:
                 movie.languages.append(language)
 
@@ -114,30 +166,77 @@ class MovieMetadataService:
             if not title:
                 continue
             country = item.get("iso_3166_1") or None
-            record = self.db.query(AlternativeTitle).filter_by(movie_id=movie.id, country=country, title=title).first()
+            record = (
+                self.db.query(AlternativeTitle)
+                .filter_by(movie_id=movie.id, country=country, title=title)
+                .first()
+            )
             if not record:
-                self.db.add(AlternativeTitle(movie_id=movie.id, country=country, title=title, title_type=item.get("type") or None))
+                self.db.add(
+                    AlternativeTitle(
+                        movie_id=movie.id,
+                        country=country,
+                        title=title,
+                        title_type=item.get("type") or None,
+                    )
+                )
 
     def _upsert_external_ids(self, movie: Movie, data: dict) -> None:
-        values = {"imdb": data.get("imdb_id"), "wikidata": data.get("wikidata_id"), "facebook": data.get("facebook_id"), "instagram": data.get("instagram_id"), "twitter": data.get("twitter_id")}
+        values = {
+            "imdb": data.get("imdb_id"),
+            "wikidata": data.get("wikidata_id"),
+            "facebook": data.get("facebook_id"),
+            "instagram": data.get("instagram_id"),
+            "twitter": data.get("twitter_id"),
+        }
         for provider, external_id in values.items():
             if not external_id:
                 continue
-            record = self.db.query(ExternalId).filter_by(movie_id=movie.id, provider=provider).first()
+            record = (
+                self.db.query(ExternalId)
+                .filter_by(movie_id=movie.id, provider=provider)
+                .first()
+            )
             if record:
                 # Do not steal an identity already attached to another movie. Shared
                 # social accounts are common for studios and production campaigns.
-                duplicate = self.db.query(ExternalId).filter(
-                    ExternalId.provider == provider,
-                    ExternalId.external_id == external_id,
-                    ExternalId.movie_id != movie.id,
-                ).first()
+                duplicate = (
+                    self.db.query(ExternalId)
+                    .filter(
+                        ExternalId.provider == provider,
+                        ExternalId.external_id == external_id,
+                        ExternalId.movie_id != movie.id,
+                    )
+                    .first()
+                )
                 if not duplicate:
                     record.external_id = external_id
             else:
-                duplicate = self.db.query(ExternalId).filter_by(provider=provider, external_id=external_id).first()
+                duplicate = (
+                    self.db.query(ExternalId)
+                    .filter_by(provider=provider, external_id=external_id)
+                    .first()
+                )
                 if not duplicate:
-                    self.db.add(ExternalId(movie_id=movie.id, provider=provider, external_id=external_id))
+                    self.db.add(
+                        ExternalId(
+                            movie_id=movie.id,
+                            provider=provider,
+                            external_id=external_id,
+                        )
+                    )
+            if (
+                provider == "imdb"
+                and self.db.query(ExternalId.id)
+                .filter_by(movie_id=movie.id, provider="imdb")
+                .first()
+            ):
+                # A newly imported or recovered IMDb ID is immediately visible
+                # to the bounded rating refresh job; no global backfill restart
+                # is required.
+                from app.services.rating_provider import ensure_pending_rating
+
+                ensure_pending_rating(self.db, movie.id)
 
     def _person(self, item: dict) -> Person:
         person = self.db.query(Person).filter_by(tmdb_id=item["id"]).first()
@@ -147,22 +246,35 @@ class MovieMetadataService:
             self.db.flush()
         self._set_if_present(person, "name", item.get("name"))
         self._set_if_present(person, "profile_path", item.get("profile_path"))
-        self._set_if_present(person, "known_for_department", item.get("known_for_department"))
+        self._set_if_present(
+            person, "known_for_department", item.get("known_for_department")
+        )
         return person
 
     def _upsert_credits(self, movie: Movie, data: dict) -> None:
-        for credit_type, items in (("cast", data.get("cast", [])), ("crew", data.get("crew", []))):
+        for credit_type, items in (
+            ("cast", data.get("cast", [])),
+            ("crew", data.get("crew", [])),
+        ):
             for item in items:
                 if not item.get("id"):
                     continue
                 person = self._person(item)
-                filters = {"movie_id": movie.id, "person_id": person.id, "credit_type": credit_type, "job": item.get("job"), "character": item.get("character")}
+                filters = {
+                    "movie_id": movie.id,
+                    "person_id": person.id,
+                    "credit_type": credit_type,
+                    "job": item.get("job"),
+                    "character": item.get("character"),
+                }
                 credit = self.db.query(MovieCredit).filter_by(**filters).first()
                 if not credit:
                     credit = MovieCredit(**filters)
                     self.db.add(credit)
                 credit.tmdb_credit_id = item.get("credit_id") or credit.tmdb_credit_id
-                credit.cast_order = item.get("order") if credit_type == "cast" else credit.cast_order
+                credit.cast_order = (
+                    item.get("order") if credit_type == "cast" else credit.cast_order
+                )
                 credit.department = item.get("department") or credit.department
 
     def _upsert_keywords(self, movie: Movie, data: dict) -> None:
@@ -174,33 +286,57 @@ class MovieMetadataService:
                 keyword = Keyword(tmdb_id=item["id"], name=item["name"])
                 self.db.add(keyword)
                 self.db.flush()
-            if not self.db.query(MovieKeyword).filter_by(movie_id=movie.id, keyword_id=keyword.id).first():
+            if (
+                not self.db.query(MovieKeyword)
+                .filter_by(movie_id=movie.id, keyword_id=keyword.id)
+                .first()
+            ):
                 self.db.add(MovieKeyword(movie_id=movie.id, keyword_id=keyword.id))
 
     def _upsert_production(self, movie: Movie, payload: dict) -> None:
         for item in payload.get("production_companies", []):
             if not item.get("id") or not item.get("name"):
                 continue
-            company = self.db.query(ProductionCompany).filter_by(tmdb_id=item["id"]).first()
+            company = (
+                self.db.query(ProductionCompany).filter_by(tmdb_id=item["id"]).first()
+            )
             if not company:
                 company = ProductionCompany(tmdb_id=item["id"], name=item["name"])
                 self.db.add(company)
                 self.db.flush()
             self._set_if_present(company, "logo_path", item.get("logo_path"))
             self._set_if_present(company, "origin_country", item.get("origin_country"))
-            if not self.db.query(MovieProductionCompany).filter_by(movie_id=movie.id, production_company_id=company.id).first():
-                self.db.add(MovieProductionCompany(movie_id=movie.id, production_company_id=company.id))
+            if (
+                not self.db.query(MovieProductionCompany)
+                .filter_by(movie_id=movie.id, production_company_id=company.id)
+                .first()
+            ):
+                self.db.add(
+                    MovieProductionCompany(
+                        movie_id=movie.id, production_company_id=company.id
+                    )
+                )
         for item in payload.get("production_countries", []):
             code = item.get("iso_3166_1")
             if not code or not item.get("name"):
                 continue
-            country = self.db.query(ProductionCountry).filter_by(iso_3166_1=code).first()
+            country = (
+                self.db.query(ProductionCountry).filter_by(iso_3166_1=code).first()
+            )
             if not country:
                 country = ProductionCountry(iso_3166_1=code, name=item["name"])
                 self.db.add(country)
                 self.db.flush()
-            if not self.db.query(MovieProductionCountry).filter_by(movie_id=movie.id, production_country_id=country.id).first():
-                self.db.add(MovieProductionCountry(movie_id=movie.id, production_country_id=country.id))
+            if (
+                not self.db.query(MovieProductionCountry)
+                .filter_by(movie_id=movie.id, production_country_id=country.id)
+                .first()
+            ):
+                self.db.add(
+                    MovieProductionCountry(
+                        movie_id=movie.id, production_country_id=country.id
+                    )
+                )
 
     def _upsert_releases(self, movie: Movie, data: dict) -> None:
         for country_data in data.get("results", []):
@@ -214,20 +350,56 @@ class MovieMetadataService:
                 except ValueError:
                     continue
                 release_type = str(item.get("type") or "unknown")
-                record = self.db.query(MovieReleaseDate).filter_by(movie_id=movie.id, country=country, release_date=release_date, release_type=release_type).first()
+                record = (
+                    self.db.query(MovieReleaseDate)
+                    .filter_by(
+                        movie_id=movie.id,
+                        country=country,
+                        release_date=release_date,
+                        release_type=release_type,
+                    )
+                    .first()
+                )
                 if not record:
-                    self.db.add(MovieReleaseDate(movie_id=movie.id, country=country, release_date=release_date, release_type=release_type, certification=item.get("certification") or None, note=item.get("note") or None))
+                    self.db.add(
+                        MovieReleaseDate(
+                            movie_id=movie.id,
+                            country=country,
+                            release_date=release_date,
+                            release_type=release_type,
+                            certification=item.get("certification") or None,
+                            note=item.get("note") or None,
+                        )
+                    )
 
     def _upsert_images(self, movie: Movie, data: dict) -> None:
-        for image_type, items in (("poster", data.get("posters", [])), ("backdrop", data.get("backdrops", [])), ("logo", data.get("logos", []))):
+        for image_type, items in (
+            ("poster", data.get("posters", [])),
+            ("backdrop", data.get("backdrops", [])),
+            ("logo", data.get("logos", [])),
+        ):
             for index, item in enumerate(items):
                 path = item.get("file_path")
                 if not path:
                     continue
                 source_id = path
-                record = self.db.query(MovieImage).filter_by(movie_id=movie.id, image_type=image_type, source="tmdb", source_id=source_id).first()
+                record = (
+                    self.db.query(MovieImage)
+                    .filter_by(
+                        movie_id=movie.id,
+                        image_type=image_type,
+                        source="tmdb",
+                        source_id=source_id,
+                    )
+                    .first()
+                )
                 if not record:
-                    record = MovieImage(movie_id=movie.id, image_type=image_type, source="tmdb", source_id=source_id)
+                    record = MovieImage(
+                        movie_id=movie.id,
+                        image_type=image_type,
+                        source="tmdb",
+                        source_id=source_id,
+                    )
                     self.db.add(record)
                 record.original_url = f"https://image.tmdb.org/t/p/original{path}"
                 record.language = item.get("iso_639_1") or None
@@ -237,29 +409,67 @@ class MovieMetadataService:
                 record.is_primary = index == 0
 
     def _upsert_tmdb_rating(self, movie: Movie, payload: dict) -> None:
-        record = self.db.query(MovieRating).filter_by(movie_id=movie.id, source="tmdb").first()
+        record = (
+            self.db.query(MovieRating)
+            .filter_by(movie_id=movie.id, source="tmdb")
+            .first()
+        )
         if not record:
             record = MovieRating(movie_id=movie.id, source="tmdb")
             self.db.add(record)
         record.rating = payload.get("vote_average")
         record.vote_count = payload.get("vote_count")
+        record.status = "AVAILABLE" if record.rating is not None else "NOT_YET_RATED"
         record.last_updated_at = datetime.now(timezone.utc)
 
     def _upsert_watch_providers(self, movie: Movie, data: dict) -> None:
         india = (data.get("results") or {}).get("IN") or {}
-        watch_types = {"flatrate": "subscription", "rent": "rent", "buy": "buy", "free": "free", "ads": "ads"}
+        watch_types = {
+            "flatrate": "subscription",
+            "rent": "rent",
+            "buy": "buy",
+            "free": "free",
+            "ads": "ads",
+        }
         for provider_type, watch_type in watch_types.items():
             for item in india.get(provider_type, []):
-                name = (item.get("provider_name") or "").strip()
+                name = normalize_platform(item.get("provider_name"))
                 if not name:
                     continue
-                availability = self.db.query(OttAvailability).filter_by(movie_id=movie.id, provider=name, country="IN", watch_type=watch_type).first()
+                availability = next(
+                    (
+                        row
+                        for row in self.db.query(OttAvailability)
+                        .filter_by(
+                            movie_id=movie.id, country="IN", watch_type=watch_type
+                        )
+                        .all()
+                        if normalize_platform(row.provider) == name
+                    ),
+                    None,
+                )
                 if not availability:
-                    availability = OttAvailability(movie_id=movie.id, provider=name, country="IN", watch_type=watch_type)
+                    availability = OttAvailability(
+                        movie_id=movie.id,
+                        provider=name,
+                        country="IN",
+                        watch_type=watch_type,
+                    )
                     self.db.add(availability)
-                availability.provider_logo = item.get("logo_path") or availability.provider_logo
-                availability.status = "available"
-                availability.source_type = "tmdb"
-                availability.source_url = india.get("link") or availability.source_url
-                availability.confidence = max(availability.confidence or 0, 80)
+                availability.provider = name
+                availability.provider_logo = (
+                    item.get("logo_path") or availability.provider_logo
+                )
+                if not availability.manually_verified:
+                    availability.status = (
+                        availability.status
+                        if availability.verification_status == "CONFIRMED"
+                        else "available"
+                    )
+                    if availability.verification_status != "CONFIRMED":
+                        availability.source_type = "tmdb"
+                        availability.source_url = (
+                            india.get("link") or availability.source_url
+                        )
+                        availability.confidence = max(availability.confidence or 0, 80)
                 availability.last_checked = datetime.now(timezone.utc)
