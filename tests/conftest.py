@@ -13,6 +13,19 @@ from app.models.movie_metadata import MovieCredit, MovieReleaseDate, Person
 from app.models.ott_availability import OttAvailability
 
 
+@pytest.fixture(autouse=True)
+def isolate_external_rate_limit_store(monkeypatch):
+    """Keep endpoint tests from consuming the live Redis rate-limit buckets.
+
+    Dedicated rate-limit tests replace this stub with their own deterministic
+    Redis fake, so the limiter itself remains covered.
+    """
+    monkeypatch.setattr(
+        "app.core.rate_limit.redis.from_url",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError()),
+    )
+
+
 @pytest.fixture()
 def database():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)

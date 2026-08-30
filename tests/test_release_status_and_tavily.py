@@ -14,6 +14,7 @@ from app.services.release_status import (
     ReleaseStatusService,
     classify_release,
     research_status_label,
+    site_date,
 )
 from app.workers.tasks import _ott_research_batch
 
@@ -43,7 +44,9 @@ def test_confirmed_status_overrides_a_stale_queue_checkpoint():
 
 
 def test_classifies_required_realistic_record_groups_without_provider_calls(database):
-    today = date.today()
+    # Classification uses the configured site timezone. Keep boundary ages
+    # deterministic even when the test runner's UTC day differs at midnight.
+    today = site_date()
     released = []
     for index, age in enumerate((10, 30, 90, 180, 365), start=1):
         movie = _movie(database, 2000 + index, f"Released Missing OTT {index}")
@@ -205,7 +208,7 @@ def test_general_release_fallback_never_uses_provider_appearance_as_ott_date(dat
 def test_research_worker_calls_tavily_only_for_released_eligible_movies(
     database, monkeypatch
 ):
-    today = date.today()
+    today = site_date()
     # Make the shared fixture's released movie complete so it cannot enter this queue.
     fixture_ott = database.query(OttAvailability).filter_by(movie_id=1).one()
     fixture_ott.ott_release_date = today
@@ -262,7 +265,7 @@ def test_research_worker_calls_tavily_only_for_released_eligible_movies(
 
 
 def test_monthly_budget_stops_tavily_without_paid_fallback(database, monkeypatch):
-    today = date.today()
+    today = site_date()
     fixture_ott = database.query(OttAvailability).filter_by(movie_id=1).one()
     fixture_ott.ott_release_date = today
     fixture_ott.verification_status = "CONFIRMED"
