@@ -8,6 +8,7 @@ const enhancements = readFileSync(
   resolve(process.cwd(), "src/v1-enhancements.css"),
   "utf8",
 );
+const nginx = readFileSync(resolve(process.cwd(), "nginx.conf"), "utf8");
 
 describe("fluid responsive layout", () => {
   it("does not impose a desktop minimum width on the application shell", () => {
@@ -45,5 +46,6 @@ describe("fluid responsive layout", () => {
     expect(css).toMatch(/\.comment-form input,[\s\S]*max-width:\s*100%/);
     expect(css).toMatch(/\.comment p,[\s\S]*overflow-wrap:\s*anywhere/);
     expect(css).toMatch(/@media \(max-width: 640px\)[\s\S]*\.comment-form button,[\s\S]*width:\s*100%/);
+    expect(nginx).toMatch(/frame-src[^;]*https:\/\/www\.youtube-nocookie\.com/);
   });
 });

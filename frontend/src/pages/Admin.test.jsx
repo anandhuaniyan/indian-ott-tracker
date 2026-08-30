@@ -57,16 +57,25 @@ it("renders responsive request snapshots, SLA state and email actions", async ()
           completion: { status: "PENDING", sent_at: null, last_error: null },
           rejection: { status: "PENDING", sent_at: null, last_error: null },
         },
+      }, {
+        request_id: "REQ-LOCAL", verified_title: "Already Listed Movie", original_title: null,
+        movie_external_id: 1602337, imdb_id: null, release_date: "2026-06-05", language: "ta", language_name: "Tamil",
+        poster_path: null, director: null, email: "viewer@example.com", details: null,
+        status: "PENDING", created_at: "2026-01-02T00:00:00Z", age_seconds: 120, target_seconds: 172680,
+        local_movie_id: 6204, movie_existed_at_submission: true, emails: {},
       }],
     }),
   }));
   render(<MemoryRouter><Requests /></MemoryRouter>);
   expect(await screen.findByText("A Very Long Verified Movie Title")).toBeInTheDocument();
   expect(screen.getByText("Malayalam")).toBeInTheDocument();
-  expect(screen.getByText(/remaining/)).toBeInTheDocument();
+  expect(screen.getAllByText(/remaining/)).toHaveLength(2);
   expect(screen.getByRole("button", { name: "Retry confirmation" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Add Movie" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Mark Added" })).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "Mark Added" })).toHaveLength(2);
+  expect(screen.getByText("Local Movie ID")).toBeInTheDocument();
+  expect(screen.getByText("6204")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "View Movie" })).toHaveAttribute("href", "/movies/6204");
 });
 
 it("shows real backfill coverage and queues a selected repair", async () => {

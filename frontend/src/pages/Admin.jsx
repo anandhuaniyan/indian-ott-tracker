@@ -254,7 +254,8 @@ export function Requests() {
                   {item.movie_existed_at_submission && <span className="local-info">Movie exists locally</span>}
                 </div>
                 <dl className="admin-request-facts">
-                  <div><dt>ID</dt><dd>{item.movie_external_id || "Historical request"}</dd></div>
+                  <div><dt>External ID</dt><dd>{item.movie_external_id || "Historical request"}</dd></div>
+                  {item.local_movie_id && <div><dt>Local Movie ID</dt><dd>{item.local_movie_id}</dd></div>}
                   <div><dt>IMDb</dt><dd>{item.imdb_id || "—"}</dd></div>
                   <div><dt>Release</dt><dd>{item.release_date || item.release_year || "—"}</dd></div>
                   <div><dt>Language</dt><dd>{item.language_name || item.language || "—"}</dd></div>
