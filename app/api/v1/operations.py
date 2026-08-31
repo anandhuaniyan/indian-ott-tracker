@@ -184,6 +184,18 @@ def request_movie(
         # Requester confirmation and the committed request are independent of
         # administrator-channel availability.
         db.rollback()
+    if local:
+        # A request is the highest research priority. Queue the existing
+        # all-purpose repair plus the independent OTT evidence collectors only
+        # after the request transaction has committed.
+        try:
+            from app.workers.celery_app import celery_app
+
+            celery_app.send_task("repair.movie", args=[local.id])
+            celery_app.send_task("operations.ott_intelligence_movie", args=[local.id])
+        except Exception:
+            # Queue availability must never undo or misreport a saved request.
+            pass
     return {
         "request_id": item.request_id,
         "status": item.status,

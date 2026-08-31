@@ -32,7 +32,7 @@ class TMDbOttService:
             "free": "free",
             "rent": "rent",
             "buy": "buy",
-            "ads": "free",
+            "ads": "ads",
         }
 
         for category, watch_type in type_mapping.items():
@@ -49,7 +49,7 @@ class TMDbOttService:
                         "watch_type": watch_type,
                         "watch_url": watch_url,
                         "source_type": "TMDB",
-                        "confidence": 100.0,
+                        "confidence": 75.0,
                     })
 
-        return parsed
+        return parsed

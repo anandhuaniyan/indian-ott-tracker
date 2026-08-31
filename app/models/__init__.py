@@ -26,6 +26,14 @@ from app.models.ott_platform import OttPlatform
 from app.models.tv_show import TVShow
 from app.models.tv_show_ott import TVShowOtt
 from app.models.operations import AdminAuditLog, BackfillRecord, DataQualityIssue, MovieComment, MovieRequest, NotificationLog, OperationState, OttEvidence, OttSourceRelease
+from app.models.ott_intelligence import (
+    OttAvailabilityObservation,
+    OttGoldSetCase,
+    OttProviderBudgetPeriod,
+    OttProviderCache,
+    OttProviderHealth,
+    OttReconciliationDecision,
+)
 
 __all__ = [
     "AvailabilityType",
@@ -56,4 +64,6 @@ __all__ = [
     "tv_show_genres",
     "tv_show_languages",
     "AdminAuditLog", "BackfillRecord", "MovieComment", "MovieRequest", "OttEvidence", "OttSourceRelease", "DataQualityIssue", "NotificationLog", "OperationState",
+    "OttAvailabilityObservation", "OttReconciliationDecision", "OttProviderBudgetPeriod",
+    "OttProviderHealth", "OttProviderCache", "OttGoldSetCase",
 ]

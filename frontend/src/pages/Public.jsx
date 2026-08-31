@@ -17,15 +17,17 @@ const SORTS = [
   ["name-desc", "Name Z–A"],
 ];
 
-const formatDate = (value) =>
-  value
-    ? new Intl.DateTimeFormat(undefined, {
-        day: "numeric",
-        month: "long",
-        year: "numeric",
-        timeZone: "UTC",
-      }).format(new Date(`${value}T00:00:00Z`))
-    : null;
+const formatDate = (value) => {
+  if (!value) return null;
+  const parsed = new Date(String(value).includes("T") ? value : `${value}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return new Intl.DateTimeFormat(undefined, {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(parsed);
+};
 
 const useData = (path) => {
   const [data, setData] = useState();
@@ -842,7 +844,9 @@ export function Movie() {
                   item.release_date,
                   item.country,
                   item.release_date ? item.availability_state : "date not confirmed",
-                  item.confidence != null && `${item.confidence}% confidence`,
+                  item.release_date && item.date_confidence != null
+                    ? `${item.date_confidence}% date confidence`
+                    : item.platform_confidence != null && `${item.platform_confidence}% platform confidence`,
                 ]
                   .filter(Boolean)
                   .join(" · ")}
@@ -854,6 +858,9 @@ export function Movie() {
                     : `View source (${item.source})`}
                 </a>
               )}
+              {item.original_premiere && <small>Original OTT premiere</small>}
+              {item.last_verified && <small>Last verified: {formatDate(item.last_verified)}</small>}
+              {item.attribution && <small>{item.attribution}</small>}
             </div>
           </article>
         ))}

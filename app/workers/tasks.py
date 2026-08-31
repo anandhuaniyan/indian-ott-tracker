@@ -641,6 +641,49 @@ def ott_research():
     return _run(_ott_research_batch)
 
 
+@celery_app.task(
+    name="operations.ott_intelligence_daily",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def ott_intelligence_daily():
+    from app.services.ott.pipeline import OTTIntelligencePipeline
+
+    return _run(lambda db: OTTIntelligencePipeline(db).run_daily())
+
+
+@celery_app.task(
+    name="operations.ott_intelligence_movie",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def ott_intelligence_movie(movie_id: int):
+    from app.services.ott.intelligence import OTTIntelligenceService
+
+    return _run(lambda db: OTTIntelligenceService(db).refresh_movie(movie_id))
+
+
+@celery_app.task(
+    name="operations.ott_intelligence_weekly",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def ott_intelligence_weekly():
+    from app.services.ott.pipeline import OTTIntelligencePipeline
+
+    return _run(lambda db: OTTIntelligencePipeline(db).run_weekly())
+
+
+@celery_app.task(name="operations.ott_gold_set_evaluate")
+def ott_gold_set_evaluate():
+    from app.services.ott.gold_set import OttGoldSetService
+
+    return _run(lambda db: OttGoldSetService(db).evaluate())
+
+
 @celery_app.task(bind=True, name="operations.repair_orchestrator")
 def repair_orchestrator(self):
     """Run accelerated stages sequentially so providers are never maxed concurrently."""

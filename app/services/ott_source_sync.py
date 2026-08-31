@@ -22,6 +22,8 @@ from app.models.movie import Movie
 from app.models.movie_metadata import ExternalId
 from app.models.operations import OperationState, OttEvidence, OttSourceRelease
 from app.services.operations import OttResearchService
+from app.services.ott.matching import MovieMatchService
+from app.services.ott.providers.ottplay import OTTPlayProvider
 
 
 SOURCES = {"ottplay", "justwatch"}
@@ -185,11 +187,15 @@ class OttSourceSyncService:
             return {"queued": False, "failed": True} | self.snapshot()
 
     def _find_movie(self, raw: dict, title: str, language: str | None, release_date: date | None):
+        candidate = OTTPlayProvider.normalize(raw)
+        match = MovieMatchService(self.db).match(candidate)
+        if match.status == "MATCHED" and match.movie:
+            return match.movie, match.reason, match.confidence
         tmdb_id = raw.get("tmdb_id") or raw.get("tmdbId")
         if str(tmdb_id or "").isdigit():
             movie = self.db.query(Movie).filter_by(tmdb_id=int(tmdb_id)).first()
             if movie:
-                return movie, "TMDB ID"
+                return movie, "TMDB ID", 100
         imdb_id = str(raw.get("imdb_id") or raw.get("imdbId") or "").strip()
         if imdb_id:
             pair = (
@@ -199,10 +205,10 @@ class OttSourceSyncService:
                 .first()
             )
             if pair:
-                return pair, "IMDb ID"
+                return pair, "IMDb ID", 100
         normalized = _normalized_title(title)
         if not normalized:
-            return None, None
+            return None, None, 0
         raw_title = title.casefold().strip()
         candidates = self.db.query(Movie).filter(
             or_(func.lower(Movie.title) == raw_title, func.lower(Movie.original_title) == raw_title)
@@ -229,7 +235,7 @@ class OttSourceSyncService:
         if release_date:
             matching_year = [m for m in rows if m.release_date and abs(m.release_date.year - release_date.year) <= 1]
             rows = matching_year or rows
-        return (rows[0], "Exact title/language/year") if len(rows) == 1 else (None, None)
+        return (rows[0], "Exact title/language/year", 85) if len(rows) == 1 else (None, None, 0)
 
     def _ingest(self, raw: dict, stats: dict, now: datetime) -> OttSourceRelease:
         title = str(raw.get("title") or raw.get("movie_title") or "").strip()
@@ -253,7 +259,7 @@ class OttSourceSyncService:
         record.language = language
         record.source_url = source_url
         record.last_seen_at = now
-        movie, reason = self._find_movie(raw, title, language, release_date)
+        movie, reason, match_confidence = self._find_movie(raw, title, language, release_date)
         if movie and record.status not in {"IGNORED", "TV_SERIES", "DUPLICATE"}:
             record.status = "MATCHED"
             record.matched_movie_id = movie.id
@@ -280,6 +286,13 @@ class OttSourceSyncService:
                     source_name=self.source.title(),
                     country="IN",
                     inspected=True,
+                    fact_type="RELEASE_DATE" if release_date else "AVAILABILITY",
+                    availability_type="SUBSCRIPTION",
+                    raw_external_id=external_key,
+                    movie_match_confidence=match_confidence,
+                    platform_confidence=confidence,
+                    date_confidence=confidence if release_date else 0,
+                    observed_at=now,
                 )
                 if release_date:
                     stats["new_ott_dates_found"] += 1

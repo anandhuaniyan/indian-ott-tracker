@@ -31,6 +31,8 @@ def sanitize_error(value: object, *, limit: int = 2000) -> str:
         settings.TAVILY_API_KEY,
         settings.OTTPLAY_API_KEY,
         settings.JUSTWATCH_API_KEY,
+        settings.STREAMING_AVAILABILITY_API_KEY,
+        settings.WATCHMODE_API_KEY,
         settings.SMTP_PASSWORD,
         settings.SMTP_USERNAME,
         settings.TELEGRAM_BOT_TOKEN,

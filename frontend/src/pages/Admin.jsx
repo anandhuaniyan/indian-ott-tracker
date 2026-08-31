@@ -45,6 +45,7 @@ const Nav = () => (
     <Link to="/admin/data-health">Data health</Link>
     <Link to="/admin/images">Images</Link>
     <Link to="/admin/ott-research">OTT research</Link>
+    <Link to="/admin/ott-gold-set">OTT gold set</Link>
     <Link to="/admin/jobs">Jobs</Link>
     <Link to="/admin/notifications">Notifications</Link>
     <Link to="/admin/sources">Sources</Link>
@@ -720,9 +721,11 @@ export function OttResearch() {
       `/api/v1/admin/ott-research?status=${status}`,
     );
   const [overview] = useAdmin("/api/v1/admin/ott-overview");
+  const [command, commandError, reloadCommand] = useAdmin("/api/v1/admin/ott-command-center", 30000);
   const [releases] = useAdmin(`/api/v1/admin/ott-releases?${initial.get("release") ? `status=${initial.get("release")}` : "page_size=20"}`);
   const [detail, setDetail] = useState(null);
   const [actionError, setActionError] = useState("");
+  const [message, setMessage] = useState("");
   const [manual, setManual] = useState({
     platform: "", ott_release_date: "", source_url: "",
     source_name: "", country: "IN", summary: "",
@@ -753,16 +756,41 @@ export function OttResearch() {
     event.preventDefault();
     call(
       `/api/v1/admin/ott-research/movies/${detail.movie.id}/verify`,
-      json("POST", manual),
+      json("POST", { ...manual, ott_release_date: manual.ott_release_date || null }),
     )
       .then(() => inspect(detail.movie.id))
       .then(reload)
       .catch((reason) => setActionError(reason.message));
   };
+  const runIntelligence = (period) =>
+    call(`/api/v1/admin/ott-intelligence/${period}/run`, { method: "POST" })
+      .then(() => setMessage(`${period} OTT intelligence run queued`))
+      .catch((reason) => setActionError(reason.message));
+  const generateGoldSet = () =>
+    call("/api/v1/admin/ott-gold-set/generate", { method: "POST" })
+      .then((value) => { setMessage(`Gold set contains ${value.total} movies`); reloadCommand(); })
+      .catch((reason) => setActionError(reason.message));
+  const intelligence = command?.gold_set && command?.summary && Array.isArray(command?.providers)
+    ? command
+    : null;
   if (error) return <Guard error={error} />;
   return (
     <Page title="OTT research">
       <div className="admin-subnav"><Link to="/admin/ott-research">Research queue</Link><Link to="/admin/sources">Source health</Link><Link to="/admin/sources?source=ottplay&view=unmatched">OTTplay unmatched</Link></div>
+      {message && <p role="status">{message}</p>}
+      {commandError && <p className="admin-error" role="alert">{commandError}</p>}
+      {intelligence && <>
+        <section className="admin-panel">
+          <header><h2>OTT intelligence command center</h2><Status>{intelligence.gold_set.gate_passed ? "ACCURACY_GATE_PASSED" : "ACCURACY_GATE_BLOCKED"}</Status></header>
+          <div className="admin-request-actions"><button onClick={() => runIntelligence("daily")}>Run daily collection</button><button onClick={() => runIntelligence("weekly")}>Run weekly verification</button><button onClick={generateGoldSet}>Create / complete gold set</button></div>
+          <p>Country: India · Gold set: {intelligence.gold_set.verified}/{intelligence.gold_set.target} manually verified · Automatic publication: {intelligence.gold_set.automatic_publication_enabled ? "enabled" : "disabled"}</p>
+          <div className="metrics">{Object.entries(intelligence.summary).map(([label, value]) => <article key={label}><strong>{value}</strong><span>{label.replaceAll("_", " ")}</span></article>)}</div>
+        </section>
+        <h2>Independent provider health</h2>
+        <div className="admin-source-grid">{intelligence.providers.map((provider) => <article key={provider.provider}><header><h3>{provider.provider.replaceAll("_", " ")}</h3><Status>{provider.status}</Status></header><p>{provider.enabled ? "Enabled" : "Disabled"} · {provider.requests} calls · {provider.latency_ms ?? "—"} ms</p><p>Success: {provider.success_rate ?? "—"}% · Matches/call: {provider.match_rate ?? "—"}%</p>{provider.last_error && <p className="admin-safe-error">{provider.last_error}</p>}</article>)}</div>
+        <h2>Source agreement</h2>
+        <div className="admin-source-grid">{Object.entries(intelligence.source_agreement || {}).map(([source, value]) => <article key={source}><h3>{source.replaceAll("_", " ")}</h3><p>Platform agreement: {value.platform_agreement ?? "Not measured"}{value.platform_agreement != null && "%"}</p><p>Date agreement: {value.date_agreement ?? "Not measured"}{value.date_agreement != null && "%"}</p><small>{value.platform_compared} platform comparisons · {value.date_compared} date comparisons</small></article>)}</div>
+      </>}
       <select
         value={status}
         onChange={(event) => setStatus(event.target.value)}
@@ -807,7 +835,7 @@ export function OttResearch() {
               <span>Needs review</span>
             </article>
           </div>
-          {overview?.by_language && <><h2>OTT coverage by language</h2><div className="admin-language-coverage">{overview.by_language.map((item) => <article key={item.code}><h3>{item.language}</h3><dl><div><dt>Movies</dt><dd>{item.movies}</dd></div><div><dt>Platform known</dt><dd>{item.platform_known}</dd></div><div><dt>Confirmed date</dt><dd>{item.confirmed_date}</dd></div><div><dt>Missing</dt><dd>{item.missing}</dd></div></dl></article>)}</div></>}
+          {(command?.by_language || overview?.by_language) && <><h2>OTT coverage by language</h2><div className="admin-language-coverage">{(command?.by_language || overview.by_language).map((item) => <article key={item.code}><h3>{item.language}</h3><dl><div><dt>Movies</dt><dd>{item.movies}</dd></div><div><dt>Platform known</dt><dd>{item.platform_known}</dd></div><div><dt>Confirmed date</dt><dd>{item.date_confirmed ?? item.confirmed_date}</dd></div><div><dt>Unknown</dt><dd>{item.unknown ?? item.missing}</dd></div>{item.conflicts != null && <div><dt>Conflicts</dt><dd>{item.conflicts}</dd></div>}</dl></article>)}</div></>}
           {releases?.items?.some((item) => Object.hasOwn(item, "source_count")) && <><h2>OTT release records</h2><div className="admin-release-grid">{releases.items.map((item) => <article key={item.id}><img src={imageUrl(item.poster)} alt="" loading="lazy" /><div><Link to={`/movies/${item.movie_id}`}><strong>{item.movie}</strong></Link><p>{item.language || "Unknown language"} · {item.platform}</p><p>{item.ott_release_date || "Date unknown"}</p><Status>{item.status}</Status><button onClick={() => inspect(item.movie_id)}>Evidence ({item.source_count})</button></div></article>)}</div></>}
           <Table
             headers={[
@@ -888,7 +916,8 @@ export function OttResearch() {
                 {detail.evidence.length ? detail.evidence.map((item) => (
                   <article key={item.id}>
                     <strong>{item.source_name || item.source_type}</strong>
-                    <p>{item.platform_found || "No platform"} · {item.release_date_found || "No date"} · {item.result_status} · {item.confidence}%</p>
+                    <p>{item.fact_type || "EVIDENCE"} · {item.platform_found || "No platform"} · {item.release_date_found || "No date"} · {item.result_status}</p>
+                    <p>Match {item.movie_match_confidence}% · Platform {item.platform_confidence}% · Date {item.date_confidence}%</p>
                     <p>{item.evidence_summary || "No summary"}</p>
                     <a href={item.source_url} rel="noreferrer">Open source</a>
                     {!item.rejected_at && (
@@ -901,10 +930,12 @@ export function OttResearch() {
                   </article>
                 )) : <p className="empty">No inspected source evidence yet.</p>}
               </div>
+              {detail.decisions?.length > 0 && <><h3>Reconciliation decisions</h3><div className="admin-evidence-list">{detail.decisions.map((item) => <article key={item.id}><header><strong>{item.platform || "No platform"}</strong><Status>{item.state}</Status></header><p>{item.release_date || "Date not confirmed"} · Health {item.health_score}/100</p><p>{item.reason}</p><small>Supporting evidence: {(item.supporting_evidence_ids || []).join(", ") || "none"}</small></article>)}</div></>}
+              {detail.observations?.length > 0 && <><h3>Availability observations</h3><div className="admin-evidence-list">{detail.observations.map((item) => <article key={item.id}><strong>{item.provider || "No India availability returned"}</strong><p>{item.availability_type} · {item.available ? "Available" : "Not observed"} · {when(item.observed_at)}</p><small>{item.source_type}</small></article>)}</div></>}
               <form onSubmit={verify} className="admin-manual-ott">
                 <h3>Manual verification</h3>
                 <label>Platform<input required value={manual.platform} onChange={(event) => setManual({ ...manual, platform: event.target.value })} /></label>
-                <label>OTT release date<input required type="date" value={manual.ott_release_date} onChange={(event) => setManual({ ...manual, ott_release_date: event.target.value })} /></label>
+                <label>OTT release date (optional when only platform is verified)<input type="date" value={manual.ott_release_date} onChange={(event) => setManual({ ...manual, ott_release_date: event.target.value })} /></label>
                 <label>Source URL<input required type="url" pattern="https://.*" value={manual.source_url} onChange={(event) => setManual({ ...manual, source_url: event.target.value })} /></label>
                 <label>Source name<input value={manual.source_name} onChange={(event) => setManual({ ...manual, source_name: event.target.value })} /></label>
                 <label>Country<input required value={manual.country} onChange={(event) => setManual({ ...manual, country: event.target.value.toUpperCase() })} /></label>
@@ -917,6 +948,54 @@ export function OttResearch() {
       )}
     </Page>
   );
+}
+
+function GoldSetCase({ item, onSaved }) {
+  const [message, setMessage] = useState("");
+  const submit = (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    call(`/api/v1/admin/ott-gold-set/${item.id}`, json("PATCH", {
+      expected_platform: form.get("expected_platform") || null,
+      expected_release_date: form.get("expected_release_date") || null,
+      expected_availability_type: form.get("expected_availability_type") || null,
+      expected_state: form.get("expected_state"),
+      source_url: form.get("source_url") || null,
+      notes: form.get("notes") || null,
+    })).then(() => { setMessage("Ground truth saved"); onSaved(); }).catch((reason) => setMessage(reason.message));
+  };
+  return <article className="admin-panel">
+    <header><div><h2>{item.movie}</h2><p>{item.year || "Unknown year"} · {item.language} · {item.category}</p></div><Status>{item.manually_verified_at ? "VERIFIED" : "UNVERIFIED"}</Status></header>
+    <Link to={`/movies/${item.movie_id}`}>Open movie</Link>
+    <form className="admin-manual-ott" onSubmit={submit}>
+      <label>Expected platform<input name="expected_platform" defaultValue={item.expected_platform || ""} /></label>
+      <label>Expected OTT date<input name="expected_release_date" type="date" defaultValue={item.expected_release_date || ""} /></label>
+      <label>Availability type<select name="expected_availability_type" defaultValue={item.expected_availability_type || ""}><option value="">Unknown</option>{["SUBSCRIPTION", "FREE", "ADS", "RENT", "BUY", "CHANNEL"].map((value) => <option key={value}>{value}</option>)}</select></label>
+      <label>Expected state<select name="expected_state" defaultValue={item.expected_state}>{["UNKNOWN", "PLATFORM_ONLY", "UPCOMING_CONFIRMED", "RELEASED_CONFIRMED", "NOT_FOUND"].map((value) => <option key={value}>{value}</option>)}</select></label>
+      <label>Trusted source URL<input name="source_url" type="url" pattern="https://.*" defaultValue={item.source_url || ""} /></label>
+      <label>Manual verification notes<textarea name="notes" defaultValue={item.notes || ""} /></label>
+      <button>Save verified ground truth</button>
+    </form>
+    {message && <p role="status">{message}</p>}
+  </article>;
+}
+
+export function OttGoldSet() {
+  const [language, setLanguage] = useState("");
+  const [verified, setVerified] = useState("");
+  const [page, setPage] = useState(1);
+  const [data, error, reload] = useAdmin(`/api/v1/admin/ott-gold-set?${new URLSearchParams({ page: String(page), page_size: "25", ...(language && { language }), ...(verified && { verified }) })}`);
+  const [message, setMessage] = useState("");
+  const generate = () => call("/api/v1/admin/ott-gold-set/generate", { method: "POST" }).then((value) => { setMessage(`${value.total}/${value.target} gold-set movies selected`); reload(); }).catch((reason) => setMessage(reason.message));
+  if (error) return <Guard error={error} />;
+  return <Page title="OTT accuracy gold set">
+    <p>These cases must be manually verified before the new multi-provider engine may publish automatically. Unknown is a valid expected result.</p>
+    <div className="toolbar"><select aria-label="Language" value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }}><option value="">All languages</option>{[["ml", "Malayalam"], ["ta", "Tamil"], ["te", "Telugu"], ["hi", "Hindi"], ["kn", "Kannada"]].map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select><select aria-label="Verification state" value={verified} onChange={(event) => { setVerified(event.target.value); setPage(1); }}><option value="">All cases</option><option value="false">Unverified</option><option value="true">Verified</option></select><button onClick={generate}>Create / complete 100-movie set</button></div>
+    {message && <p role="status">{message}</p>}
+    {data?.accuracy && <section className="admin-panel"><header><h2>Accuracy gate</h2><Status>{data.accuracy.gate_passed ? "PASSED" : "BLOCKED"}</Status></header><p>{data.accuracy.verified}/{data.accuracy.target} verified · Platform precision {data.accuracy.platform_precision == null ? "not measured" : `${(data.accuracy.platform_precision * 100).toFixed(1)}%`} · Date precision {data.accuracy.date_precision == null ? "not measured" : `${(data.accuracy.date_precision * 100).toFixed(1)}%`} · False dates {data.accuracy.false_dates}</p></section>}
+    {!data ? <p>Loading…</p> : <div className="admin-source-grid">{data.items.map((item) => <GoldSetCase key={item.id} item={item} onSaved={reload} />)}</div>}
+    <Pager data={data} onPage={setPage} />
+  </Page>;
 }
 
 export function Movies() {

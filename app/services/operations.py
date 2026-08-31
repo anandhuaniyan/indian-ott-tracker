@@ -1,6 +1,5 @@
 """Safe, batched operational services used by workers and admin APIs."""
 
-from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse
 from sqlalchemy import and_, case, func
@@ -515,6 +514,15 @@ class OttResearchService:
         inspected=True,
         manually_verified=False,
         trusted=False,
+        fact_type=None,
+        availability_type="SUBSCRIPTION",
+        raw_external_id=None,
+        movie_match_confidence=90,
+        platform_confidence=None,
+        date_confidence=None,
+        verification_method="AUTOMATED",
+        observed_at=None,
+        allow_publication=True,
     ):
         """Persist source evidence, then recompute the canonical result.
 
@@ -525,6 +533,13 @@ class OttResearchService:
         source_type = source_type or source_rank or "unknown"
         normalized_platform = normalize_platform(platform)
         status = "CONFIRMED" if manually_verified else "POSSIBLE"
+        fact_type = fact_type or ("RELEASE_DATE" if release_date else "AVAILABILITY")
+        platform_confidence = (
+            platform_confidence if platform_confidence is not None else (confidence if normalized_platform else 0)
+        )
+        date_confidence = (
+            date_confidence if date_confidence is not None else (confidence if release_date else 0)
+        )
         evidence = OttEvidence(
             movie_id=movie_id,
             status=status,
@@ -545,10 +560,21 @@ class OttResearchService:
             last_checked=now,
             next_check=self.next_check_for(status, release_date),
             notes=f"source_rank={source_type}",
+            fact_type=fact_type,
+            availability_type=availability_type,
+            raw_external_id=raw_external_id,
+            movie_match_confidence=100 if manually_verified else movie_match_confidence,
+            platform_confidence=100 if manually_verified else platform_confidence,
+            date_confidence=100 if manually_verified else date_confidence,
+            verification_method="MANUAL" if manually_verified else verification_method,
+            observed_at=observed_at or now,
         )
         self.db.add(evidence)
         self.db.flush()
-        self.evaluate_movie(movie_id)
+        if allow_publication:
+            self.evaluate_movie(movie_id)
+        else:
+            self._sync_queue_status(movie_id, "POSSIBLE")
         self.db.commit()
         self.db.refresh(evidence)
         return evidence
@@ -645,156 +671,25 @@ class OttResearchService:
 
     def evaluate_movie(self, movie_id: int) -> str:
         """Apply official/multi-source agreement and overwrite precedence."""
-        rows = (
-            self.db.query(OttEvidence)
-            .filter(
-                OttEvidence.movie_id == movie_id,
-                OttEvidence.source_url.is_not(None),
-                OttEvidence.rejected_at.is_(None),
-                OttEvidence.country == "IN",
-                OttEvidence.inspected_at.is_not(None),
-            )
-            .order_by(OttEvidence.id)
-            .all()
+        from app.services.ott.reconciliation import OTTReconciliationService
+
+        state = OTTReconciliationService(self.db, self.threshold).reconcile(movie_id)
+        queue_status = (
+            "CONFIRMED"
+            if state in {"UPCOMING_CONFIRMED", "RELEASED_CONFIRMED"}
+            else "POSSIBLE"
+            if state in {"PLATFORM_ONLY", "OBSERVED_AVAILABLE"}
+            else state
         )
-        usable = [
-            row
-            for row in rows
-            if row.platform and row.release_date and self._is_reputable(row)
-        ]
-        grouped: dict[tuple[str, date, str], list[OttEvidence]] = defaultdict(list)
-        for row in usable:
-            row.platform = normalize_platform(row.platform)
-            grouped[(row.platform, row.release_date, row.country)].append(row)
-
-        confirmed: list[tuple[tuple[str, date, str], list[OttEvidence], float]] = []
-        for key, evidence_rows in grouped.items():
-            manual = [row for row in evidence_rows if row.manually_verified]
-            official = [
-                row
-                for row in evidence_rows
-                if row.source_type
-                in {
-                    "official_platform",
-                    "official_announcement",
-                }
-                and (row.confidence or 0) >= self.threshold
-            ]
-            independent = {
-                self._source_key(row) for row in evidence_rows if self._source_key(row)
-            }
-            if manual:
-                confirmed.append((key, evidence_rows, 100.0))
-            elif official:
-                confirmed.append(
-                    (key, evidence_rows, max(row.confidence or 0 for row in official))
-                )
-            elif len(independent) >= 2:
-                confirmed.append(
-                    (
-                        key,
-                        evidence_rows,
-                        max(
-                            self.threshold,
-                            min(
-                                92.0,
-                                max(row.confidence or 0 for row in evidence_rows) + 5,
-                            ),
-                        ),
-                    )
-                )
-
-        # A movie may legitimately reach different services on different dates.
-        # Only contradictory dates for the same platform/country are conflicts.
-        by_provider: dict[
-            tuple[str, str],
-            list[tuple[tuple[str, date, str], list[OttEvidence], float]],
-        ] = defaultdict(list)
-        for candidate in confirmed:
-            platform, _, country = candidate[0]
-            by_provider[(platform, country)].append(candidate)
-
-        conflicting_providers = {
-            provider_key
-            for provider_key, candidates in by_provider.items()
-            if len({candidate[0][1] for candidate in candidates}) > 1
-        }
-        confirmed_rows: set[int] = set()
-        published = False
-        for provider_key, candidates in by_provider.items():
-            if provider_key in conflicting_providers:
-                continue
-            _, evidence_rows, confidence = max(
-                candidates,
-                key=lambda item: (
-                    any(row.manually_verified for row in item[1]),
-                    item[2],
-                    max(row.id for row in item[1]),
-                ),
-            )
-            chosen = max(
-                evidence_rows,
-                key=lambda row: (
-                    row.manually_verified,
-                    row.source_type == "official_platform",
-                    row.confidence or 0,
-                    row.id,
-                ),
-            )
-            self._publish(chosen, confidence)
-            confirmed_rows.update(row.id for row in evidence_rows)
-            published = True
-
-        if conflicting_providers:
-            for row in usable:
-                provider_key = (normalize_platform(row.platform), row.country)
-                if provider_key in conflicting_providers:
-                    row.status = "CONFIRMED" if row.manually_verified else "CONFLICTING"
-                elif row.id in confirmed_rows:
-                    row.status = "CONFIRMED"
-                elif row.status != "CONFLICTING":
-                    row.status = "POSSIBLE"
-            for platform, country in conflicting_providers:
-                canonical = self._canonical_for(movie_id, platform, country)
-                if canonical and not canonical.manually_verified:
-                    canonical.verification_status = "NEEDS_REVIEW"
-            DataHealthService(self.db)._issue(
-                movie_id,
-                "ott_conflicting",
-                "high",
-                "Reliable OTT sources disagree for the same platform",
-            )
-            self._sync_queue_status(movie_id, "CONFLICTING")
-            return "CONFLICTING"
-
-        if published:
-            for row in rows:
-                row.status = (
-                    "CONFIRMED"
-                    if row.id in confirmed_rows
-                    else ("POSSIBLE" if row.status != "CONFLICTING" else row.status)
-                )
-            DataHealthService(self.db)._resolve(movie_id, "ott_conflicting")
-            self._sync_queue_status(movie_id, "CONFIRMED")
-            return "CONFIRMED"
-
-        # A single reputable source plus existing India provider availability is
-        # medium/POSSIBLE. It is never promoted to a confirmed release date.
-        for row in usable:
-            provider_support = self._canonical_for(movie_id, row.platform, row.country)
-            row.status = "POSSIBLE"
-            if provider_support and row.source_type == "established_publication":
-                row.confidence = max(row.confidence or 0, 70.0)
-        status = "POSSIBLE" if rows else "UNKNOWN"
-        self._sync_queue_status(movie_id, status)
-        return status
+        self._sync_queue_status(movie_id, queue_status)
+        return queue_status
 
     def manually_verify(
         self,
         movie_id: int,
         *,
         platform: str,
-        release_date: date,
+        release_date: date | None,
         source_url: str,
         source_name: str | None = None,
         country: str = "IN",
@@ -813,6 +708,12 @@ class OttResearchService:
             inspected=True,
             manually_verified=True,
             trusted=True,
+            fact_type="ANNOUNCEMENT" if release_date else "AVAILABILITY",
+            availability_type="SUBSCRIPTION",
+            movie_match_confidence=100,
+            platform_confidence=100,
+            date_confidence=100,
+            verification_method="MANUAL",
         )
 
     def reject_evidence(
