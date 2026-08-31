@@ -20,6 +20,8 @@ const json = (method, body) => ({
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
+const formatDateTime = (value) =>
+  value ? new Date(value).toLocaleString() : "Never";
 const useAdmin = (path, refreshMilliseconds = 0) => {
   const [data, setData] = useState(),
     [error, setError] = useState();
@@ -786,6 +788,17 @@ export function OttResearch() {
           <p>Country: India · Gold set: {intelligence.gold_set.verified}/{intelligence.gold_set.target} manually verified · Automatic publication: {intelligence.gold_set.automatic_publication_enabled ? "enabled" : "disabled"}</p>
           <div className="metrics">{Object.entries(intelligence.summary).map(([label, value]) => <article key={label}><strong>{value}</strong><span>{label.replaceAll("_", " ")}</span></article>)}</div>
         </section>
+        {intelligence.web_research && <section className="admin-panel">
+          <header><h2>One-shot web research</h2><Status>{intelligence.web_research.status}</Status></header>
+          <p>Last researched: {formatDateTime(intelligence.web_research.last_researched_at)}</p>
+          <div className="metrics">
+            <article><strong>{intelligence.web_research.web_researched ?? 0}</strong><span>researched</span></article>
+            <article><strong>{intelligence.web_research.platforms_confirmed ?? 0}</strong><span>platforms confirmed</span></article>
+            <article><strong>{intelligence.web_research.dates_confirmed ?? 0}</strong><span>dates confirmed</span></article>
+            <article><strong>{intelligence.web_research.needs_review ?? 0}</strong><span>manual queue</span></article>
+          </div>
+          {intelligence.web_research.last_error && <p className="admin-safe-error">{intelligence.web_research.last_error}</p>}
+        </section>}
         <h2>Independent provider health</h2>
         <div className="admin-source-grid">{intelligence.providers.map((provider) => <article key={provider.provider}><header><h3>{provider.provider.replaceAll("_", " ")}</h3><Status>{provider.status}</Status></header><p>{provider.enabled ? "Enabled" : "Disabled"} · {provider.requests} calls · {provider.latency_ms ?? "—"} ms</p><p>Success: {provider.success_rate ?? "—"}% · Matches/call: {provider.match_rate ?? "—"}%</p>{provider.last_error && <p className="admin-safe-error">{provider.last_error}</p>}</article>)}</div>
         <h2>Source agreement</h2>

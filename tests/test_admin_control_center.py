@@ -71,7 +71,7 @@ def test_admin_control_center_endpoints_and_request_detail(database, monkeypatch
         assert client.get("/api/v1/admin/ott-releases").status_code == 200
         command = client.get("/api/v1/admin/ott-command-center")
         assert command.status_code == 200
-        assert {"summary", "providers", "source_agreement", "by_language", "gold_set"} <= set(command.json())
+        assert {"summary", "providers", "source_agreement", "by_language", "gold_set", "web_research"} <= set(command.json())
         assert command.json()["gold_set"]["gate_passed"] is False
         generated = client.post("/api/v1/admin/ott-gold-set/generate")
         assert generated.status_code == 200
