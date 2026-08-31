@@ -346,6 +346,27 @@ def ott_verification():
     return _run(run)
 
 
+@celery_app.task(
+    name="sources.ottplay_sync",
+    autoretry_for=(),
+)
+def ottplay_source_sync():
+    from app.services.ott_source_sync import OttSourceSyncService
+
+    return _run(lambda db: OttSourceSyncService(db, "ottplay").sync())
+
+
+@celery_app.task(
+    name="sources.justwatch_refresh",
+    autoretry_for=(),
+)
+def justwatch_source_refresh():
+    """An adapter failure is recorded but never fails the canonical OTT pipeline."""
+    from app.services.ott_source_sync import OttSourceSyncService
+
+    return _run(lambda db: OttSourceSyncService(db, "justwatch").sync())
+
+
 @celery_app.task(name="operations.notifications")
 def notifications():
     def run(db):

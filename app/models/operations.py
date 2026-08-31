@@ -196,6 +196,47 @@ class OperationState(TimestampMixin, Base):
     last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    details: Mapped[dict | None] = mapped_column(JSON)
+
+
+class AdminAuditLog(TimestampMixin, Base):
+    """Small, secret-free history of deliberate administrator actions."""
+
+    __tablename__ = "admin_audit_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    action: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    target_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    target_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    summary: Mapped[str | None] = mapped_column(String(1000))
+
+
+class OttSourceRelease(TimestampMixin, Base):
+    """Normalized record received from an explicitly configured OTT adapter."""
+
+    __tablename__ = "ott_source_releases"
+    __table_args__ = (
+        UniqueConstraint("source", "external_key", name="uq_ott_source_release"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    external_key: Mapped[str] = mapped_column(String(160), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    original_title: Mapped[str | None] = mapped_column(String(500))
+    platform: Mapped[str | None] = mapped_column(String(100), index=True)
+    release_date: Mapped[date | None] = mapped_column(Date, index=True)
+    language: Mapped[str | None] = mapped_column(String(20), index=True)
+    source_url: Mapped[str | None] = mapped_column(String(1000))
+    status: Mapped[str] = mapped_column(
+        String(20), default="UNMATCHED", nullable=False, index=True
+    )
+    matched_movie_id: Mapped[int | None] = mapped_column(
+        ForeignKey("movies.id", ondelete="SET NULL"), index=True
+    )
+    match_reason: Mapped[str | None] = mapped_column(String(500))
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class BackfillRecord(TimestampMixin, Base):

@@ -25,6 +25,8 @@ celery_app.conf.update(
         "ott-queue": {"task": "operations.ott_queue", "schedule": 21600},
         "ott-research": {"task": "operations.ott_research", "schedule": 1800},
         "ott-verification": {"task": "operations.ott_verification", "schedule": 86400},
+        "ottplay-source-sync": {"task": "sources.ottplay_sync", "schedule": 86400},
+        "justwatch-source-refresh": {"task": "sources.justwatch_refresh", "schedule": 86400},
         "movie-request-maintenance": {"task": "operations.movie_requests", "schedule": 1800},
         "notifications": {"task": "operations.notifications", "schedule": 86400},
         "cleanup": {"task": "operations.cleanup", "schedule": 604800},

@@ -1459,6 +1459,225 @@ th {
   color: white;
   font: inherit;
 }
+.metric-link {
+  display: grid;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid #30323d;
+  border-radius: 0.55rem;
+  background: #1b1d25;
+}
+.metric-link:hover,
+.metric-link:focus-visible {
+  border-color: #ffbf47;
+}
+.metric-link strong {
+  color: #ffbf47;
+  font-size: 1.8rem;
+}
+.admin-panel {
+  min-width: 0;
+  margin-block: 1.25rem;
+  padding: clamp(0.85rem, 2vw, 1.25rem);
+  border: 1px solid #30333f;
+  border-radius: 0.7rem;
+  background: #171920;
+}
+.admin-alerts,
+.admin-quick-actions,
+.admin-subnav,
+.admin-counter-tabs,
+.admin-checklist,
+.admin-match-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+}
+.admin-alert {
+  padding: 0.75rem 0.9rem;
+  border: 1px solid #474a57;
+  border-left-width: 4px;
+  border-radius: 0.45rem;
+  background: #20222b;
+}
+.admin-alert-critical { border-left-color: #f07178; }
+.admin-alert-warning { border-left-color: #ffbf47; }
+.admin-alert-neutral { border-left-color: #8d93a6; }
+.admin-status {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  max-width: 100%;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid currentColor;
+  border-radius: 2rem;
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+.admin-status-success { color: #91e6b7; background: #163022; }
+.admin-status-warning { color: #ffd176; background: #352b16; }
+.admin-status-danger { color: #ff9ba0; background: #381b1e; }
+.admin-status-neutral { color: #c1c5d2; background: #292b34; }
+.admin-source-grid,
+.admin-language-coverage,
+.admin-health-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  gap: 0.9rem;
+  min-width: 0;
+}
+.admin-source-grid > article,
+.admin-language-coverage > article,
+.admin-health-groups > section {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid #30333f;
+  border-radius: 0.6rem;
+  background: #1b1d25;
+}
+.admin-source-grid header,
+.admin-movie-grid header,
+.admin-unmatched-list header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.admin-source-grid h2,
+.admin-source-grid h3,
+.admin-movie-grid h2,
+.admin-unmatched-list h3 {
+  margin: 0;
+}
+.admin-source-grid dl,
+.admin-language-coverage dl {
+  display: grid;
+  gap: 0.4rem;
+}
+.admin-source-grid dl > div,
+.admin-language-coverage dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.admin-source-grid dt,
+.admin-language-coverage dt { color: #b8bbc7; }
+.admin-source-grid dd,
+.admin-language-coverage dd { margin: 0; text-align: right; }
+.admin-safe-error {
+  overflow-wrap: anywhere;
+  color: #ffb0b4;
+}
+.admin-activity {
+  display: grid;
+  gap: 0.5rem;
+}
+.admin-activity article {
+  display: grid;
+  grid-template-columns: minmax(150px, auto) minmax(150px, 1fr) minmax(100px, 1fr) minmax(120px, 1fr);
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0.7rem;
+  border-bottom: 1px solid #30333f;
+}
+.admin-activity time,
+.admin-activity small { color: #b8bbc7; }
+.admin-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
+  gap: 0.7rem;
+  min-width: 0;
+  margin-block: 1.25rem;
+}
+.admin-filter-grid input,
+.admin-filter-grid select {
+  width: 100%;
+  min-width: 0;
+  padding: 0.7rem;
+  border: 1px solid #4a4c57;
+  border-radius: 0.4rem;
+  background: #20222b;
+  color: white;
+}
+.admin-counter-tabs { margin-block: 1rem; }
+.admin-counter-tabs button.active,
+.toolbar button.active { border-color: #ffbf47; color: #ffbf47; }
+.admin-detail-hero {
+  display: grid;
+  grid-template-columns: minmax(110px, 190px) minmax(0, 1fr);
+  gap: 1rem;
+  min-width: 0;
+  margin-block: 1rem;
+}
+.admin-detail-hero > img {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 0.55rem;
+  background: #292b35;
+}
+.admin-checklist span {
+  padding: 0.5rem 0.7rem;
+  border: 1px solid currentColor;
+  border-radius: 2rem;
+}
+.admin-checklist .complete { color: #91e6b7; }
+.admin-checklist .missing { color: #ff9ba0; }
+.pre-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+.admin-movie-grid,
+.admin-unmatched-list {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+.admin-movie-grid > article {
+  display: grid;
+  grid-template-columns: minmax(90px, 130px) minmax(0, 1fr);
+  gap: 1rem;
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid #30333f;
+  border-radius: 0.65rem;
+  background: #191b22;
+}
+.admin-movie-grid > article > img,
+.admin-release-grid img {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 0.45rem;
+  background: #292b35;
+}
+.admin-release-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  gap: 0.8rem;
+  min-width: 0;
+}
+.admin-release-grid article {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid #30333f;
+  border-radius: 0.55rem;
+  background: #1b1d25;
+}
+.admin-release-grid article > div { display: grid; align-content: start; gap: 0.35rem; min-width: 0; }
+.admin-release-grid p { margin: 0; }
+.admin-unmatched-list > article {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid #30333f;
+  border-radius: 0.6rem;
+  background: #1b1d25;
+}
+.admin-match-list button { max-width: 100%; overflow-wrap: anywhere; }
+.admin-comment-subject { display: flex; gap: 0.7rem; min-width: 0; }
+.admin-comment-subject img { width: 48px; aspect-ratio: 2 / 3; object-fit: cover; border-radius: 0.3rem; }
 @media (max-width: 820px) {
   .admin-manual-ott {
     grid-template-columns: 1fr;
@@ -1479,6 +1698,7 @@ th {
   .deep-detail-lead > .poster {
     width: min(260px, 100%);
   }
+  .admin-activity article { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 640px) {
   .detail {
@@ -1524,6 +1744,13 @@ th {
   .admin-request-card {
     grid-template-columns: 1fr;
   }
+  .admin-detail-hero,
+  .admin-movie-grid > article { grid-template-columns: 1fr; }
+  .admin-detail-hero > img,
+  .admin-movie-grid > article > img { width: min(150px, 100%); }
+  .admin-activity article { grid-template-columns: 1fr; }
+  .admin-nav a,
+  .admin-counter-tabs button { flex: 1 1 auto; text-align: center; }
   .calendar-month-nav {
     grid-template-columns: repeat(3, minmax(0, 1fr));
     grid-template-areas:
