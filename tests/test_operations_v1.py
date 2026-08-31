@@ -8,6 +8,7 @@ from app.models.ott_availability import OttAvailability
 from app.services.image_fallback import ImageFallbackService
 from app.services.notification_service import NotificationService
 from app.services.operations import DataHealthService, OttResearchService
+from app.services.release_status import site_date
 from app.core.rate_limit import limit
 from fastapi import HTTPException
 from starlette.requests import Request
@@ -86,7 +87,7 @@ def test_ott_confidence_canonical_conflict_and_backoff(database, monkeypatch):
     confirmed = service.record_evidence(
         2,
         platform="Prime Video",
-        release_date=date.today(),
+        release_date=site_date(),
         source_url="https://primevideo.com/example",
         confidence=95,
         source_rank="official_platform",
@@ -102,7 +103,7 @@ def test_ott_confidence_canonical_conflict_and_backoff(database, monkeypatch):
     conflict = service.record_evidence(
         2,
         platform="Prime Video",
-        release_date=date.today() + timedelta(days=1),
+        release_date=site_date() + timedelta(days=1),
         source_url="https://primevideo.com/conflicting-date",
         confidence=95,
         source_rank="official_platform",
