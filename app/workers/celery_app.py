@@ -27,6 +27,7 @@ celery_app.conf.update(
         "ott-verification": {"task": "operations.ott_verification", "schedule": 86400},
         "ott-intelligence-daily": {"task": "operations.ott_intelligence_daily", "schedule": 86400},
         "ott-intelligence-weekly": {"task": "operations.ott_intelligence_weekly", "schedule": 604800},
+        "ott-web-research": {"task": "operations.ott_web_research", "schedule": 86400},
         "ott-gold-set-evaluation": {"task": "operations.ott_gold_set_evaluate", "schedule": 604800},
         "ottplay-source-sync": {"task": "sources.ottplay_sync", "schedule": 86400},
         "justwatch-source-refresh": {"task": "sources.justwatch_refresh", "schedule": 86400},
