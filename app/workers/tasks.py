@@ -677,6 +677,19 @@ def ott_intelligence_weekly():
     return _run(lambda db: OTTIntelligencePipeline(db).run_weekly())
 
 
+@celery_app.task(
+    name="operations.ott_web_research",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def ott_web_research(limit: int = 30):
+    """Bounded AI/web evidence pass; technical failures remain distinguishable."""
+    from app.services.ott.web_research import WebOttResearchService
+
+    return _run(lambda db: WebOttResearchService(db).run(limit=limit))
+
+
 @celery_app.task(name="operations.ott_gold_set_evaluate")
 def ott_gold_set_evaluate():
     from app.services.ott.gold_set import OttGoldSetService
