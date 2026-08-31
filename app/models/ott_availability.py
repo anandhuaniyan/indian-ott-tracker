@@ -9,6 +9,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    JSON,
     String,
     UniqueConstraint,
 )
@@ -60,5 +61,16 @@ class OttAvailability(TimestampMixin, Base):
     evidence_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("ott_evidence.id", ondelete="SET NULL"), index=True
     )
+    platform_confidence: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    date_confidence: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    verification_method: Mapped[str | None] = mapped_column(String(30), index=True)
+    locked_by_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    observed_available_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    is_original_premiere: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    release_state: Mapped[str] = mapped_column(String(40), default="UNKNOWN", nullable=False, index=True)
+    health_score: Mapped[float] = mapped_column(Float, default=0, nullable=False, index=True)
+    supporting_evidence_ids: Mapped[list | None] = mapped_column(JSON)
 
     movie: Mapped["Movie"] = relationship(back_populates="ott_availabilities")

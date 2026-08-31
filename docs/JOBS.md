@@ -1,6 +1,8 @@
 # Background jobs
 
-Celery registers and Beat schedules: TMDB incremental sync, bounded metadata enrichment, IMDb rating refresh, whole-catalogue data health, image health, image recovery, daily release-status classification, OTT eligibility queueing, research, verification, optional daily OTTplay sync, optional daily JustWatch refresh, daily notifications and cleanup. Redis is both broker and result backend.
+Celery registers and Beat schedules: TMDB incremental sync, bounded metadata enrichment, IMDb rating refresh, whole-catalogue data health, image health, image recovery, daily release-status classification, OTT eligibility queueing, targeted research, verification, the daily and weekly OTT intelligence pipelines, weekly gold-set evaluation, optional daily OTTplay sync, optional daily authorized JustWatch refresh, daily notifications and cleanup. Redis is both broker and result backend.
+
+`operations.ott_intelligence_daily` collects cached/direct India availability in priority order and a bounded batch; `operations.ott_intelligence_weekly` revisits platform-only/conflicting movies. `operations.ott_intelligence_movie` is used by requested/existing titles and targeted Admin refresh. Provider failure is isolated, budgeted, cached, and circuit-broken. None of these jobs converts an HTTP failure into `NOT_FOUND`, and automatic publication remains disabled until the gold accuracy gate is manually satisfied and configuration is explicitly changed.
 
 Data, metadata and image tasks persist cursors. Celery success/failure signals update job state for every task; failure signals also dispatch an administrator notification without altering retry behavior. Tasks acknowledge late and external/operational tasks use bounded batches and retry backoff.
 

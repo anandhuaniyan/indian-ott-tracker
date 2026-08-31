@@ -1188,8 +1188,19 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
                     ),
                     "source_url": x.source_url,
                     "confidence": x.confidence,
+                    "platform_confidence": x.platform_confidence,
+                    "date_confidence": x.date_confidence,
                     "verification_state": x.verification_status,
                     "availability_state": x.status,
+                    "release_state": x.release_state,
+                    "original_premiere": x.is_original_premiere,
+                    "observed_available_from": x.observed_available_from,
+                    "last_verified": x.verified_at or x.last_seen_at or x.last_checked,
+                    "attribution": (
+                        "Watch-provider data supplied by TMDB and sourced through JustWatch"
+                        if (x.source_type or "").lower() in {"tmdb", "justwatch_tmdb"}
+                        else None
+                    ),
                     "last_checked": x.last_checked,
                 }
                 for x in _canonical_ott_rows(movie)

@@ -153,6 +153,19 @@ class OttEvidence(TimestampMixin, Base):
     trusted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     rejection_reason: Mapped[str | None] = mapped_column(Text)
+    fact_type: Mapped[str] = mapped_column(
+        String(40), default="RELEASE_DATE", nullable=False, index=True
+    )
+    availability_type: Mapped[str | None] = mapped_column(String(30), index=True)
+    raw_external_id: Mapped[str | None] = mapped_column(String(200), index=True)
+    movie_match_confidence: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    platform_confidence: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    date_confidence: Mapped[float] = mapped_column(Float, default=0, nullable=False)
+    verification_method: Mapped[str | None] = mapped_column(String(30), index=True)
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    superseded_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ott_evidence.id", ondelete="SET NULL"), index=True
+    )
 
 
 class DataQualityIssue(TimestampMixin, Base):

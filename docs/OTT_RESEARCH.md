@@ -1,17 +1,53 @@
-# OTT research
+# OTT intelligence and accuracy policy
 
-`OttAvailability` is canonical public data. `OttEvidence` stores every attempt, status, platform, release date, source URL/title, publication date, confidence, attempts, last/next check and notes. Queue history may also use `WAITING_RELEASE`, `METADATA_REPAIR`, and `TOO_OLD` to preserve why an incomplete movie is not eligible for automatic research.
+The India OTT pipeline follows one rule: **UNKNOWN is better than wrong**. `OttAvailability` remains the canonical public projection, while evidence, observations, decisions, provider state, cache entries, and the gold accuracy set are retained independently. A current availability observation is never converted into an original OTT release date.
 
-Every movie is classified locally from explicit TMDB/country release rows and canonical OTT data as `THEATRICALLY_RELEASED`, `UPCOMING`, `DIRECT_TO_OTT`, or `UNKNOWN`. The classifier never infers a theatrical release from a production year. Indian theatrical rows are preferred. The persisted `release_status_classification` cursor makes the whole-catalogue pass resumable, and the daily `operations.release_status` job re-runs it so future release dates become eligible automatically.
+## Facts and public rules
 
-Automatic web research requires incomplete canonical OTT information, a completed theatrical/direct-digital release, the configured minimum delay, an expired cooldown, an age within the automatic catalogue window (unless user-requested), a remaining daily movie slot, and remaining free application budget. Upcoming movies wait, unknown movies require TMDB metadata repair, old catalogue titles are manual-only, and complete canonical provider/date records are never searched.
+The engine treats platform availability, availability type, announcement date, generic digital date, observed availability, and original OTT premiere as different facts. Country is always explicit and automated public collection is restricted to `IN`. Availability types are `SUBSCRIPTION`, `FREE`, `ADS`, `RENT`, `BUY`, `CHANNEL`, or `UNKNOWN`; rent and buy offers are not presented as subscription streaming.
 
-The research provider is opt-in. Set `OTT_RESEARCH_PROVIDER=tavily` and `TAVILY_API_KEY` for the Tavily adapter. Tavily runs one title/year/language query first and a second only when platform and date were not both found, capped by `TAVILY_MAX_QUERIES_PER_MOVIE`. `tavily_usage:YYYY-MM` and `ott_research_daily:YYYY-MM-DD` operation states reserve credits before requests. Exhaustion stops requests with no paid or Google fallback. A generic lawful JSON API remains available through `OTT_SEARCH_API_URL` and `OTT_SEARCH_API_KEY`; Google Programmable Search is used only when explicitly selected.
+The public movie page may show a confirmed India platform even when its original release date is unknown. An exact date is returned only when the canonical row is `CONFIRMED`. Home “Upcoming OTT”, “Recently released on OTT”, and the OTT calendar already require a confirmed canonical date, so digital purchase dates, observations, theatrical dates, and article publication dates cannot pad those sections.
 
-OTTplay and JustWatch ingestion is separately opt-in through `OTTPLAY_ENABLED`/`OTTPLAY_ADAPTER_URL` and `JUSTWATCH_ENABLED`/`JUSTWATCH_ADAPTER_URL`. These integrations consume only operator-authorized JSON adapters; the application does not scrape either site. Rows match local movies by TMDB ID, IMDb ID, then normalized title/language/year. Matched and unmatched source rows, last/next run, counts, and safe errors are durable. A single aggregator record is stored as `POSSIBLE` evidence and is not enough to overwrite stronger canonical data. Failure of either optional adapter is isolated from the other sources and the Admin API.
+`first_seen_at`, `last_seen_at`, and `observed_available_from` describe what this system observed. They do not claim an original premiere date. Multiple current/later platforms can coexist; `is_original_premiere` identifies the earliest sufficiently confirmed original premiere without deleting later availability.
 
-Source scores are high for official OTT platforms, medium-high for established trade/entertainment publications, and low for unknown aggregators/blogs. Evidence below `OTT_CONFIRMATION_THRESHOLD` stays `POSSIBLE` and cannot publish canonical availability. Strong confirmed evidence creates or updates `OttAvailability` only when it is at least as confident as the existing value.
+## Provider stack
 
-Credible disagreement becomes `CONFLICTING`, preserves all evidence, opens a high-severity issue and notifies administrators. It never overwrites stronger canonical data. Retry calculation differs for unknown, possible, not-found, conflicting, failed and confirmed future/past records; Beat queues and processes only due records. A verification task requeues stale canonical availability.
+Provider-specific code lives under `app/services/ott/providers/` and emits `NormalizedOttEvidence`.
 
-`operations.ott_eligibility_backfill` checkpoints only locally classified, automatically eligible movies with incomplete canonical data. It creates at most one active evidence queue item per movie. Missing search credentials are shown as configuration blockers and do not create fabricated `NOT_FOUND` results. The public movie page and admin research page show theatrical date, public release status, canonical OTT platform/date, eligibility, and research state separately.
+- TMDB/JustWatch uses `/movie/{tmdb_id}/watch/providers`, reads only `IN`, retains `flatrate`, `free`, `ads`, `rent`, and `buy` distinctions, and supplies platform evidence with JustWatch attribution. TMDB release type 4 is stored separately as low-confidence `DIGITAL_DATE` evidence and cannot publish a subscription OTT date.
+- Streaming Availability is optional through `STREAMING_AVAILABILITY_ENABLED` and `STREAMING_AVAILABILITY_API_KEY`. It prefers IMDb ID, then TMDB ID, requests India only, and treats `availableSince` as an observation boundary rather than a premiere date.
+- Watchmode is optional through `WATCHMODE_ENABLED` and `WATCHMODE_API_KEY`. It requests region `IN` and can be disabled without affecting other providers. Operators must confirm commercial licensing, caching, attribution, and retention terms before production enablement.
+- OTTplay discovery remains opt-in through an operator-authorized JSON adapter. The application does not bypass robots, authentication, CAPTCHA, or anti-bot controls. Matched and unmatched discoveries remain durable in `ott_source_releases`.
+- Official platform/studio/distributor, reputable-news, targeted Tavily, and manual adapters normalize inspected evidence. Search snippets are discovery leads, not automatically verified facts. Tavily remains tightly budgeted and is never run across the full catalogue.
+
+The cheapest-first per-movie order is cache, TMDB/JustWatch, Streaming Availability, then optional Watchmode. Daily OTTplay discovery and the existing targeted research queue run as separate bounded jobs. One provider’s timeout, 403, 429, exhausted quota, or outage is never translated into `NOT_FOUND` and does not stop the remaining providers.
+
+## Identity and reconciliation
+
+`MovieMatchService` matches exact TMDB or IMDb IDs first. Title matching also requires enough corroboration from normalized/original/alternate title, release year, original language, director, cast, and runtime. Title-only or ambiguous same-title matches are rejected or sent to review; regional remakes and same-name films are not silently merged.
+
+`OTTReconciliationService` scores movie identity, platform, and date separately. Manual evidence and official platform evidence have the highest authority. A single availability provider can establish platform-only availability, but not a release date. Non-official dates require independent agreement. Credible disagreement becomes `CONFLICTING`/`NEEDS_REVIEW`, preserves every source, creates a data-quality issue, and leaves the public date hidden. An inspected official correction supersedes weaker rows without deleting them. A manual row locks canonical automation until an administrator explicitly changes it.
+
+Every decision is appended to `ott_reconciliation_decisions`; the previous decision is marked non-current. `supporting_evidence_ids`, `conflicting_evidence_ids`, a reason, three confidence values, and a per-movie 0–100 health score explain the result.
+
+## Provider controls and automation
+
+`OTTApiBudgetManager` keeps daily and monthly counters per provider. Zero means no application-level limit; production credentials should always use realistic values. `OttProviderControlService` records request/success/error/match counts, latency, safe errors, consecutive failures, and the states `HEALTHY`, `DEGRADED`, `RATE_LIMITED`, `QUOTA_EXHAUSTED`, `DOWN`, and `DISABLED`. Repeated failures open a timed circuit breaker. API keys and authorization values are redacted from errors and HTTP request logging is restricted.
+
+Provider responses are cached with short TTLs for upcoming/recent films and longer TTLs for stable historical films. `operations.ott_intelligence_daily` prioritizes requested movies, due confirmed releases, recent theatrical titles, and popularity in bounded batches. `operations.ott_intelligence_weekly` revisits platform-only records and conflicts. Durable `operation_states` records processed totals, provider outcomes, safe errors, and next run. The compatibility `app.services.tmdb.sync_ott` command now invokes this bounded pipeline instead of querying all movies and writing a parallel canonical table.
+
+Release-day monitoring preserves an announced date when a provider is temporarily absent. Negative observations mean only “this provider returned no India availability at this check”; they do not mean the movie has no OTT release.
+
+## Gold set and phased rollout
+
+Migration `a6b7c8d9e0f1` adds the accuracy engine. The first live gold set contains 100 existing movies: 20 each in Malayalam, Tamil, Telugu, Hindi, and Kannada, sampled across upcoming, recent, old, platform-only, no-OTT, and popular candidates. Generation never invents expected values. Administrators must fill trusted expected platform/date/state/source values and mark each case verified.
+
+The evaluator reports platform precision, date precision, and false dates. The gate requires all 100 cases, at least 95% measured platform precision, at least 98% measured date precision, and zero false published dates. `OTT_INTELLIGENCE_AUTO_PUBLICATION_ENABLED` defaults to `false`; a passing report does not silently change configuration. Production publication is an explicit operator decision after licensing and manual gold-set review.
+
+Only then should operators enable phased work: 0–90 days, 91–180 days, 181–365 days, popular/requested older titles, and finally remaining current-platform coverage. Historical original dates should be researched only when valuable; “platform known, date not confirmed” is a correct outcome.
+
+## Admin workflow
+
+Admin `/admin/ott-research` is the OTT command center. It reports canonical states, source coverage, provider budgets/health, source agreement, language coverage, conflicts, observations, immutable decisions, health score, and the reason behind each selection. It can run bounded daily/weekly collection or refresh one movie. `/admin/ott-gold-set` generates, filters, edits, and evaluates manual ground truth. Existing Sources pages retain unmatched OTTplay/authorized-feed mapping. Manual verification accepts a platform-only fact when the true date is unknown.
+
+Before enabling any provider, verify its current commercial-use permission, quota, attribution, caching, and retention requirements. No external key is committed to Git.

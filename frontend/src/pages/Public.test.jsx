@@ -131,7 +131,11 @@ it("renders stored movie metadata and galleries without fabricating empty fields
       spoken_languages: [],
       production_countries: [],
       production_companies: [],
-      ott: [],
+      ott: [{
+        provider: "Prime Video", watch_type: "subscription", release_date: null,
+        country: "IN", availability_state: "available", platform_confidence: 75,
+        last_verified: "2026-08-31T12:34:56+00:00",
+      }],
       collection: null,
     },
     cast: [
@@ -205,6 +209,8 @@ it("renders stored movie metadata and galleries without fabricating empty fields
   );
   expect(screen.getByAltText("Actor profile")).toBeInTheDocument();
   expect(screen.getByTitle("Official Trailer")).toHaveAttribute("src", "https://www.youtube-nocookie.com/embed/OfficialML1");
+  expect(screen.getByText(/date not confirmed.*75% platform confidence/i)).toBeInTheDocument();
+  expect(screen.getByText("Last verified: 31 August 2026")).toBeInTheDocument();
   expect(await screen.findByText("No comments yet. Be the first to comment.")).toBeInTheDocument();
 });
 

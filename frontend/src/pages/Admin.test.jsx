@@ -3,7 +3,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
-import { Comments, Dashboard, DataHealth, Jobs, Movies, OttResearch, RequestDetail, Requests, Sources } from "./Admin";
+import { Comments, Dashboard, DataHealth, Jobs, Movies, OttGoldSet, OttResearch, RequestDetail, Requests, Sources } from "./Admin";
 import { Request } from "./Public";
 
 afterEach(() => {
@@ -195,6 +195,27 @@ it("explains release eligibility on the OTT research page", async () => {
   expect(screen.getByText("Upcoming")).toBeInTheDocument();
   expect(screen.getByText("Waiting for theatrical release")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+});
+
+it("keeps the OTT gold set blocked until manual ground truth exists", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      page: 1, page_size: 25, total: 100,
+      accuracy: { gate_passed: false, verified: 0, target: 100, platform_precision: null, date_precision: null, false_dates: 0 },
+      items: [{
+        id: 1, movie_id: 10, movie: "Gold Film", year: 2026, language: "ml", category: "RECENT",
+        expected_platform: null, expected_release_date: null, expected_availability_type: null,
+        expected_state: "UNKNOWN", source_url: null, notes: null, manually_verified_at: null,
+      }],
+    }),
+  }));
+  render(<MemoryRouter><OttGoldSet /></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "Accuracy gate" })).toBeInTheDocument();
+  expect(screen.getByText("BLOCKED")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Gold Film" })).toBeInTheDocument();
+  expect(screen.getByText("UNVERIFIED")).toBeInTheDocument();
+  expect(screen.getByLabelText("Expected OTT date")).toHaveAttribute("type", "date");
 });
 
 it("renders complete request detail and queues existing workflows", async () => {

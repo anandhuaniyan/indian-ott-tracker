@@ -39,6 +39,13 @@ from app.models.operations import (
     OttSourceRelease,
 )
 from app.models.ott_availability import OttAvailability
+from app.models.ott_intelligence import (
+    OttAvailabilityObservation,
+    OttGoldSetCase,
+    OttProviderBudgetPeriod,
+    OttProviderHealth,
+    OttReconciliationDecision,
+)
 from app.services.image_fallback import ImageFallbackService
 from app.services.languages import language_name
 from app.services.movie_requests import (
@@ -47,6 +54,9 @@ from app.services.movie_requests import (
     MovieRequestEmailService,
 )
 from app.services.ott_source_sync import OttSourceSyncService, SOURCES
+from app.services.ott.gold_set import OttGoldSetService
+from app.services.ott.provider_controls import OTTApiBudgetManager
+from app.services.ott.reconciliation import SOURCE_AUTHORITY, source_type as normalized_source_type
 from app.services.operations import OttResearchService, ResearchUsageService
 from app.services.roles import ROLE_ALIASES, normalize_role
 from app.services.release_status import (
@@ -103,7 +113,7 @@ class OttAction(BaseModel):
 
 class OttManualVerification(BaseModel):
     platform: str = Field(min_length=2, max_length=100)
-    ott_release_date: date
+    ott_release_date: date | None = None
     source_url: str = Field(min_length=10, max_length=1000, pattern=r"^https://")
     source_name: str | None = Field(default=None, max_length=200)
     country: str = Field(default="IN", min_length=2, max_length=10)
@@ -123,6 +133,15 @@ class CommentModeration(BaseModel):
 class SourceReleaseAction(BaseModel):
     action: str = Field(pattern="^(match|ignore|tv_series|duplicate|research)$")
     movie_id: int | None = Field(default=None, ge=1)
+
+
+class GoldSetUpdate(BaseModel):
+    expected_platform: str | None = Field(default=None, max_length=100)
+    expected_release_date: date | None = None
+    expected_availability_type: str | None = Field(default=None, max_length=30)
+    expected_state: str = Field(default="UNKNOWN", pattern="^(UNKNOWN|PLATFORM_ONLY|UPCOMING_CONFIRMED|RELEASED_CONFIRMED|NOT_FOUND)$")
+    source_url: str | None = Field(default=None, max_length=1000, pattern=r"^https://")
+    notes: str | None = Field(default=None, max_length=2000)
 
 
 def _pagination(total: int, page: int, page_size: int):
@@ -234,6 +253,35 @@ def _source_health(db: Session) -> list[dict]:
                 "enabled": snapshot["enabled"],
                 "healthy": snapshot["enabled"] and snapshot["status"] not in {"FAILED", "BLOCKED"},
                 **snapshot,
+            }
+        )
+    budget = OTTApiBudgetManager(db)
+    for name, label, enabled in (
+        ("tmdb_justwatch", "TMDB / JustWatch India", bool(settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN)),
+        ("streaming_availability", "Streaming Availability", bool(settings.STREAMING_AVAILABILITY_ENABLED and settings.STREAMING_AVAILABILITY_API_KEY)),
+        ("watchmode", "Watchmode", bool(settings.WATCHMODE_ENABLED and settings.WATCHMODE_API_KEY)),
+    ):
+        health = db.query(OttProviderHealth).filter_by(provider=name).first()
+        sources.append(
+            {
+                "source": name,
+                "label": label,
+                "enabled": enabled,
+                "configured": enabled,
+                "healthy": bool(enabled and (not health or health.status == "HEALTHY")),
+                "status": health.status if health else ("IDLE" if enabled else "DISABLED"),
+                "last_check": health.updated_at if health else None,
+                "last_success": health.last_success_at if health else None,
+                "last_failure": health.last_failure_at if health else None,
+                "last_error": health.last_error if health else None,
+                "next_run": health.circuit_open_until if health else None,
+                "stats": {
+                    "requests": health.request_count if health else 0,
+                    "successes": health.success_count if health else 0,
+                    "errors": health.error_count if health else 0,
+                    "matches": health.match_count if health else 0,
+                },
+                "budget": budget.snapshot(name),
             }
         )
     return sources
@@ -930,6 +978,14 @@ def _request(item: MovieRequest, db: Session | None = None, rich: bool = False):
         .order_by(OttEvidence.confidence.desc(), OttEvidence.created_at.desc())
         .all()
     )
+    decision = (
+        db.query(OttReconciliationDecision)
+        .filter_by(movie_id=movie.id, country="IN", is_current=True)
+        .order_by(OttReconciliationDecision.health_score.desc(), OttReconciliationDecision.id.desc())
+        .first()
+    )
+    observation_count = db.query(OttAvailabilityObservation).filter_by(movie_id=movie.id, country="IN").count()
+    last_observation = db.query(func.max(OttAvailabilityObservation.observed_at)).filter_by(movie_id=movie.id, country="IN").scalar()
     result["local_movie_id"] = movie.id
     result["local"] = {
         "exists": True,
@@ -948,6 +1004,11 @@ def _request(item: MovieRequest, db: Session | None = None, rich: bool = False):
         "verification_status": canonical.verification_status if canonical else "UNKNOWN",
         "status": latest_research.status if latest_research else "NOT_QUEUED",
         "last_check": latest_research.last_checked if latest_research else None,
+        "release_state": decision.state if decision else (canonical.release_state if canonical else "UNKNOWN"),
+        "health_score": decision.health_score if decision else (canonical.health_score if canonical else 0),
+        "reconciliation_reason": decision.reason if decision else None,
+        "observation_count": observation_count,
+        "last_observation": last_observation,
         "sources": [
             {"id": row.id, "name": row.source_name or row.source_type, "url": row.source_url, "platform": row.platform, "date": row.release_date, "confidence": row.confidence}
             for row in sources
@@ -1433,6 +1494,12 @@ def ott_research_detail(
                 "source_type": canonical.source_type,
                 "source_url": canonical.source_url,
                 "confidence": canonical.confidence,
+                "platform_confidence": canonical.platform_confidence,
+                "date_confidence": canonical.date_confidence,
+                "release_state": canonical.release_state,
+                "health_score": canonical.health_score,
+                "original_premiere": canonical.is_original_premiere,
+                "observed_available_from": canonical.observed_available_from,
                 "last_verified": canonical.verified_at,
                 "manually_verified": canonical.manually_verified,
             }
@@ -1452,6 +1519,14 @@ def ott_research_detail(
                 "country": item.country,
                 "evidence_summary": item.summary,
                 "confidence": item.confidence,
+                "fact_type": item.fact_type,
+                "availability_type": item.availability_type,
+                "movie_match_confidence": item.movie_match_confidence,
+                "platform_confidence": item.platform_confidence,
+                "date_confidence": item.date_confidence,
+                "observed_at": item.observed_at,
+                "verification_method": item.verification_method,
+                "superseded_by_id": item.superseded_by_id,
                 "checked_at": item.last_checked,
                 "inspected_at": item.inspected_at,
                 "result_status": item.status,
@@ -1461,6 +1536,14 @@ def ott_research_detail(
                 "rejection_reason": item.rejection_reason,
             }
             for item in evidence
+        ],
+        "decisions": [
+            {"id": item.id, "state": item.state, "platform": item.platform, "release_date": item.release_date, "availability_type": item.availability_type, "platform_confidence": item.platform_confidence, "date_confidence": item.date_confidence, "movie_match_confidence": item.movie_match_confidence, "health_score": item.health_score, "reason": item.reason, "supporting_evidence_ids": item.supporting_evidence_ids, "conflicting_evidence_ids": item.conflicting_evidence_ids, "decided_at": item.decided_at}
+            for item in db.query(OttReconciliationDecision).filter_by(movie_id=movie_id, country="IN", is_current=True).order_by(OttReconciliationDecision.id).all()
+        ],
+        "observations": [
+            {"id": item.id, "provider": item.provider, "availability_type": item.availability_type, "available": item.available, "source_type": item.source_type, "observed_at": item.observed_at, "source_url": item.source_url}
+            for item in db.query(OttAvailabilityObservation).filter_by(movie_id=movie_id, country="IN").order_by(OttAvailabilityObservation.observed_at.desc()).limit(20).all()
         ],
     }
 
@@ -2145,6 +2228,228 @@ def ott_overview(db: Session = Depends(get_db), _: None = Depends(require_admin_
             for movie, item in rows
         ]
     return {"coverage": coverage, "by_language": languages, "upcoming": releases(True), "recent": releases(False)}
+
+
+@router.get("/ott-command-center")
+def ott_command_center(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    """Evidence, agreement, provider, language, and accuracy-gate coverage."""
+    today = site_date()
+    total = db.query(Movie).count()
+    platform_known = db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.country == "IN", OttAvailability.provider.is_not(None)).scalar() or 0
+    platform_confirmed = db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.country == "IN", OttAvailability.verification_status.in_(["PLATFORM_CONFIRMED", "CONFIRMED"])).scalar() or 0
+    date_known = db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.country == "IN", OttAvailability.ott_release_date.is_not(None)).scalar() or 0
+    date_confirmed = db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.country == "IN", OttAvailability.verification_status == "CONFIRMED", OttAvailability.ott_release_date.is_not(None)).scalar() or 0
+    current_states = dict(
+        db.query(OttReconciliationDecision.state, func.count(func.distinct(OttReconciliationDecision.movie_id)))
+        .filter(OttReconciliationDecision.is_current.is_(True), OttReconciliationDecision.country == "IN")
+        .group_by(OttReconciliationDecision.state)
+        .all()
+    )
+    stale = db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(
+        OttAvailability.country == "IN",
+        or_(OttAvailability.last_seen_at.is_(None), OttAvailability.last_seen_at < datetime.now(timezone.utc) - timedelta(days=30)),
+    ).scalar() or 0
+    coverage = dict(
+        db.query(OttEvidence.source_type, func.count(func.distinct(OttEvidence.movie_id)))
+        .filter(OttEvidence.source_url.is_not(None), OttEvidence.rejected_at.is_(None))
+        .group_by(OttEvidence.source_type)
+        .all()
+    )
+    decisions = {
+        (row.movie_id, row.platform): row
+        for row in db.query(OttReconciliationDecision).filter(OttReconciliationDecision.is_current.is_(True), OttReconciliationDecision.country == "IN").all()
+    }
+    agreement = {}
+    evidence_rows = db.query(OttEvidence).filter(OttEvidence.source_url.is_not(None), OttEvidence.rejected_at.is_(None), OttEvidence.country == "IN", OttEvidence.platform.is_not(None)).all()
+    for evidence in evidence_rows:
+        key = normalized_source_type(evidence.source_type)
+        bucket = agreement.setdefault(key, {"platform_compared": 0, "platform_agreed": 0, "date_compared": 0, "date_agreed": 0})
+        decision = decisions.get((evidence.movie_id, evidence.platform))
+        if not decision:
+            continue
+        bucket["platform_compared"] += 1
+        if decision.platform == evidence.platform:
+            bucket["platform_agreed"] += 1
+        if evidence.release_date and decision.release_date:
+            bucket["date_compared"] += 1
+            if evidence.release_date == decision.release_date:
+                bucket["date_agreed"] += 1
+    for bucket in agreement.values():
+        bucket["platform_agreement"] = round(bucket["platform_agreed"] / bucket["platform_compared"] * 100, 1) if bucket["platform_compared"] else None
+        bucket["date_agreement"] = round(bucket["date_agreed"] / bucket["date_compared"] * 100, 1) if bucket["date_compared"] else None
+    by_language = []
+    for code, label in (("ml", "Malayalam"), ("ta", "Tamil"), ("te", "Telugu"), ("hi", "Hindi"), ("kn", "Kannada")):
+        movies = db.query(Movie).filter(Movie.original_language == code).count()
+        known = db.query(func.count(func.distinct(OttAvailability.movie_id))).join(Movie, Movie.id == OttAvailability.movie_id).filter(Movie.original_language == code, OttAvailability.country == "IN").scalar() or 0
+        confirmed = db.query(func.count(func.distinct(OttAvailability.movie_id))).join(Movie, Movie.id == OttAvailability.movie_id).filter(Movie.original_language == code, OttAvailability.country == "IN", OttAvailability.verification_status == "CONFIRMED", OttAvailability.ott_release_date.is_not(None)).scalar() or 0
+        conflicts = db.query(func.count(func.distinct(OttReconciliationDecision.movie_id))).join(Movie, Movie.id == OttReconciliationDecision.movie_id).filter(Movie.original_language == code, OttReconciliationDecision.is_current.is_(True), OttReconciliationDecision.state == "CONFLICTING").scalar() or 0
+        by_language.append({"code": code, "language": label, "movies": movies, "platform_known": known, "date_confirmed": confirmed, "unknown": max(0, movies - known), "conflicts": conflicts})
+    provider_names = ("tmdb_justwatch", "streaming_availability", "watchmode", "ottplay", "tavily")
+    health_rows = {row.provider: row for row in db.query(OttProviderHealth).filter(OttProviderHealth.provider.in_(provider_names)).all()}
+    enabled = {
+        "tmdb_justwatch": bool(settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN),
+        "streaming_availability": bool(settings.STREAMING_AVAILABILITY_ENABLED and settings.STREAMING_AVAILABILITY_API_KEY),
+        "watchmode": bool(settings.WATCHMODE_ENABLED and settings.WATCHMODE_API_KEY),
+        "ottplay": bool(settings.OTTPLAY_ENABLED and settings.OTTPLAY_ADAPTER_URL),
+        "tavily": bool(settings.TAVILY_API_KEY),
+    }
+    budget = OTTApiBudgetManager(db)
+    providers = []
+    for name in provider_names:
+        health = health_rows.get(name)
+        providers.append({
+            "provider": name,
+            "enabled": enabled[name],
+            "status": health.status if health else ("HEALTHY" if enabled[name] else "DISABLED"),
+            "last_success": health.last_success_at if health else None,
+            "last_failure": health.last_failure_at if health else None,
+            "last_error": health.last_error if health else None,
+            "latency_ms": health.last_latency_ms if health else None,
+            "requests": health.request_count if health else 0,
+            "success_rate": round((health.success_count / health.request_count) * 100, 1) if health and health.request_count else None,
+            "match_rate": round((health.match_count / health.request_count) * 100, 1) if health and health.request_count else None,
+            "budget": budget.snapshot(name),
+        })
+    gold_state = db.query(OperationState).filter_by(name="ott.gold_set_accuracy").first()
+    gold = gold_state.details if gold_state and gold_state.details else {
+        "total": db.query(OttGoldSetCase).count(), "verified": db.query(OttGoldSetCase).filter(OttGoldSetCase.manually_verified_at.is_not(None)).count(), "target": settings.OTT_GOLD_SET_SIZE_PER_LANGUAGE * 5, "gate_passed": False, "automatic_publication_enabled": settings.OTT_INTELLIGENCE_AUTO_PUBLICATION_ENABLED,
+    }
+    return {
+        "summary": {
+            "total_movies": total,
+            "platform_known": platform_known,
+            "platform_confirmed": platform_confirmed,
+            "ott_date_known": date_known,
+            "ott_date_confirmed": date_confirmed,
+            "platform_only": max(0, platform_known - date_confirmed),
+            "unknown": max(0, total - platform_known),
+            "upcoming": current_states.get("UPCOMING_CONFIRMED", 0),
+            "released": current_states.get("RELEASED_CONFIRMED", 0),
+            "conflicting": current_states.get("CONFLICTING", 0),
+            "needs_review": current_states.get("NEEDS_REVIEW", 0),
+            "not_found": current_states.get("NOT_FOUND", 0),
+            "recently_stale": stale,
+        },
+        "source_coverage": {normalized_source_type(key): value for key, value in coverage.items()},
+        "source_authority": SOURCE_AUTHORITY,
+        "source_agreement": agreement,
+        "by_language": by_language,
+        "providers": providers,
+        "gold_set": gold,
+        "country": "IN",
+        "as_of": datetime.now(timezone.utc),
+    }
+
+
+@router.get("/ott-observations")
+def ott_observations(
+    movie_id: int | None = Query(default=None, ge=1),
+    provider: str | None = None,
+    available: bool | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    query = db.query(OttAvailabilityObservation, Movie).join(Movie, Movie.id == OttAvailabilityObservation.movie_id)
+    if movie_id:
+        query = query.filter(OttAvailabilityObservation.movie_id == movie_id)
+    if provider:
+        query = query.filter(OttAvailabilityObservation.provider.ilike(f"%{provider.strip()}%"))
+    if available is not None:
+        query = query.filter(OttAvailabilityObservation.available.is_(available))
+    total = query.count()
+    rows = query.order_by(OttAvailabilityObservation.observed_at.desc(), OttAvailabilityObservation.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return _pagination(total, page, page_size) | {"items": [{"id": item.id, "movie_id": movie.id, "movie": movie.title, "provider": item.provider, "country": item.country, "availability_type": item.availability_type, "available": item.available, "source_type": item.source_type, "source_url": item.source_url, "observed_at": item.observed_at, "evidence_id": item.evidence_id} for item, movie in rows]}
+
+
+@router.get("/ott-decisions")
+def ott_decisions(
+    state: str | None = None,
+    max_health: float | None = Query(default=None, ge=0, le=100),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    query = db.query(OttReconciliationDecision, Movie).join(Movie, Movie.id == OttReconciliationDecision.movie_id).filter(OttReconciliationDecision.is_current.is_(True), OttReconciliationDecision.country == "IN")
+    if state:
+        query = query.filter(OttReconciliationDecision.state == state.upper())
+    if max_health is not None:
+        query = query.filter(OttReconciliationDecision.health_score <= max_health)
+    total = query.count()
+    rows = query.order_by(OttReconciliationDecision.health_score.asc(), OttReconciliationDecision.decided_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return _pagination(total, page, page_size) | {"items": [{"id": item.id, "movie_id": movie.id, "movie": movie.title, "language": movie.original_language, "state": item.state, "platform": item.platform, "release_date": item.release_date, "availability_type": item.availability_type, "platform_confidence": item.platform_confidence, "date_confidence": item.date_confidence, "movie_match_confidence": item.movie_match_confidence, "health_score": item.health_score, "reason": item.reason, "supporting_evidence_ids": item.supporting_evidence_ids, "conflicting_evidence_ids": item.conflicting_evidence_ids, "decided_at": item.decided_at} for item, movie in rows]}
+
+
+@router.get("/ott-gold-set")
+def ott_gold_set(
+    language: str | None = None,
+    verified: bool | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    query = db.query(OttGoldSetCase, Movie).join(Movie, Movie.id == OttGoldSetCase.movie_id)
+    if language:
+        query = query.filter(OttGoldSetCase.language == language)
+    if verified is not None:
+        query = query.filter(OttGoldSetCase.manually_verified_at.is_not(None) if verified else OttGoldSetCase.manually_verified_at.is_(None))
+    total = query.count()
+    rows = query.order_by(OttGoldSetCase.language, OttGoldSetCase.category, Movie.title).offset((page - 1) * page_size).limit(page_size).all()
+    state = db.query(OperationState).filter_by(name="ott.gold_set_accuracy").first()
+    return _pagination(total, page, page_size) | {"items": [{"id": item.id, "movie_id": movie.id, "movie": movie.title, "year": (movie.release_date.year if movie.release_date else None), "language": item.language, "category": item.category, "expected_platform": item.expected_platform, "expected_release_date": item.expected_release_date, "expected_availability_type": item.expected_availability_type, "expected_state": item.expected_state, "source_url": item.source_url, "notes": item.notes, "manually_verified_at": item.manually_verified_at} for item, movie in rows], "accuracy": state.details if state and state.details else None}
+
+
+@router.post("/ott-gold-set/generate", dependencies=[Depends(require_same_origin)])
+def generate_ott_gold_set(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    result = OttGoldSetService(db).generate()
+    accuracy = OttGoldSetService(db).evaluate()
+    _audit(db, "ott_gold_set_generated", "ott_gold_set", None, f"{result['total']} cases")
+    db.commit()
+    return result | {"accuracy": accuracy}
+
+
+@router.patch("/ott-gold-set/{case_id}", dependencies=[Depends(require_same_origin)])
+def update_ott_gold_set(case_id: int, payload: GoldSetUpdate, db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    item = db.get(OttGoldSetCase, case_id)
+    if not item:
+        raise HTTPException(404, "Gold-set case not found")
+    if not payload.source_url and not payload.notes:
+        raise HTTPException(422, "Manual ground truth requires a source URL or verification notes")
+    for key, value in payload.model_dump().items():
+        setattr(item, key, value)
+    item.manually_verified_at = datetime.now(timezone.utc)
+    db.commit()
+    accuracy = OttGoldSetService(db).evaluate()
+    _audit(db, "ott_gold_set_verified", "movie", item.movie_id, payload.expected_state)
+    db.commit()
+    return {"id": item.id, "verified": True, "accuracy": accuracy}
+
+
+@router.post("/ott-intelligence/movies/{movie_id}/refresh", dependencies=[Depends(require_same_origin)])
+def refresh_ott_intelligence(movie_id: int, db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    if not db.get(Movie, movie_id):
+        raise HTTPException(404, "Movie not found")
+    from app.workers.celery_app import celery_app
+
+    task = celery_app.send_task("operations.ott_intelligence_movie", args=[movie_id])
+    _audit(db, "ott_intelligence_refresh_queued", "movie", movie_id)
+    db.commit()
+    return {"queued": True, "task_id": task.id, "movie_id": movie_id}
+
+
+@router.post("/ott-intelligence/{period}/run", dependencies=[Depends(require_same_origin)])
+def run_ott_intelligence(period: str, db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    if period not in {"daily", "weekly"}:
+        raise HTTPException(422, "Period must be daily or weekly")
+    from app.workers.celery_app import celery_app
+
+    task = celery_app.send_task(f"operations.ott_intelligence_{period}")
+    _audit(db, "ott_intelligence_run_queued", "job", period)
+    db.commit()
+    return {"queued": True, "task_id": task.id, "period": period}
 
 
 @router.get("/ott-releases")

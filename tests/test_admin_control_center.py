@@ -69,8 +69,17 @@ def test_admin_control_center_endpoints_and_request_detail(database, monkeypatch
         assert client.get("/api/v1/admin/movies?search=101").json()["items"][0]["tmdb_id"] == 101
         assert client.get("/api/v1/admin/ott-overview").status_code == 200
         assert client.get("/api/v1/admin/ott-releases").status_code == 200
+        command = client.get("/api/v1/admin/ott-command-center")
+        assert command.status_code == 200
+        assert {"summary", "providers", "source_agreement", "by_language", "gold_set"} <= set(command.json())
+        assert command.json()["gold_set"]["gate_passed"] is False
+        generated = client.post("/api/v1/admin/ott-gold-set/generate")
+        assert generated.status_code == 200
+        gold = client.get("/api/v1/admin/ott-gold-set?verified=false")
+        assert gold.status_code == 200
+        assert gold.json()["accuracy"]["gate_passed"] is False
         sources = client.get("/api/v1/admin/sources").json()
-        assert {item["source"] for item in sources["items"]} >= {"tmdb", "ottplay", "justwatch", "tavily", "smtp", "youtube"}
+        assert {item["source"] for item in sources["items"]} >= {"tmdb", "ottplay", "justwatch", "streaming_availability", "watchmode", "tavily", "smtp", "youtube"}
         assert "api_key" not in str(sources).lower()
         health = client.get("/api/v1/admin/data-health").json()
         assert {"movies", "credits", "images", "ott", "trailers", "ratings", "requests", "comments", "jobs"} <= set(health["summary"])
