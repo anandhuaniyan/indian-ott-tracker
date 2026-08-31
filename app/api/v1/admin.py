@@ -2311,6 +2311,7 @@ def ott_command_center(db: Session = Depends(get_db), _: None = Depends(require_
             "budget": budget.snapshot(name),
         })
     gold_state = db.query(OperationState).filter_by(name="ott.gold_set_accuracy").first()
+    web_state = db.query(OperationState).filter_by(name="ott.web_research_one_shot").first()
     gold = gold_state.details if gold_state and gold_state.details else {
         "total": db.query(OttGoldSetCase).count(), "verified": db.query(OttGoldSetCase).filter(OttGoldSetCase.manually_verified_at.is_not(None)).count(), "target": settings.OTT_GOLD_SET_SIZE_PER_LANGUAGE * 5, "gate_passed": False, "automatic_publication_enabled": settings.OTT_INTELLIGENCE_AUTO_PUBLICATION_ENABLED,
     }
@@ -2336,6 +2337,12 @@ def ott_command_center(db: Session = Depends(get_db), _: None = Depends(require_
         "by_language": by_language,
         "providers": providers,
         "gold_set": gold,
+        "web_research": {
+            "status": web_state.status if web_state else "NOT_RESEARCHED",
+            "last_researched_at": web_state.last_success_at if web_state else None,
+            "last_error": web_state.last_error if web_state else None,
+            **(web_state.details if web_state and web_state.details else {}),
+        },
         "country": "IN",
         "as_of": datetime.now(timezone.utc),
     }
