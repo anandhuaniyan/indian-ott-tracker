@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { API, imageUrl } from "../services/api";
 
 const call = (path, options) =>
@@ -40,12 +40,15 @@ const Nav = () => (
   <nav className="admin-nav">
     <Link to="/admin">Dashboard</Link>
     <Link to="/admin/requests">Requests</Link>
+    <Link to="/admin/movies">Movies</Link>
     <Link to="/admin/comments">Comments</Link>
     <Link to="/admin/data-health">Data health</Link>
     <Link to="/admin/images">Images</Link>
     <Link to="/admin/ott-research">OTT research</Link>
     <Link to="/admin/jobs">Jobs</Link>
     <Link to="/admin/notifications">Notifications</Link>
+    <Link to="/admin/sources">Sources</Link>
+    <Link to="/admin/system-health">System health</Link>
   </nav>
 );
 const Page = ({ title, children }) => (
@@ -84,6 +87,30 @@ const duration = (seconds) => {
   const minutes = Math.floor((value % 3600) / 60);
   return `${hours}h ${minutes}m`;
 };
+const when = (value) => value ? new Date(value).toLocaleString() : "Never";
+const Status = ({ children }) => {
+  const value = String(children || "UNKNOWN");
+  const tone = /FAILED|DOWN|CONFLICT|OVERDUE|REJECTED/.test(value)
+    ? "danger"
+    : /PENDING|POSSIBLE|ATTENTION|URGENT|REVIEW|DEGRADED|QUEUED|RUNNING/.test(value)
+      ? "warning"
+      : /HEALTHY|SENT|ADDED|APPROVED|CONFIRMED|COMPLETE|MATCHED/.test(value)
+        ? "success"
+        : "neutral";
+  return <strong className={`admin-status admin-status-${tone}`}>{value.replaceAll("_", " ")}</strong>;
+};
+const sourceStatus = (source) => {
+  if (!source.enabled)
+    return ["ottplay", "justwatch"].includes(source.source) ? "DISABLED" : "NOT_CONFIGURED";
+  return source.status || (source.healthy ? "HEALTHY" : "DEGRADED");
+};
+const Pager = ({ data, onPage }) => data?.pages > 1 ? (
+  <nav className="pager" aria-label="Pagination">
+    <button disabled={data.page <= 1} onClick={() => onPage(data.page - 1)}>Previous</button>
+    <span>Page {data.page} of {data.pages} · {data.total} records</span>
+    <button disabled={data.page >= data.pages} onClick={() => onPage(data.page + 1)}>Next</button>
+  </nav>
+) : null;
 
 export function Login() {
   const navigate = useNavigate(),
@@ -135,21 +162,62 @@ export function Dashboard() {
       <button onClick={logout}>Log out</button>
       <div className="metrics">
         {[
-          ["Total movies", data.total_movies],
-          ["Movies with issues", data.movies_with_issues],
-          ["Open issues", data.open_issues],
-          ["Image issues", data.image_issues],
-          ["Missing OTT", data.missing_ott],
-          ["Conflicting OTT", data.conflicting_ott],
-          ["OTT queue", data.ott_queue],
-          ["Failed research", data.failed_research],
-          ["Pending requests", data.pending_requests],
-          ["Pending comments", data.pending_comments],
-        ].map(([label, value]) => (
-          <article key={label}>
+          ["Total movies", data.total_movies, "/admin/movies"],
+          ["Movies added today", data.movies_added_today, "/admin/movies?sort=newest"],
+          ["Movies added this week", data.movies_added_this_week, "/admin/movies?sort=newest"],
+          ["Requests pending", data.pending_requests, "/admin/requests?status=PENDING"],
+          ["Requests reviewing", data.reviewing_requests, "/admin/requests?status=REVIEWING"],
+          ["Requests added", data.added_requests, "/admin/requests?status=ADDED"],
+          ["Comments pending", data.pending_comments, "/admin/comments?status=PENDING"],
+          ["OTT releases confirmed", data.ott_confirmed, "/admin/ott-research"],
+          ["Upcoming OTT releases", data.upcoming_ott, "/admin/ott-research?release=UPCOMING"],
+          ["OTT missing", data.missing_ott, "/admin/movies?ott=missing"],
+          ["OTT needs review", data.ott_needs_review, "/admin/ott-research?status=NEEDS_REVIEW"],
+          ["Movies missing images", data.movies_missing_images, "/admin/movies?poster=missing"],
+          ["Movies missing IMDb rating", data.movies_missing_imdb_rating, "/admin/movies?imdb=missing"],
+          ["Movies missing trailer", data.movies_missing_trailer, "/admin/movies?trailer=missing"],
+          ["Failed jobs", data.failed_jobs, "/admin/jobs?status=FAILED"],
+        ].map(([label, value, href]) => (
+          <Link className="metric-link" to={href} key={label}>
             <strong>{value}</strong>
             <span>{label}</span>
+          </Link>
+        ))}
+      </div>
+      <section className="admin-panel">
+        <h2>Actionable alerts</h2>
+        <div className="admin-alerts">
+          {(data.alerts || []).map((item) => (
+            <Link className={`admin-alert admin-alert-${item.severity}`} to={item.href} key={item.href}>{item.label}</Link>
+          ))}
+          {!data.alerts?.length && <p className="empty">No current alerts.</p>}
+        </div>
+      </section>
+      <section className="admin-panel">
+        <h2>Quick actions</h2>
+        <div className="admin-quick-actions">
+          <Link className="button-link" to="/admin/requests?status=PENDING">Review pending requests</Link>
+          <Link className="button-link" to="/admin/ott-research?status=CONFLICTING">Review OTT conflicts</Link>
+          <Link className="button-link" to="/admin/comments?status=PENDING">Moderate comments</Link>
+          <Link className="button-link" to="/admin/requests?email_status=FAILED">Retry failed emails</Link>
+          <Link className="button-link" to="/admin/movies?trailer=missing">View missing trailers</Link>
+          <Link className="button-link" to="/admin/sources">Run source sync</Link>
+        </div>
+      </section>
+      <h2>Source health</h2>
+      <div className="admin-source-grid">
+        {(data.sources || []).map((source) => (
+          <article key={source.source}>
+            <header><h3>{source.label}</h3><Status>{sourceStatus(source)}</Status></header>
+            <small>Last success: {when(source.last_success)}</small>
+            {source.last_error && <p className="admin-safe-error">{source.last_error}</p>}
           </article>
+        ))}
+      </div>
+      <h2>Recent activity</h2>
+      <div className="admin-activity">
+        {(data.recent_activity || []).map((item) => (
+          <article key={item.id}><time>{when(item.timestamp)}</time><strong>{item.event}</strong><span>{item.target}</span><small>{item.status || ""}</small></article>
         ))}
       </div>
       <h2>Job health</h2>
@@ -167,8 +235,8 @@ export function Dashboard() {
             <td>
               {job.cursor} / {job.processed_count}
             </td>
-            <td>{job.last_success || "Never"}</td>
-            <td>{job.last_failure || "—"}</td>
+            <td>{when(job.last_success)}</td>
+            <td>{job.last_failure ? when(job.last_failure) : "—"}</td>
             <td>{job.last_error || "—"}</td>
           </tr>
         ))}
@@ -184,9 +252,16 @@ export function Dashboard() {
 }
 
 export function Requests() {
-  const [status, setStatus] = useState(""),
-    [search, setSearch] = useState(""),
-    [query, setQuery] = useState("");
+  const location = useLocation();
+  const initial = new URLSearchParams(location.search);
+  const [status, setStatus] = useState(initial.get("status") || ""),
+    [search, setSearch] = useState(initial.get("search") || ""),
+    [emailStatus, setEmailStatus] = useState(initial.get("email_status") || ""),
+    [local, setLocal] = useState(initial.get("local") || ""),
+    [age, setAge] = useState(initial.get("age") || ""),
+    [sort, setSort] = useState(initial.get("sort") || "newest"),
+    [page, setPage] = useState(Number(initial.get("page")) || 1),
+    [query, setQuery] = useState(initial.toString());
   const [reasons, setReasons] = useState({});
   const [actionError, setActionError] = useState();
   const [data, error, reload] = useAdmin(`/api/v1/admin/requests?${query}`, 15000);
@@ -202,6 +277,13 @@ export function Requests() {
     `/api/v1/admin/requests/${id}/emails/${kind}/retry`,
     { method: "POST" },
   );
+  const applyFilters = (overrides = {}) => {
+    const params = new URLSearchParams();
+    const values = { search, status, email_status: emailStatus, local, age, sort, page: overrides.page || 1, ...overrides };
+    Object.entries(values).forEach(([key, value]) => value && params.set(key, value));
+    setPage(Number(values.page) || 1);
+    setQuery(params.toString());
+  };
   if (error) return <Guard error={error} />;
   return (
     <Page title="Movie requests">
@@ -209,12 +291,7 @@ export function Requests() {
         className="toolbar"
         onSubmit={(event) => {
           event.preventDefault();
-          setQuery(
-            new URLSearchParams({
-              ...(search && { search }),
-              ...(status && { status }),
-            }).toString(),
-          );
+          applyFilters();
         }}
       >
         <input
@@ -233,10 +310,39 @@ export function Requests() {
             ),
           )}
         </select>
+        <select value={emailStatus} onChange={(event) => setEmailStatus(event.target.value)} aria-label="Email status">
+          <option value="">All email states</option>
+          <option value="FAILED">Email failed</option>
+          <option value="PENDING">Email pending</option>
+          <option value="NOT_CONFIGURED">Email not configured</option>
+          <option value="SENT">Email sent</option>
+        </select>
+        <select value={local} onChange={(event) => setLocal(event.target.value)} aria-label="Local movie status">
+          <option value="">Any local status</option>
+          <option value="exists">Movie exists locally</option>
+          <option value="missing">Movie missing locally</option>
+        </select>
+        <select value={age} onChange={(event) => setAge(event.target.value)} aria-label="Request age">
+          <option value="">Any age</option>
+          <option value="24">Older than 24 hours</option>
+          <option value="36">Older than 36 hours</option>
+          <option value="48">Older than 48 hours</option>
+        </select>
+        <select value={sort} onChange={(event) => setSort(event.target.value)} aria-label="Sort requests">
+          <option value="newest">Newest</option><option value="oldest">Oldest</option>
+          <option value="highest_age">Highest age</option><option value="recently_updated">Recently updated</option>
+        </select>
         <button>Filter</button>
         <button type="button" onClick={reload}>Refresh</button>
       </form>
       {actionError && <p className="admin-error" role="alert">{actionError}</p>}
+      {data?.counters && (
+        <div className="admin-counter-tabs" aria-label="Request status counters">
+          {Object.entries(data.counters).map(([key, value]) => (
+            <button className={status === (key === "ALL" ? "" : key) ? "active" : ""} key={key} onClick={() => { const next = key === "ALL" ? "" : key; setStatus(next); applyFilters({ status: next, page: 1 }); }}>{key.replaceAll("_", " ")} <strong>{value}</strong></button>
+          ))}
+        </div>
+      )}
       {!data ? (
         <p>Loading…</p>
       ) : (
@@ -250,7 +356,8 @@ export function Requests() {
                     <h2>{item.verified_title}</h2>
                     {item.original_title && item.original_title !== item.verified_title && <p>{item.original_title}</p>}
                   </div>
-                  <strong className="request-status">{item.status}</strong>
+                  <Status>{item.status}</Status>
+                  <Status>{item.sla || "NORMAL"}</Status>
                   {item.movie_existed_at_submission && <span className="local-info">Movie exists locally</span>}
                 </div>
                 <dl className="admin-request-facts">
@@ -263,6 +370,7 @@ export function Requests() {
                   <div><dt>Requester</dt><dd>{item.email}</dd></div>
                   <div><dt>Reference</dt><dd>{item.request_id}</dd></div>
                   <div><dt>Created</dt><dd>{new Date(item.created_at).toLocaleString()}</dd></div>
+                  <div><dt>Last updated</dt><dd>{when(item.updated_at)}</dd></div>
                   <div><dt>Age</dt><dd>{duration(item.age_seconds)}</dd></div>
                   <div><dt>48-hour target</dt><dd>{duration(item.target_seconds)} {item.target_seconds < 0 ? "overdue" : "remaining"}</dd></div>
                 </dl>
@@ -280,6 +388,7 @@ export function Requests() {
                   ))}
                 </div>
                 <div className="admin-request-actions">
+                  <Link className="button-link" to={`/admin/requests/${item.request_id}`}>Open details</Link>
                   {item.status === "PENDING" && <button onClick={() => update(item.request_id, "REVIEWING")}>Review</button>}
                   {["PENDING", "REVIEWING"].includes(item.status) && <button onClick={() => update(item.request_id, "FOUND")}>Mark Found</button>}
                   {["PENDING", "REVIEWING", "FOUND"].includes(item.status) && item.movie_external_id && !item.local_movie_id && (
@@ -298,16 +407,119 @@ export function Requests() {
             </article>
           ))}
           {!data.items.length && <p className="empty">No movie requests match these filters.</p>}
+          <Pager data={data} onPage={(next) => applyFilters({ page: next })} />
         </div>
       )}
     </Page>
   );
 }
 
+export function RequestDetail() {
+  const { requestId } = useParams();
+  const [data, error, reload] = useAdmin(`/api/v1/admin/requests/${encodeURIComponent(requestId)}`, 15000);
+  const [actionError, setActionError] = useState("");
+  const act = (path, options) => {
+    setActionError("");
+    return call(path, options).then(reload).catch((reason) => setActionError(reason.message));
+  };
+  const update = (status) => act(`/api/v1/admin/requests/${requestId}`, json("PATCH", { status }));
+  if (error) return <Guard error={error} />;
+  if (!data) return <Page title="Request detail"><p>Loading…</p></Page>;
+  const localId = data.local?.id || data.local_movie_id;
+  return (
+    <Page title={`Request ${data.request_id}`}>
+      <Link to="/admin/requests">← Back to requests</Link>
+      {actionError && <p className="admin-error" role="alert">{actionError}</p>}
+      <section className="admin-detail-hero">
+        <img src={imageUrl(data.poster_path)} alt={`${data.verified_title} poster`} />
+        <div>
+          <div className="admin-request-heading"><h2>{data.verified_title}</h2><Status>{data.status}</Status><Status>{data.sla}</Status></div>
+          {data.original_title && data.original_title !== data.verified_title && <p>{data.original_title}</p>}
+          <dl className="admin-request-facts">
+            <div><dt>Requested</dt><dd>{when(data.created_at)}</dd></div>
+            <div><dt>Age</dt><dd>{duration(data.age_seconds)}</dd></div>
+            <div><dt>Last updated</dt><dd>{when(data.updated_at)}</dd></div>
+            <div><dt>Requester</dt><dd><a href={`mailto:${data.email}`}>{data.email}</a></dd></div>
+          </dl>
+        </div>
+      </section>
+      <section className="admin-panel">
+        <h2>Verified movie</h2>
+        <dl className="admin-request-facts">
+          <div><dt>External / TMDB ID</dt><dd>{data.movie_external_id || "Unknown"}</dd></div>
+          <div><dt>IMDb ID</dt><dd>{data.imdb_id || "Unknown"}</dd></div>
+          <div><dt>Original language</dt><dd>{data.language_name || data.language || "Unknown"}</dd></div>
+          <div><dt>Release date</dt><dd>{data.release_date || data.release_year || "Unknown"}</dd></div>
+          <div><dt>Runtime</dt><dd>{data.local?.runtime ? `${data.local.runtime} minutes` : "Unknown"}</dd></div>
+          <div><dt>Genres</dt><dd>{data.genres?.join(", ") || "Unknown"}</dd></div>
+          <div><dt>Director</dt><dd>{data.local?.directors?.join(", ") || data.director || "Unknown"}</dd></div>
+          <div><dt>Main cast</dt><dd>{data.local?.cast?.join(", ") || "Unknown"}</dd></div>
+        </dl>
+        {data.overview && <p>{data.overview}</p>}
+      </section>
+      <section className="admin-panel">
+        <h2>Local database</h2>
+        <dl className="admin-request-facts">
+          <div><dt>Movie exists locally</dt><dd><Status>{data.local?.exists ? "YES" : "NO"}</Status></dd></div>
+          <div><dt>Local movie ID</dt><dd>{localId || "Not associated"}</dd></div>
+          <div><dt>Metadata status</dt><dd><Status>{data.local?.metadata_status || "NOT_LOCAL"}</Status></dd></div>
+          <div><dt>IMDb rating</dt><dd>{data.imdb_rating ?? "Missing"}</dd></div>
+          <div><dt>Added</dt><dd>{when(data.local?.added_at)}</dd></div>
+        </dl>
+      </section>
+      <section className="admin-panel">
+        <h2>OTT research</h2>
+        <dl className="admin-request-facts">
+          <div><dt>Platform</dt><dd>{data.ott?.platform || "Unknown"}</dd></div>
+          <div><dt>OTT release date</dt><dd>{data.ott?.release_date || "Unknown"}</dd></div>
+          <div><dt>Confidence</dt><dd>{data.ott?.confidence || 0}%</dd></div>
+          <div><dt>Research status</dt><dd><Status>{data.ott?.status || "UNKNOWN"}</Status></dd></div>
+          <div><dt>Verification</dt><dd><Status>{data.ott?.verification_status || "UNKNOWN"}</Status></dd></div>
+          <div><dt>Last check</dt><dd>{when(data.ott?.last_check)}</dd></div>
+        </dl>
+        <div className="admin-evidence-list">
+          {(data.ott?.sources || []).map((source) => <article key={source.id}><strong>{source.name}</strong><p>{source.platform || "No platform"} · {source.date || "No date"} · {source.confidence}%</p>{source.url && <a href={source.url} rel="noreferrer">Open source</a>}</article>)}
+          {!data.ott?.sources?.length && <p className="empty">No inspected OTT evidence yet.</p>}
+        </div>
+      </section>
+      <section className="admin-panel">
+        <h2>Trailer</h2>
+        <p><Status>{data.trailer?.available ? "AVAILABLE" : "MISSING"}</Status> {data.trailer?.name || ""}</p>
+        {data.trailer?.video_key && <a href={`https://www.youtube.com/watch?v=${encodeURIComponent(data.trailer.video_key)}`} rel="noreferrer">Open YouTube</a>}
+      </section>
+      <section className="admin-panel">
+        <h2>Data completeness</h2>
+        <div className="admin-checklist">{Object.entries(data.data_completeness || {}).map(([label, complete]) => <span key={label} className={complete ? "complete" : "missing"}>{complete ? "✓" : "✕"} {label.replaceAll("_", " ")}</span>)}</div>
+      </section>
+      <section className="admin-panel">
+        <h2>Request details</h2><p className="pre-wrap">{data.details || "No additional details supplied."}</p>
+        <h3>Email status</h3>
+        <div className="email-states">{Object.entries(data.emails || {}).map(([kind, delivery]) => {
+          const retryAllowed = kind === "confirmation" || kind === "admin_notification" || (kind === "completion" && data.status === "ADDED") || (kind === "rejection" && data.status === "REJECTED");
+          return <div key={kind}><strong>{kind.replaceAll("_", " ")}</strong><Status>{delivery.status}</Status><small>{delivery.sent_at ? when(delivery.sent_at) : delivery.last_error || "Not sent"}</small>{delivery.status !== "SENT" && retryAllowed && <button onClick={() => act(`/api/v1/admin/requests/${requestId}/emails/${kind}/retry`, { method: "POST" })}>Retry email</button>}</div>;
+        })}</div>
+      </section>
+      <section className="admin-panel">
+        <h2>Admin actions</h2>
+        <div className="admin-request-actions">
+          {data.status === "PENDING" && <button onClick={() => update("REVIEWING")}>Start review</button>}
+          {["PENDING", "REVIEWING"].includes(data.status) && <button onClick={() => update("FOUND")}>Mark found</button>}
+          {!localId && data.movie_external_id && <button onClick={() => act(`/api/v1/admin/deep-search/movies/${data.movie_external_id}/import`, { method: "POST" })}>Add / Import movie</button>}
+          {localId && <><Link className="button-link" to={`/movies/${localId}`}>Open local movie</Link><button onClick={() => act(`/api/v1/admin/movies/${localId}/repair`, { method: "POST" })}>Refresh metadata / images / trailer / IMDb</button><button onClick={() => act(`/api/v1/admin/movies/${localId}/research-ott`, { method: "POST" })}>Research OTT now</button></>}
+          {localId && data.status !== "ADDED" && <button onClick={() => update("ADDED")}>Mark added</button>}
+          {!(["ADDED", "REJECTED"].includes(data.status)) && <button onClick={() => update("REJECTED")}>Reject</button>}
+        </div>
+      </section>
+    </Page>
+  );
+}
+
 export function Comments() {
-  const [status, setStatus] = useState("");
+  const initial = new URLSearchParams(useLocation().search);
+  const [status, setStatus] = useState(initial.get("status") || ""),
+    [today, setToday] = useState(initial.get("today") === "true");
   const [actionError, setActionError] = useState();
-  const [data, error, reload] = useAdmin(`/api/v1/admin/comments${status ? `?status=${status}` : ""}`, 15000);
+  const [data, error, reload] = useAdmin(`/api/v1/admin/comments?${new URLSearchParams({ ...(status && { status }), ...(today && { today: "true" }) })}`, 15000);
   const action = (id, options) => {
     setActionError(undefined);
     call(`/api/v1/admin/comments/${id}`, options).then(reload).catch((reason) => setActionError(reason.message));
@@ -317,6 +529,7 @@ export function Comments() {
     <Page title="Comments">
       <div className="toolbar">
         <label>Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="">All statuses</option>{["PENDING", "APPROVED", "HIDDEN", "REJECTED"].map((item) => <option key={item}>{item}</option>)}</select></label>
+        <label><input type="checkbox" checked={today} onChange={(event) => setToday(event.target.checked)} /> Submitted today</label>
         <button type="button" onClick={reload}>Refresh</button>
       </div>
       {actionError && <p className="admin-error" role="alert">{actionError}</p>}
@@ -324,7 +537,7 @@ export function Comments() {
         <div className="admin-comment-list">
           {data.items.map((item) => (
             <article className="admin-comment-card" key={item.id}>
-              <header><div><h2>{item.display_name}</h2><Link to={`/movies/${item.movie_id}`}>{item.movie_title}</Link></div><strong className="request-status">{item.status}</strong></header>
+              <header><div className="admin-comment-subject"><img src={imageUrl(item.poster_path)} alt="" loading="lazy" /><div><h2>{item.display_name}</h2><Link to={`/movies/${item.movie_id}`}>{item.movie_title}</Link></div></div><Status>{item.status}</Status></header>
               <p>{item.comment}</p>
               <dl className="admin-request-facts">
                 <div><dt>Date</dt><dd>{new Date(item.created_at).toLocaleString()}</dd></div>
@@ -351,6 +564,17 @@ export function DataHealth() {
     `/api/v1/admin/data-health?status=${status}&issue_type=${encodeURIComponent(type)}`,
   );
   if (error) return <Guard error={error} />;
+  const healthHref = (category, label) => {
+    if (category === "trailers" && label === "missing") return "/admin/movies?trailer=missing";
+    if (category === "ratings" && label === "imdb_missing") return "/admin/movies?imdb=missing";
+    if (category === "identifiers" && label === "missing_imdb") return "/admin/movies?imdb=missing";
+    if (category === "images" && label === "missing_poster") return "/admin/movies?poster=missing";
+    if (category === "ott") return label === "needs_review" ? "/admin/ott-research?status=NEEDS_REVIEW" : "/admin/ott-research";
+    if (category === "requests") return `/admin/requests?${label === "overdue" ? "age=48" : `status=${label.toUpperCase()}`}`;
+    if (category === "comments") return "/admin/comments?status=PENDING";
+    if (category === "jobs") return `/admin/jobs?status=${label.toUpperCase()}`;
+    return `/admin/data-health?issue_type=${encodeURIComponent(label)}`;
+  };
   return (
     <Page title="Data health">
       <div className="toolbar">
@@ -372,6 +596,12 @@ export function DataHealth() {
         <p>Loading…</p>
       ) : (
         <>
+          <h2>Complete operational coverage</h2>
+          <div className="admin-health-groups">
+            {Object.entries(data.summary || {}).map(([category, values]) => (
+              <section key={category}><h3>{category.replaceAll("_", " ")}</h3><div className="metrics">{Object.entries(values).map(([label, value]) => <Link className="metric-link" to={healthHref(category, label)} key={label}><strong>{value}</strong><span>{label.replaceAll("_", " ")}</span></Link>)}</div></section>
+            ))}
+          </div>
           <h2>IMDb coverage</h2>
           <div className="metrics">
             {Object.entries(data.imdb || {}).map(([label, value]) => (
@@ -484,10 +714,13 @@ export function Images() {
 }
 
 export function OttResearch() {
-  const [status, setStatus] = useState(""),
+  const initial = new URLSearchParams(useLocation().search);
+  const [status, setStatus] = useState(initial.get("status") || ""),
     [data, error, reload] = useAdmin(
       `/api/v1/admin/ott-research?status=${status}`,
     );
+  const [overview] = useAdmin("/api/v1/admin/ott-overview");
+  const [releases] = useAdmin(`/api/v1/admin/ott-releases?${initial.get("release") ? `status=${initial.get("release")}` : "page_size=20"}`);
   const [detail, setDetail] = useState(null);
   const [actionError, setActionError] = useState("");
   const [manual, setManual] = useState({
@@ -529,6 +762,7 @@ export function OttResearch() {
   if (error) return <Guard error={error} />;
   return (
     <Page title="OTT research">
+      <div className="admin-subnav"><Link to="/admin/ott-research">Research queue</Link><Link to="/admin/sources">Source health</Link><Link to="/admin/sources?source=ottplay&view=unmatched">OTTplay unmatched</Link></div>
       <select
         value={status}
         onChange={(event) => setStatus(event.target.value)}
@@ -573,6 +807,8 @@ export function OttResearch() {
               <span>Needs review</span>
             </article>
           </div>
+          {overview?.by_language && <><h2>OTT coverage by language</h2><div className="admin-language-coverage">{overview.by_language.map((item) => <article key={item.code}><h3>{item.language}</h3><dl><div><dt>Movies</dt><dd>{item.movies}</dd></div><div><dt>Platform known</dt><dd>{item.platform_known}</dd></div><div><dt>Confirmed date</dt><dd>{item.confirmed_date}</dd></div><div><dt>Missing</dt><dd>{item.missing}</dd></div></dl></article>)}</div></>}
+          {releases?.items?.some((item) => Object.hasOwn(item, "source_count")) && <><h2>OTT release records</h2><div className="admin-release-grid">{releases.items.map((item) => <article key={item.id}><img src={imageUrl(item.poster)} alt="" loading="lazy" /><div><Link to={`/movies/${item.movie_id}`}><strong>{item.movie}</strong></Link><p>{item.language || "Unknown language"} · {item.platform}</p><p>{item.ott_release_date || "Date unknown"}</p><Status>{item.status}</Status><button onClick={() => inspect(item.movie_id)}>Evidence ({item.source_count})</button></div></article>)}</div></>}
           <Table
             headers={[
               "Movie / theatrical release",
@@ -683,7 +919,77 @@ export function OttResearch() {
   );
 }
 
+export function Movies() {
+  const initial = new URLSearchParams(useLocation().search);
+  const [search, setSearch] = useState(initial.get("search") || ""),
+    [language, setLanguage] = useState(initial.get("language") || ""),
+    [year, setYear] = useState(initial.get("year") || ""),
+    [platform, setPlatform] = useState(initial.get("platform") || ""),
+    [ott, setOtt] = useState(initial.get("ott") || ""),
+    [trailer, setTrailer] = useState(initial.get("trailer") || ""),
+    [imdb, setImdb] = useState(initial.get("imdb") || ""),
+    [poster, setPoster] = useState(initial.get("poster") || ""),
+    [metadata, setMetadata] = useState(initial.get("metadata") || ""),
+    [sort, setSort] = useState(initial.get("sort") || "updated"),
+    [query, setQuery] = useState(initial.toString()),
+    [message, setMessage] = useState("");
+  const [data, error, reload] = useAdmin(`/api/v1/admin/movies?${query}`);
+  const apply = (page = 1) => {
+    const params = new URLSearchParams();
+    Object.entries({ search, language, year, platform, ott, trailer, imdb, poster, metadata, sort, page }).forEach(([key, value]) => value && params.set(key, value));
+    setQuery(params.toString());
+  };
+  const repair = (id, label = "Repair") => call(`/api/v1/admin/movies/${id}/repair`, { method: "POST" }).then(() => setMessage(`${label} queued for movie ${id}`)).catch((reason) => setMessage(reason.message));
+  const research = (id) => call(`/api/v1/admin/movies/${id}/research-ott`, { method: "POST" }).then(() => setMessage(`OTT research queued for movie ${id}`)).catch((reason) => setMessage(reason.message));
+  if (error) return <Guard error={error} />;
+  return <Page title="Movies">
+    <form className="admin-filter-grid" onSubmit={(event) => { event.preventDefault(); apply(); }}>
+      <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Title, local ID, TMDB ID or IMDb ID" />
+      <select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="">All languages</option><option value="ml">Malayalam</option><option value="ta">Tamil</option><option value="te">Telugu</option><option value="hi">Hindi</option><option value="kn">Kannada</option></select>
+      <input type="number" min="1888" max="2100" value={year} onChange={(event) => setYear(event.target.value)} placeholder="Year" />
+      <input value={platform} onChange={(event) => setPlatform(event.target.value)} placeholder="OTT platform" />
+      <select value={ott} onChange={(event) => setOtt(event.target.value)}><option value="">Any OTT state</option><option value="confirmed">OTT confirmed</option><option value="missing">OTT missing</option><option value="needs_review">OTT needs review</option></select>
+      <select value={trailer} onChange={(event) => setTrailer(event.target.value)}><option value="">Any trailer state</option><option value="missing">Trailer missing</option></select>
+      <select value={imdb} onChange={(event) => setImdb(event.target.value)}><option value="">Any IMDb state</option><option value="missing">IMDb missing</option></select>
+      <select value={poster} onChange={(event) => setPoster(event.target.value)}><option value="">Any poster state</option><option value="missing">Poster missing</option></select>
+      <select value={metadata} onChange={(event) => setMetadata(event.target.value)}><option value="">Any metadata state</option><option value="incomplete">Metadata incomplete</option></select>
+      <select value={sort} onChange={(event) => setSort(event.target.value)}><option value="updated">Recently updated</option><option value="newest">Recently added</option><option value="oldest">Oldest added</option><option value="title">Title</option><option value="year">Release year</option></select>
+      <button>Apply filters</button><button type="button" onClick={reload}>Refresh</button>
+    </form>
+    {message && <p role="status">{message}</p>}
+    {!data ? <p>Loading…</p> : <><p>{data.total} movies</p><div className="admin-movie-grid">{data.items.map((movie) => <article key={movie.id}><img src={imageUrl(movie.poster_path)} alt={`${movie.title} poster`} loading="lazy" /><div><header><div><h2>{movie.title}</h2>{movie.original_title && movie.original_title !== movie.title && <small>{movie.original_title}</small>}</div><Status>{movie.metadata_health}</Status></header><dl className="admin-request-facts"><div><dt>Year / language</dt><dd>{movie.year || "Unknown"} · {movie.language || "Unknown"}</dd></div><div><dt>TMDB / IMDb</dt><dd>{movie.tmdb_id} · {movie.imdb_id || "Missing"}</dd></div><div><dt>IMDb rating</dt><dd>{movie.imdb_rating ?? "Missing"}</dd></div><div><dt>Theatrical</dt><dd>{movie.theatrical_date || "Unknown"}</dd></div><div><dt>OTT</dt><dd>{movie.ott_platform || "Missing"} · {movie.ott_release_date || "Date unknown"}</dd></div><div><dt>Trailer</dt><dd>{movie.trailer ? "Available" : "Missing"}</dd></div><div><dt>Image health</dt><dd>{movie.image_health}</dd></div><div><dt>Updated</dt><dd>{when(movie.updated_at)}</dd></div></dl>{movie.metadata_missing?.length > 0 && <p className="admin-safe-error">Missing: {movie.metadata_missing.join(", ")}</p>}<div className="admin-request-actions"><Link className="button-link" to={`/movies/${movie.id}`}>Open movie</Link><button onClick={() => repair(movie.id, "Metadata refresh")}>Refresh metadata</button><button onClick={() => research(movie.id)}>Research OTT</button><button onClick={() => repair(movie.id, "Trailer search")}>Find trailer</button><button onClick={() => repair(movie.id, "Image refresh")}>Refresh images</button><button onClick={() => repair(movie.id, "IMDb refresh")}>Refresh IMDb</button>{movie.trailer_key && <a className="button-link" href={`https://www.youtube.com/watch?v=${encodeURIComponent(movie.trailer_key)}`} rel="noreferrer">YouTube</a>}</div></div></article>)}</div><Pager data={data} onPage={apply} /></>}
+  </Page>;
+}
+
+export function Sources() {
+  const initial = new URLSearchParams(useLocation().search);
+  const [selected, setSelected] = useState(initial.get("source") || "ottplay");
+  const [data, error, reload] = useAdmin("/api/v1/admin/sources", 15000);
+  const [releases, releaseError, reloadReleases] = useAdmin(`/api/v1/admin/sources/${selected}/releases?status=UNMATCHED`, 15000);
+  const [message, setMessage] = useState("");
+  const run = (source) => call(`/api/v1/admin/sources/${source}/run`, { method: "POST" }).then(() => { setMessage(`${source} sync queued`); reload(); }).catch((reason) => setMessage(reason.message));
+  const updateRelease = (id, action, movieId = null) => call(`/api/v1/admin/sources/releases/${id}`, json("PATCH", { action, movie_id: movieId })).then(() => { setMessage(`Release marked ${action}`); reloadReleases(); reload(); }).catch((reason) => setMessage(reason.message));
+  const emailAction = (path) => call(path, { method: "POST" }).then((result) => { setMessage(result.sent ? "Email sent" : `${result.attempted || 0} failed emails attempted`); reload(); }).catch((reason) => setMessage(reason.message));
+  if (error || releaseError) return <Guard error={error || releaseError} />;
+  return <Page title="Integration and source health">
+    {message && <p role="status">{message}</p>}
+    <div className="admin-source-grid">{(data?.items || []).map((source) => <article key={source.source}><header><h2>{source.label}</h2><Status>{sourceStatus(source)}</Status></header><dl><div><dt>Enabled</dt><dd>{source.enabled ? "Yes" : "No"}</dd></div>{source.integration_mode && <div><dt>Mode</dt><dd>{source.integration_mode}</dd></div>}<div><dt>Last check</dt><dd>{when(source.last_check)}</dd></div><div><dt>Last success</dt><dd>{when(source.last_success)}</dd></div><div><dt>Next run</dt><dd>{when(source.next_run)}</dd></div></dl>{source.stats && <dl>{Object.entries(source.stats).map(([label, value]) => <div key={label}><dt>{label.replaceAll("_", " ")}</dt><dd>{value}</dd></div>)}</dl>}{source.usage && <p>{source.usage.used} of {source.usage.limit} application credits used</p>}{source.last_error && <p className="admin-safe-error">{source.last_error}</p>}{["ottplay", "justwatch"].includes(source.source) && <div className="admin-request-actions"><button disabled={!source.configured || ["RUNNING", "QUEUED"].includes(source.status)} onClick={() => run(source.source)}>Run sync</button><button onClick={() => setSelected(source.source)}>View unmatched</button></div>}</article>)}</div>
+    <section className="admin-panel"><h2>Email health</h2>{data?.email && <><div className="metrics">{Object.entries(data.email).filter(([, value]) => typeof value === "number").map(([label, value]) => <article key={label}><strong>{value}</strong><span>{label.replaceAll("_", " ")}</span></article>)}</div><p>SMTP: <Status>{data.email.smtp_configured ? "CONFIGURED" : "NOT_CONFIGURED"}</Status> · Last success: {when(data.email.last_successful_email)}</p><div className="admin-request-actions"><button onClick={() => emailAction("/api/v1/admin/email/retry-failed")}>Retry failed emails</button><button onClick={() => emailAction("/api/v1/admin/email/test")}>Send test email</button></div></>}</section>
+    <section className="admin-panel"><h2>{selected === "ottplay" ? "OTTplay" : "JustWatch"} unmatched releases</h2><div className="toolbar"><button className={selected === "ottplay" ? "active" : ""} onClick={() => setSelected("ottplay")}>OTTplay</button><button className={selected === "justwatch" ? "active" : ""} onClick={() => setSelected("justwatch")}>JustWatch</button></div>{!releases ? <p>Loading…</p> : releases.items.length ? <div className="admin-unmatched-list">{releases.items.map((item) => <article key={item.id}><header><div><h3>{item.title}</h3><p>{item.language || "Unknown language"} · {item.platform || "Unknown platform"} · {item.date || "Date unknown"}</p></div><Status>{item.status}</Status></header>{item.source_url && <a href={item.source_url} rel="noreferrer">Open source</a>}<h4>Potential local matches</h4><div className="admin-match-list">{item.potential_matches.map((movie) => <button key={movie.id} onClick={() => updateRelease(item.id, "match", movie.id)}>{movie.title} ({movie.year || "?"}, {movie.language || "?"})</button>)}{!item.potential_matches.length && <span>No likely title match.</span>}</div><div className="admin-request-actions"><button onClick={() => updateRelease(item.id, "ignore")}>Ignore</button><button onClick={() => updateRelease(item.id, "tv_series")}>Mark TV / Series</button><button onClick={() => updateRelease(item.id, "duplicate")}>Duplicate</button></div></article>)}</div> : <p className="empty">No unmatched releases from this configured adapter.</p>}</section>
+  </Page>;
+}
+
+export function SystemHealth() {
+  const [health, healthError, reload] = useAdmin("/api/v1/admin/system-health", 30000);
+  const [audit, auditError] = useAdmin("/api/v1/admin/audit");
+  const error = healthError || auditError;
+  if (error) return <Guard error={error} />;
+  return <Page title="System health"><button onClick={reload}>Refresh health</button><div className="admin-source-grid">{(health?.services || []).map((service) => <article key={service.name}><header><h2>{service.name}</h2><Status>{service.status}</Status></header><p>Last heartbeat: {when(service.last_heartbeat)}</p>{service.queue_depth != null && <p>Queue depth: {service.queue_depth}</p>}{service.last_error && <p className="admin-safe-error">{service.last_error}</p>}</article>)}</div><h2>Administrator audit trail</h2>{audit && <Table headers={["Timestamp", "Action", "Target", "Summary"]} rows={audit.items.map((item) => <tr key={item.id}><td>{when(item.timestamp)}</td><td>{item.action.replaceAll("_", " ")}</td><td>{item.target_type} {item.target_id || ""}</td><td>{item.summary || "—"}</td></tr>)} />}</Page>;
+}
+
 export function Jobs() {
+  const initial = new URLSearchParams(useLocation().search);
+  const [status, setStatus] = useState(initial.get("status") || "");
   const [jobs, jobsError, reloadJobs] = useAdmin("/api/v1/admin/jobs");
   const [backfills, backfillError, reloadBackfills] = useAdmin(
     "/api/v1/admin/backfills",
@@ -792,6 +1098,12 @@ export function Jobs() {
       {jobs && (
         <>
           <h2>All jobs</h2>
+          <div className="toolbar">
+            <select aria-label="Job status" value={status} onChange={(event) => setStatus(event.target.value)}>
+              <option value="">All statuses</option>
+              {["FAILED", "RUNNING", "QUEUED", "COMPLETED", "IDLE", "DISABLED"].map((value) => <option key={value}>{value}</option>)}
+            </select>
+          </div>
           <Table
             headers={[
               "Task",
@@ -802,7 +1114,7 @@ export function Jobs() {
               "Cursor / processed / total",
               "Progress",
             ]}
-            rows={jobs.map((item) => (
+            rows={jobs.filter((item) => !status || item.status === status).map((item) => (
               <tr key={item.task}>
                 <td>{item.task}</td>
                 <td>{item.status}</td>

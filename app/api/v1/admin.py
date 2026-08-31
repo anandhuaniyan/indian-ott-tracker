@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -26,7 +26,9 @@ from app.models.movie_metadata import (
     MovieTrailer,
     Person,
 )
+from app.models.genre import movie_genres
 from app.models.operations import (
+    AdminAuditLog,
     BackfillRecord,
     DataQualityIssue,
     MovieComment,
@@ -34,6 +36,7 @@ from app.models.operations import (
     NotificationLog,
     OperationState,
     OttEvidence,
+    OttSourceRelease,
 )
 from app.models.ott_availability import OttAvailability
 from app.services.image_fallback import ImageFallbackService
@@ -43,7 +46,9 @@ from app.services.movie_requests import (
     MovieRequestAutomationService,
     MovieRequestEmailService,
 )
+from app.services.ott_source_sync import OttSourceSyncService, SOURCES
 from app.services.operations import OttResearchService, ResearchUsageService
+from app.services.roles import ROLE_ALIASES, normalize_role
 from app.services.release_status import (
     ELIGIBILITY_LABELS,
     RELEASE_LABELS,
@@ -115,12 +120,204 @@ class CommentModeration(BaseModel):
     reason: str | None = Field(default=None, max_length=1000)
 
 
+class SourceReleaseAction(BaseModel):
+    action: str = Field(pattern="^(match|ignore|tv_series|duplicate|research)$")
+    movie_id: int | None = Field(default=None, ge=1)
+
+
 def _pagination(total: int, page: int, page_size: int):
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
         "pages": (total + page_size - 1) // page_size,
+    }
+
+
+def _audit(
+    db: Session,
+    action: str,
+    target_type: str,
+    target_id: object | None = None,
+    summary: str | None = None,
+) -> AdminAuditLog:
+    """Attach a bounded, secret-free administrator event to the transaction."""
+    item = AdminAuditLog(
+        action=action[:80],
+        target_type=target_type[:40],
+        target_id=str(target_id)[:100] if target_id is not None else None,
+        summary=(summary or "")[:1000] or None,
+    )
+    db.add(item)
+    return item
+
+
+def _email_health(db: Session) -> dict:
+    fields = {
+        "request_confirmation": MovieRequest.confirmation_email_status,
+        "admin_notification": MovieRequest.admin_notification_email_status,
+        "completion": MovieRequest.completion_email_status,
+    }
+    metrics = {}
+    for label, field in fields.items():
+        metrics[f"{label}_sent"] = db.query(MovieRequest).filter(field == "SENT").count()
+        metrics[f"{label}_failed"] = db.query(MovieRequest).filter(field == "FAILED").count()
+        metrics[f"{label}_pending"] = db.query(MovieRequest).filter(field == "PENDING").count()
+    last_values = db.query(
+        func.max(MovieRequest.confirmation_email_sent_at),
+        func.max(MovieRequest.admin_notification_email_sent_at),
+        func.max(MovieRequest.completion_email_sent_at),
+    ).one()
+    last_sent = max((value for value in last_values if value), default=None)
+    return {
+        "smtp_configured": bool(settings.SMTP_HOST and settings.SMTP_FROM),
+        "last_successful_email": last_sent,
+        "failed": sum(value for key, value in metrics.items() if key.endswith("_failed")),
+        "pending": sum(value for key, value in metrics.items() if key.endswith("_pending")),
+        **metrics,
+    }
+
+
+def _source_health(db: Session) -> list[dict]:
+    states = {item.name: item for item in db.query(OperationState).all()}
+
+    def state_snapshot(name: str):
+        state = states.get(name)
+        return {
+            "status": state.status if state else "IDLE",
+            "last_success": state.last_success_at if state else None,
+            "last_error": state.last_error if state else None,
+        }
+
+    tmdb_state = states.get("tmdb.metadata_backfill") or states.get("tmdb.incremental_sync")
+    tavily_usage = ResearchUsageService(db).monthly_snapshot()
+    email = _email_health(db)
+    sources = [
+        {
+            "source": "tmdb",
+            "label": "TMDB",
+            "enabled": bool(settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN),
+            "healthy": bool(settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN) and not (tmdb_state and tmdb_state.status == "FAILED"),
+            **state_snapshot(tmdb_state.name if tmdb_state else "tmdb.incremental_sync"),
+        },
+        {
+            "source": "tavily",
+            "label": "Tavily",
+            "enabled": bool(settings.TAVILY_API_KEY or (settings.OTT_RESEARCH_PROVIDER.lower() == "tavily" and settings.OTT_SEARCH_API_KEY)),
+            "healthy": bool(settings.TAVILY_API_KEY or (settings.OTT_RESEARCH_PROVIDER.lower() == "tavily" and settings.OTT_SEARCH_API_KEY)),
+            **state_snapshot("operations.ott_research"),
+            "usage": tavily_usage,
+        },
+        {
+            "source": "smtp",
+            "label": "SMTP",
+            "enabled": bool(settings.SMTP_HOST and settings.SMTP_FROM),
+            "healthy": bool(settings.SMTP_HOST and settings.SMTP_FROM) and email["failed"] == 0,
+            "status": "CONFIGURED" if settings.SMTP_HOST and settings.SMTP_FROM else "NOT_CONFIGURED",
+            "last_success": email["last_successful_email"],
+            "last_error": None,
+        },
+        {
+            "source": "youtube",
+            "label": "YouTube trailer metadata",
+            "enabled": bool(settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN),
+            "healthy": bool(settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN),
+            **state_snapshot("tmdb.trailer_backfill"),
+        },
+    ]
+    for name in ("ottplay", "justwatch"):
+        snapshot = OttSourceSyncService(db, name).snapshot()
+        sources.append(
+            {
+                "source": name,
+                "label": "OTTplay" if name == "ottplay" else "JustWatch",
+                "enabled": snapshot["enabled"],
+                "healthy": snapshot["enabled"] and snapshot["status"] not in {"FAILED", "BLOCKED"},
+                **snapshot,
+            }
+        )
+    return sources
+
+
+def _health_summary(db: Session) -> dict:
+    total = db.query(Movie).count()
+    cast_exists = exists().where(and_(MovieCredit.movie_id == Movie.id, MovieCredit.credit_type == "cast"))
+    crew_role = lambda roles: exists().where(
+        and_(
+            MovieCredit.movie_id == Movie.id,
+            MovieCredit.credit_type == "crew",
+            func.lower(MovieCredit.job).in_(roles),
+        )
+    )
+    with_ott = select(OttAvailability.movie_id).where(OttAvailability.country == "IN")
+    with_ott_date = select(OttAvailability.movie_id).where(
+        OttAvailability.country == "IN", OttAvailability.ott_release_date.is_not(None)
+    )
+    with_trailer = select(MovieTrailer.movie_id)
+    with_imdb = select(ExternalId.movie_id).where(func.lower(ExternalId.provider) == "imdb")
+    with_rating = select(MovieRating.movie_id).where(
+        func.lower(MovieRating.source) == "imdb", MovieRating.rating.is_not(None)
+    )
+    open_issue = DataQualityIssue.resolved_at.is_(None)
+    jobs = dict(db.query(OperationState.status, func.count(OperationState.id)).group_by(OperationState.status).all())
+    request_counts = dict(db.query(MovieRequest.status, func.count(MovieRequest.id)).group_by(MovieRequest.status).all())
+    now = datetime.now(timezone.utc)
+    return {
+        "movies": {
+            "total": total,
+            "missing_title": db.query(Movie).filter(or_(Movie.title.is_(None), Movie.title == "")).count(),
+            "missing_release_date": db.query(Movie).filter(Movie.release_date.is_(None)).count(),
+            "missing_language": db.query(Movie).filter(or_(Movie.original_language.is_(None), Movie.original_language == "")).count(),
+            "missing_genre": db.query(Movie).filter(~exists().where(movie_genres.c.movie_id == Movie.id)).count(),
+            "missing_runtime": db.query(Movie).filter(Movie.runtime_minutes.is_(None)).count(),
+        },
+        "identifiers": {
+            "missing_tmdb": db.query(Movie).filter(Movie.tmdb_id.is_(None)).count(),
+            "missing_imdb": db.query(Movie).filter(~Movie.id.in_(with_imdb)).count(),
+        },
+        "credits": {
+            "missing_cast": db.query(Movie).filter(~cast_exists).count(),
+            "missing_director": db.query(Movie).filter(~crew_role(ROLE_ALIASES["director"])).count(),
+            "missing_cinematography": db.query(Movie).filter(~crew_role(ROLE_ALIASES["cinematography"])).count(),
+            "missing_writer": db.query(Movie).filter(~crew_role(ROLE_ALIASES["writer"])).count(),
+            "missing_composer": db.query(Movie).filter(~crew_role(ROLE_ALIASES["composer"])).count(),
+            "people_missing_profile": db.query(Person).filter(or_(Person.profile_path.is_(None), Person.profile_path == "")).count(),
+            "people_missing_biography": db.query(Person).filter(or_(Person.biography.is_(None), Person.biography == "")).count(),
+        },
+        "images": {
+            "missing_poster": db.query(Movie).filter(or_(Movie.poster_path.is_(None), Movie.poster_path == "")).count(),
+            "broken_poster": db.query(DataQualityIssue).filter(open_issue, DataQualityIssue.issue_type == "broken_poster").count(),
+            "missing_backdrop": db.query(Movie).filter(or_(Movie.backdrop_path.is_(None), Movie.backdrop_path == "")).count(),
+            "missing_logo": db.query(DataQualityIssue).filter(open_issue, DataQualityIssue.issue_type == "missing_logo").count(),
+        },
+        "ott": {
+            "missing_platform": db.query(Movie).filter(~Movie.id.in_(with_ott)).count(),
+            "missing_date": db.query(Movie).filter(~Movie.id.in_(with_ott_date)).count(),
+            "platform_only": db.query(Movie).filter(Movie.id.in_(with_ott), ~Movie.id.in_(with_ott_date)).count(),
+            "confirmed": db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.verification_status == "CONFIRMED").scalar() or 0,
+            "conflicting": db.query(func.count(func.distinct(OttEvidence.movie_id))).filter(OttEvidence.status == "CONFLICTING").scalar() or 0,
+            "needs_review": db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.verification_status == "NEEDS_REVIEW").scalar() or 0,
+        },
+        "trailers": {
+            "available": db.query(func.count(func.distinct(MovieTrailer.movie_id))).scalar() or 0,
+            "missing": db.query(Movie).filter(~Movie.id.in_(with_trailer)).count(),
+            "invalid": db.query(MovieTrailer).filter(func.length(MovieTrailer.video_key) != 11).count(),
+        },
+        "ratings": {
+            "imdb_available": db.query(func.count(func.distinct(MovieRating.movie_id))).filter(func.lower(MovieRating.source) == "imdb", MovieRating.rating.is_not(None)).scalar() or 0,
+            "imdb_missing": db.query(Movie).filter(~Movie.id.in_(with_rating)).count(),
+        },
+        "requests": {
+            "pending": request_counts.get("PENDING", 0),
+            "reviewing": request_counts.get("REVIEWING", 0),
+            "overdue": db.query(MovieRequest).filter(MovieRequest.status.in_(["PENDING", "REVIEWING", "FOUND"]), MovieRequest.created_at < now - timedelta(hours=48)).count(),
+        },
+        "comments": {"pending": db.query(MovieComment).filter_by(status="PENDING").count()},
+        "jobs": {
+            "failed": jobs.get("FAILED", 0),
+            "running": jobs.get("RUNNING", 0),
+            "queued": jobs.get("QUEUED", 0),
+        },
     }
 
 
@@ -362,6 +559,9 @@ def session(_: None = Depends(require_admin_session)):
 
 @router.get("/dashboard")
 def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    week_start = today - timedelta(days=today.weekday())
     open_filter = DataQualityIssue.resolved_at.is_(None)
     recent_notifications = (
         db.query(NotificationLog)
@@ -370,8 +570,90 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
         .all()
     )
     jobs = db.query(OperationState).order_by(OperationState.name).all()
-    return {
-        "total_movies": db.query(Movie).count(),
+    status_counts = dict(
+        db.query(MovieRequest.status, func.count(MovieRequest.id))
+        .group_by(MovieRequest.status)
+        .all()
+    )
+    total_movies = db.query(Movie).count()
+    confirmed_ott = (
+        db.query(func.count(func.distinct(OttAvailability.movie_id)))
+        .filter(OttAvailability.verification_status == "CONFIRMED")
+        .scalar()
+        or 0
+    )
+    upcoming_ott = (
+        db.query(func.count(func.distinct(OttAvailability.movie_id)))
+        .filter(
+            OttAvailability.verification_status == "CONFIRMED",
+            OttAvailability.ott_release_date > today,
+        )
+        .scalar()
+        or 0
+    )
+    with_rating = select(MovieRating.movie_id).where(
+        func.lower(MovieRating.source) == "imdb", MovieRating.rating.is_not(None)
+    )
+    with_trailer = select(MovieTrailer.movie_id)
+    active_request = MovieRequest.status.in_(["PENDING", "REVIEWING", "FOUND"])
+    emails = _email_health(db)
+    failed_jobs = db.query(OperationState).filter(OperationState.status == "FAILED").count()
+    recent_activity = [
+        {
+            "id": f"audit-{item.id}",
+            "timestamp": item.created_at,
+            "event": item.action.replace("_", " ").title(),
+            "target": f"{item.target_type} {item.target_id or ''}".strip(),
+            "status": item.summary,
+        }
+        for item in db.query(AdminAuditLog)
+        .order_by(AdminAuditLog.created_at.desc(), AdminAuditLog.id.desc())
+        .limit(12)
+        .all()
+    ]
+    if len(recent_activity) < 12:
+        recent_activity.extend(
+            {
+                "id": f"request-{item.id}",
+                "timestamp": item.created_at,
+                "event": "Movie request submitted",
+                "target": item.request_id,
+                "status": item.status,
+            }
+            for item in db.query(MovieRequest)
+            .order_by(MovieRequest.created_at.desc())
+            .limit(12 - len(recent_activity))
+            .all()
+        )
+    summary = {
+        "total_movies": total_movies,
+        "movies_added_today": db.query(Movie).filter(Movie.created_at >= datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)).count(),
+        "movies_added_this_week": db.query(Movie).filter(Movie.created_at >= datetime.combine(week_start, datetime.min.time(), tzinfo=timezone.utc)).count(),
+        "pending_requests": status_counts.get("PENDING", 0),
+        "reviewing_requests": status_counts.get("REVIEWING", 0),
+        "added_requests": status_counts.get("ADDED", 0),
+        "pending_comments": db.query(MovieComment).filter(MovieComment.status == "PENDING").count(),
+        "ott_confirmed": confirmed_ott,
+        "upcoming_ott": upcoming_ott,
+        "missing_ott": max(0, total_movies - (db.query(func.count(func.distinct(OttAvailability.movie_id))).scalar() or 0)),
+        "ott_needs_review": db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.verification_status == "NEEDS_REVIEW").scalar() or 0,
+        "movies_missing_images": db.query(Movie).filter(or_(Movie.poster_path.is_(None), Movie.poster_path == "", Movie.backdrop_path.is_(None), Movie.backdrop_path == "")).count(),
+        "movies_missing_imdb_rating": db.query(Movie).filter(~Movie.id.in_(with_rating)).count(),
+        "movies_missing_trailer": db.query(Movie).filter(~Movie.id.in_(with_trailer)).count(),
+        "failed_jobs": failed_jobs,
+        "requests_over_36h": db.query(MovieRequest).filter(active_request, MovieRequest.created_at < now - timedelta(hours=36)).count(),
+        "requests_over_48h": db.query(MovieRequest).filter(active_request, MovieRequest.created_at < now - timedelta(hours=48)).count(),
+        "failed_emails": emails["failed"],
+    }
+    alerts = [
+        {"label": f"{summary['pending_requests']} movie requests pending", "severity": "warning", "href": "/admin/requests?status=PENDING"},
+        {"label": f"{summary['requests_over_48h']} requests overdue more than 48 hours", "severity": "critical", "href": "/admin/requests?age=48"},
+        {"label": f"{summary['ott_needs_review']} OTT records need review", "severity": "warning", "href": "/admin/ott-research?status=NEEDS_REVIEW"},
+        {"label": f"{summary['failed_emails']} request emails failed", "severity": "critical", "href": "/admin/requests?email_status=FAILED"},
+        {"label": f"{summary['movies_missing_trailer']} movies are missing a trailer", "severity": "neutral", "href": "/admin/movies?trailer=missing"},
+        {"label": f"{failed_jobs} background jobs failed", "severity": "critical", "href": "/admin/jobs?status=FAILED"},
+    ]
+    return summary | {
         "movies_with_issues": db.query(
             func.count(func.distinct(DataQualityIssue.movie_id))
         )
@@ -393,14 +675,6 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
                     "broken_profile",
                     "image_unresolved",
                 ]
-            ),
-        )
-        .count(),
-        "missing_ott": db.query(DataQualityIssue)
-        .filter(
-            open_filter,
-            DataQualityIssue.issue_type.in_(
-                ["missing_ott", "missing_ott_provider", "missing_ott_release_date"]
             ),
         )
         .count(),
@@ -426,12 +700,10 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
         "failed_research": db.query(OttEvidence)
         .filter(OttEvidence.status == "FAILED")
         .count(),
-        "pending_requests": db.query(MovieRequest)
-        .filter(MovieRequest.status == "PENDING")
-        .count(),
-        "pending_comments": db.query(MovieComment)
-        .filter(MovieComment.status == "PENDING")
-        .count(),
+        "alerts": [item for item in alerts if not item["label"].startswith("0 ")],
+        "recent_activity": sorted(recent_activity, key=lambda item: item["timestamp"], reverse=True)[:12],
+        "sources": _source_health(db),
+        "email": emails,
         "recent_notifications": [
             {
                 "id": x.id,
@@ -460,6 +732,11 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
 def requests(
     search: str | None = None,
     status: str | None = None,
+    email_status: str | None = None,
+    local: str | None = None,
+    age: int | None = Query(default=None, ge=24, le=48),
+    requested_today: bool = False,
+    sort: str = Query("newest", pattern="^(newest|oldest|highest_age|recently_updated)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -482,22 +759,57 @@ def requests(
                 MovieRequest.movie_name.ilike(term),
                 MovieRequest.email.ilike(term),
                 MovieRequest.request_id.ilike(term),
+                MovieRequest.imdb_id.ilike(term),
                 request_id_match,
             )
         )
+    if email_status:
+        if email_status not in {"FAILED", "PENDING", "SENT", "NOT_CONFIGURED"}:
+            raise HTTPException(422, "Unknown email status")
+        query = query.filter(
+            or_(
+                MovieRequest.confirmation_email_status == email_status,
+                MovieRequest.admin_notification_email_status == email_status,
+                MovieRequest.completion_email_status == email_status,
+                MovieRequest.rejection_email_status == email_status,
+            )
+        )
+    if local == "exists":
+        query = query.filter(MovieRequest.local_movie_id.is_not(None))
+    elif local == "missing":
+        query = query.filter(MovieRequest.local_movie_id.is_(None))
+    elif local not in {None, ""}:
+        raise HTTPException(422, "Unknown local movie filter")
+    now = datetime.now(timezone.utc)
+    if age:
+        query = query.filter(MovieRequest.created_at < now - timedelta(hours=age))
+    if requested_today:
+        query = query.filter(MovieRequest.created_at >= datetime.combine(now.date(), datetime.min.time(), tzinfo=timezone.utc))
     total = query.count()
+    order = {
+        "newest": (MovieRequest.created_at.desc(),),
+        "oldest": (MovieRequest.created_at.asc(),),
+        "highest_age": (MovieRequest.created_at.asc(),),
+        "recently_updated": (MovieRequest.updated_at.desc(),),
+    }[sort]
     rows = (
-        query.order_by(MovieRequest.created_at.desc())
+        query.order_by(*order, MovieRequest.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
     )
+    counters = dict(
+        db.query(MovieRequest.status, func.count(MovieRequest.id))
+        .group_by(MovieRequest.status)
+        .all()
+    )
     return _pagination(total, page, page_size) | {
-        "items": [_request(item) for item in rows]
+        "counters": {"ALL": sum(counters.values())} | {key: counters.get(key, 0) for key in sorted(REQUEST_STATUSES)},
+        "items": [_request(item) for item in rows],
     }
 
 
-def _request(item: MovieRequest):
+def _request(item: MovieRequest, db: Session | None = None, rich: bool = False):
     now = datetime.now(timezone.utc)
     created = (
         item.created_at
@@ -506,7 +818,8 @@ def _request(item: MovieRequest):
     )
     age_seconds = max(0, int((now - created).total_seconds()))
     target_at = created + timedelta(hours=48)
-    return {
+    age_hours = age_seconds / 3600
+    result = {
         "request_id": item.request_id,
         "movie_name": item.movie_name,
         "verified_title": item.verified_title or item.movie_name,
@@ -539,6 +852,7 @@ def _request(item: MovieRequest):
         "age_seconds": age_seconds,
         "target_at": target_at,
         "target_seconds": int((target_at - now).total_seconds()),
+        "sla": "OVERDUE" if age_hours >= 48 else "URGENT" if age_hours >= 36 else "ATTENTION" if age_hours >= 24 else "NORMAL",
         "sla_36_notified_at": item.sla_36_notified_at,
         "sla_48_notified_at": item.sla_48_notified_at,
         "emails": {
@@ -552,6 +866,115 @@ def _request(item: MovieRequest):
             for kind in EMAIL_KINDS
         },
     }
+    if not (db and rich):
+        return result
+    movie = None
+    if item.local_movie_id:
+        movie = (
+            db.query(Movie)
+            .options(
+                selectinload(Movie.ott_availabilities),
+                selectinload(Movie.trailers),
+                selectinload(Movie.ratings),
+                selectinload(Movie.external_ids),
+                selectinload(Movie.credits).selectinload(MovieCredit.person),
+            )
+            .filter(Movie.id == item.local_movie_id)
+            .first()
+        )
+    if not movie and item.external_movie_id:
+        movie = (
+            db.query(Movie)
+            .options(
+                selectinload(Movie.ott_availabilities),
+                selectinload(Movie.trailers),
+                selectinload(Movie.ratings),
+                selectinload(Movie.external_ids),
+                selectinload(Movie.credits).selectinload(MovieCredit.person),
+            )
+            .filter(Movie.tmdb_id == item.external_movie_id)
+            .first()
+        )
+    if not movie:
+        result["local"] = {"exists": False}
+        result["data_completeness"] = {
+            "poster": bool(item.poster_path),
+            "tmdb": bool(item.external_movie_id),
+            "imdb": bool(item.imdb_id),
+            "cast": False,
+            "director": bool(item.director),
+            "theatrical_date": bool(item.verified_release_date),
+            "ott_date": False,
+            "ott_platform": False,
+            "trailer": False,
+            "imdb_rating": False,
+        }
+        result["ott"] = {"status": "NOT_LOCAL", "sources": []}
+        result["trailer"] = {"available": False}
+        return result
+    canonical = best_canonical_ott(movie)
+    trailer = next((row for row in movie.trailers if row.is_primary), movie.trailers[0] if movie.trailers else None)
+    imdb_rating = next((row for row in movie.ratings if row.source.lower() == "imdb" and row.rating is not None), None)
+    imdb_id = next((row.external_id for row in movie.external_ids if row.provider.lower() == "imdb"), item.imdb_id)
+    cast = [credit.person.name for credit in sorted(movie.credits, key=lambda x: x.cast_order if x.cast_order is not None else 9999) if credit.credit_type == "cast"][:12]
+    directors = [credit.person.name for credit in movie.credits if normalize_role(credit.job or credit.department) == "director"]
+    latest_research = (
+        db.query(OttEvidence)
+        .filter(OttEvidence.movie_id == movie.id, OttEvidence.source_url.is_(None))
+        .order_by(OttEvidence.updated_at.desc(), OttEvidence.id.desc())
+        .first()
+    )
+    sources = (
+        db.query(OttEvidence)
+        .filter(OttEvidence.movie_id == movie.id, OttEvidence.source_url.is_not(None), OttEvidence.rejected_at.is_(None))
+        .order_by(OttEvidence.confidence.desc(), OttEvidence.created_at.desc())
+        .all()
+    )
+    result["local_movie_id"] = movie.id
+    result["local"] = {
+        "exists": True,
+        "id": movie.id,
+        "metadata_status": "COMPLETE" if movie.title and movie.release_date and movie.original_language and cast and directors else "INCOMPLETE",
+        "runtime": movie.runtime_minutes,
+        "cast": cast,
+        "directors": list(dict.fromkeys(directors)),
+        "added_at": movie.created_at,
+        "updated_at": movie.updated_at,
+    }
+    result["ott"] = {
+        "platform": canonical.provider if canonical else None,
+        "release_date": canonical.ott_release_date if canonical and canonical.verification_status == "CONFIRMED" else None,
+        "confidence": canonical.confidence if canonical else 0,
+        "verification_status": canonical.verification_status if canonical else "UNKNOWN",
+        "status": latest_research.status if latest_research else "NOT_QUEUED",
+        "last_check": latest_research.last_checked if latest_research else None,
+        "sources": [
+            {"id": row.id, "name": row.source_name or row.source_type, "url": row.source_url, "platform": row.platform, "date": row.release_date, "confidence": row.confidence}
+            for row in sources
+        ],
+    }
+    result["trailer"] = {
+        "available": bool(trailer),
+        "provider": trailer.provider if trailer else None,
+        "video_key": trailer.video_key if trailer else None,
+        "name": trailer.name if trailer else None,
+        "official": trailer.official if trailer else False,
+    }
+    result["imdb_id"] = imdb_id
+    result["data_completeness"] = {
+        "poster": bool(movie.poster_path),
+        "tmdb": bool(movie.tmdb_id),
+        "imdb": bool(imdb_id),
+        "cast": bool(cast),
+        "director": bool(directors),
+        "theatrical_date": bool(movie.theatrical_release_date or movie.release_date),
+        "ott_date": bool(canonical and canonical.ott_release_date and canonical.verification_status == "CONFIRMED"),
+        "ott_platform": bool(canonical and canonical.provider),
+        "trailer": bool(trailer),
+        "imdb_rating": bool(imdb_rating),
+    }
+    result["imdb_rating"] = imdb_rating.rating if imdb_rating else None
+    return result
 
 
 @router.get("/requests/{request_id}")
@@ -563,7 +986,7 @@ def request_detail(
     item = db.query(MovieRequest).filter_by(request_id=request_id).first()
     if not item:
         raise HTTPException(404, "Request not found")
-    return _request(item)
+    return _request(item, db, rich=True)
 
 
 @router.patch("/requests/{request_id}", dependencies=[Depends(require_same_origin)])
@@ -588,8 +1011,11 @@ def update_request(
                 "Cannot mark this request added until the matching movie exists locally",
             )
         MovieRequestAutomationService(db)._complete(item, movie, force=True)
-        return _request(item)
+        _audit(db, "request_status_changed", "movie_request", request_id, "Status changed to ADDED")
+        db.commit()
+        return _request(item, db, rich=True)
     item.status = payload.status
+    _audit(db, "request_status_changed", "movie_request", request_id, f"Status changed to {payload.status}")
     try:
         db.commit()
     except IntegrityError as exc:
@@ -632,12 +1058,15 @@ def retry_request_email(
         raise HTTPException(409, "This email was already sent")
     if result.get("skipped") == "cooldown":
         raise HTTPException(429, "Please wait before retrying this email")
+    _audit(db, "request_email_retried", "movie_request", request_id, f"{kind} email: {result.get('status', 'attempted')}")
+    db.commit()
     return result | {"request": _request(item)}
 
 
 @router.get("/comments")
 def comments(
     status: str | None = None,
+    today: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -648,6 +1077,8 @@ def comments(
         if status not in {"PENDING", "APPROVED", "HIDDEN", "REJECTED"}:
             raise HTTPException(422, "Unknown comment status")
         query = query.filter(MovieComment.status == status)
+    if today:
+        query = query.filter(MovieComment.created_at >= datetime.combine(datetime.now(timezone.utc).date(), datetime.min.time(), tzinfo=timezone.utc))
     total = query.count()
     rows = (
         query.order_by(MovieComment.created_at.desc(), MovieComment.id.desc())
@@ -661,6 +1092,7 @@ def comments(
                 "id": item.id,
                 "movie_id": movie.id,
                 "movie_title": movie.title,
+                "poster_path": movie.poster_path,
                 "display_name": item.display_name,
                 "email": item.email,
                 "comment": item.comment_text,
@@ -688,6 +1120,7 @@ def moderate_comment(
     item.status = payload.status
     item.moderation_reason = payload.reason.strip() if payload.reason else None
     item.moderated_at = datetime.now(timezone.utc)
+    _audit(db, "comment_moderated", "movie_comment", item.id, f"Status changed to {item.status}")
     db.commit()
     return {"id": item.id, "status": item.status, "moderated_at": item.moderated_at}
 
@@ -701,6 +1134,7 @@ def delete_comment(
     item = db.get(MovieComment, comment_id)
     if not item:
         raise HTTPException(404, "Comment not found")
+    _audit(db, "comment_deleted", "movie_comment", item.id, f"Deleted comment on movie {item.movie_id}")
     db.delete(item)
     db.commit()
     return {"deleted": True, "id": comment_id}
@@ -737,6 +1171,7 @@ def data_health(
     return _pagination(total, page, page_size) | {
         "imdb": _imdb_health(db),
         "ott": _ott_coverage(db),
+        "summary": _health_summary(db),
         "items": [
             {
                 "id": issue.id,
@@ -1064,6 +1499,7 @@ def verify_ott_manually(
         },
         synchronize_session=False,
     )
+    _audit(db, "ott_manually_confirmed", "movie", movie_id, f"{payload.platform} on {payload.ott_release_date}")
     db.commit()
     return {
         "movie_id": movie_id,
@@ -1092,6 +1528,8 @@ def update_ott_evidence(
         evidence.trusted = True
         service.evaluate_movie(evidence.movie_id)
         db.commit()
+    _audit(db, f"ott_evidence_{payload.action}ed", "ott_evidence", evidence_id, payload.reason)
+    db.commit()
     return {
         "id": evidence.id,
         "status": evidence.status,
@@ -1121,6 +1559,7 @@ def ott_action(
     item.status = "NEEDS_REVIEW" if payload.action == "needs_review" else "QUEUED"
     item.next_check = datetime.now(timezone.utc)
     item.notes = None if payload.action == "retry" else item.notes
+    _audit(db, "ott_research_action", "ott_evidence", evidence_id, payload.action)
     db.commit()
     return {"id": item.id, "status": item.status, "next_check": item.next_check}
 
@@ -1345,6 +1784,8 @@ def start_backfill(
     from app.workers.celery_app import celery_app
 
     queued = celery_app.send_task(task_name)
+    _audit(db, "job_started", "background_job", task_name, f"Checkpoint-preserving {operation} run queued")
+    db.commit()
     return {"queued": True, "task": task_name, "task_id": queued.id, "status": "QUEUED"}
 
 
@@ -1359,7 +1800,38 @@ def repair_movie(
     from app.workers.celery_app import celery_app
 
     queued = celery_app.send_task("repair.movie", args=[movie_id])
+    _audit(db, "movie_repair_queued", "movie", movie_id)
+    db.commit()
     return {"queued": True, "movie_id": movie_id, "task_id": queued.id}
+
+
+@router.post("/movies/{movie_id}/research-ott", dependencies=[Depends(require_same_origin)])
+def research_movie_ott(
+    movie_id: int,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    movie = db.get(Movie, movie_id)
+    if not movie:
+        raise HTTPException(404, "Movie not found")
+    service = OttResearchService(db, settings.OTT_CONFIRMATION_THRESHOLD)
+    ReleaseStatusService(db).classify_movie(movie)
+    queued = service.queue_movie(movie_id)
+    latest = (
+        db.query(OttEvidence)
+        .filter(OttEvidence.movie_id == movie_id, OttEvidence.source_url.is_(None))
+        .order_by(OttEvidence.id.desc())
+        .first()
+    )
+    if latest and latest.status not in {"RESEARCHING"}:
+        latest.status = "QUEUED"
+        latest.next_check = datetime.now(timezone.utc)
+        queued = True
+    _audit(db, "ott_research_queued", "movie", movie_id)
+    db.commit()
+    if not queued:
+        raise HTTPException(409, "Movie is not currently eligible for OTT research")
+    return {"queued": True, "movie_id": movie_id, "status": latest.status if latest else "QUEUED"}
 
 
 def _queue_deep_repair(movie: Movie) -> dict:
@@ -1398,6 +1870,8 @@ def import_deep_search_movie(
     existing = db.query(Movie).filter_by(tmdb_id=tmdb_id).first()
     if existing:
         MovieRequestAutomationService(db).reconcile_for_movie(existing)
+        _audit(db, "movie_import_checked", "movie", existing.id, "Movie already existed locally")
+        db.commit()
         return {
             "created": False,
             "queued": False,
@@ -1465,6 +1939,8 @@ def import_deep_search_movie(
             }
         raise
     MovieRequestAutomationService(db).reconcile_for_movie(movie)
+    _audit(db, "movie_imported", "movie", movie.id, f"TMDB {tmdb_id}")
+    db.commit()
     return {"created": True, "status": "imported"} | _queue_deep_repair(movie)
 
 
@@ -1484,7 +1960,407 @@ def repair_deep_search_movie(
     movie = db.query(Movie).filter_by(tmdb_id=tmdb_id).first()
     if not movie:
         raise HTTPException(404, "Movie is not in the local database")
-    return {"created": False, "status": "repair_queued"} | _queue_deep_repair(movie)
+    result = {"created": False, "status": "repair_queued"} | _queue_deep_repair(movie)
+    _audit(db, "movie_repair_queued", "movie", movie.id, f"TMDB {tmdb_id}")
+    db.commit()
+    return result
+
+
+@router.get("/movies")
+def admin_movies(
+    search: str | None = None,
+    language: str | None = None,
+    year: int | None = Query(default=None, ge=1888, le=2100),
+    platform: str | None = None,
+    ott: str | None = None,
+    trailer: str | None = None,
+    imdb: str | None = None,
+    poster: str | None = None,
+    metadata: str | None = None,
+    sort: str = Query("updated", pattern="^(updated|newest|oldest|title|year)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(30, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    """Server-side catalogue operations; no full-database browser payloads."""
+    query = db.query(Movie)
+    with_ott = select(OttAvailability.movie_id)
+    confirmed_ott = select(OttAvailability.movie_id).where(
+        OttAvailability.verification_status == "CONFIRMED"
+    )
+    with_trailer = select(MovieTrailer.movie_id)
+    with_imdb = select(ExternalId.movie_id).where(func.lower(ExternalId.provider) == "imdb")
+    if search:
+        term = f"%{search.strip()}%"
+        conditions = [Movie.title.ilike(term), Movie.original_title.ilike(term)]
+        if search.strip().isdigit():
+            conditions.extend([Movie.id == int(search), Movie.tmdb_id == int(search)])
+        conditions.append(
+            Movie.id.in_(select(ExternalId.movie_id).where(ExternalId.external_id.ilike(term)))
+        )
+        query = query.filter(or_(*conditions))
+    if language:
+        query = query.filter(Movie.original_language == language.lower())
+    if year:
+        query = query.filter(func.extract("year", Movie.release_date) == year)
+    if platform:
+        query = query.filter(
+            Movie.id.in_(select(OttAvailability.movie_id).where(OttAvailability.provider.ilike(f"%{platform.strip()}%")))
+        )
+    if ott == "confirmed":
+        query = query.filter(Movie.id.in_(confirmed_ott))
+    elif ott == "missing":
+        query = query.filter(~Movie.id.in_(with_ott))
+    elif ott == "needs_review":
+        query = query.filter(Movie.id.in_(select(OttAvailability.movie_id).where(OttAvailability.verification_status == "NEEDS_REVIEW")))
+    if trailer == "missing":
+        query = query.filter(~Movie.id.in_(with_trailer))
+    if imdb == "missing":
+        query = query.filter(~Movie.id.in_(with_imdb))
+    if poster == "missing":
+        query = query.filter(or_(Movie.poster_path.is_(None), Movie.poster_path == ""))
+    if metadata == "incomplete":
+        query = query.filter(
+            or_(
+                Movie.release_date.is_(None),
+                Movie.original_language.is_(None),
+                Movie.runtime_minutes.is_(None),
+                ~exists().where(MovieCredit.movie_id == Movie.id),
+            )
+        )
+    total = query.count()
+    ordering = {
+        "updated": (Movie.updated_at.desc(), Movie.id.desc()),
+        "newest": (Movie.created_at.desc(), Movie.id.desc()),
+        "oldest": (Movie.created_at.asc(), Movie.id.asc()),
+        "title": (Movie.title.asc(), Movie.id.asc()),
+        "year": (Movie.release_date.desc().nullslast(), Movie.id.desc()),
+    }[sort]
+    rows = (
+        query.options(
+            selectinload(Movie.ott_availabilities),
+            selectinload(Movie.trailers),
+            selectinload(Movie.ratings),
+            selectinload(Movie.external_ids),
+            selectinload(Movie.credits),
+        )
+        .order_by(*ordering)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    items = []
+    for movie in rows:
+        canonical = best_canonical_ott(movie)
+        imdb_id = next((row.external_id for row in movie.external_ids if row.provider.lower() == "imdb"), None)
+        rating = next((row for row in movie.ratings if row.source.lower() == "imdb" and row.rating is not None), None)
+        trailer_row = next((row for row in movie.trailers if row.is_primary), movie.trailers[0] if movie.trailers else None)
+        missing = [
+            label
+            for label, present in (
+                ("release date", movie.release_date),
+                ("language", movie.original_language),
+                ("runtime", movie.runtime_minutes),
+                ("credits", movie.credits),
+                ("poster", movie.poster_path),
+            )
+            if not present
+        ]
+        items.append(
+            {
+                "id": movie.id,
+                "tmdb_id": movie.tmdb_id,
+                "title": movie.title,
+                "original_title": movie.original_title,
+                "poster_path": movie.poster_path,
+                "year": movie.release_date.year if movie.release_date else None,
+                "language": movie.original_language,
+                "imdb_id": imdb_id,
+                "imdb_rating": rating.rating if rating else None,
+                "theatrical_date": movie.theatrical_release_date or movie.release_date,
+                "ott_platform": canonical.provider if canonical else None,
+                "ott_release_date": canonical.ott_release_date if canonical and canonical.verification_status == "CONFIRMED" else None,
+                "ott_status": canonical.verification_status if canonical else "UNKNOWN",
+                "trailer": bool(trailer_row),
+                "trailer_key": trailer_row.video_key if trailer_row else None,
+                "metadata_health": "HEALTHY" if not missing else "INCOMPLETE",
+                "metadata_missing": missing,
+                "image_health": "HEALTHY" if movie.poster_path and movie.backdrop_path else "INCOMPLETE",
+                "created_at": movie.created_at,
+                "updated_at": movie.updated_at,
+            }
+        )
+    return _pagination(total, page, page_size) | {"items": items}
+
+
+def _release_item(movie: Movie, availability: OttAvailability, source_count: int) -> dict:
+    today = site_date()
+    if availability.verification_status == "CONFLICTING":
+        status = "CONFLICTING"
+    elif availability.verification_status == "NEEDS_REVIEW":
+        status = "NEEDS_REVIEW"
+    elif not availability.provider:
+        status = "UNKNOWN"
+    elif not availability.ott_release_date:
+        status = "PLATFORM_ONLY"
+    elif availability.ott_release_date > today:
+        status = "UPCOMING"
+    else:
+        status = "RELEASED"
+    return {
+        "id": availability.id,
+        "movie_id": movie.id,
+        "movie": movie.title,
+        "poster": movie.poster_path,
+        "language": movie.original_language,
+        "theatrical_date": movie.theatrical_release_date or movie.release_date,
+        "platform": availability.provider,
+        "ott_release_date": availability.ott_release_date,
+        "status": status,
+        "verification_status": availability.verification_status,
+        "confidence": availability.confidence,
+        "country": availability.country,
+        "source_count": source_count,
+        "last_verified": availability.verified_at or availability.last_checked,
+        "next_check": None,
+    }
+
+
+@router.get("/ott-overview")
+def ott_overview(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    coverage = _ott_coverage(db)
+    languages = []
+    for code, label in (("ml", "Malayalam"), ("ta", "Tamil"), ("te", "Telugu"), ("hi", "Hindi"), ("kn", "Kannada")):
+        total = db.query(Movie).filter(Movie.original_language == code).count()
+        platform_known = db.query(func.count(func.distinct(OttAvailability.movie_id))).join(Movie, Movie.id == OttAvailability.movie_id).filter(Movie.original_language == code, OttAvailability.country == "IN").scalar() or 0
+        confirmed = db.query(func.count(func.distinct(OttAvailability.movie_id))).join(Movie, Movie.id == OttAvailability.movie_id).filter(Movie.original_language == code, OttAvailability.country == "IN", OttAvailability.verification_status == "CONFIRMED", OttAvailability.ott_release_date.is_not(None)).scalar() or 0
+        languages.append({"code": code, "language": label, "movies": total, "platform_known": platform_known, "confirmed_date": confirmed, "missing": max(0, total - platform_known)})
+    def releases(upcoming: bool):
+        query = db.query(Movie, OttAvailability).join(OttAvailability, OttAvailability.movie_id == Movie.id).filter(OttAvailability.verification_status == "CONFIRMED", OttAvailability.ott_release_date.is_not(None))
+        query = query.filter(OttAvailability.ott_release_date > site_date()) if upcoming else query.filter(OttAvailability.ott_release_date <= site_date(), OttAvailability.ott_release_date >= site_date() - timedelta(days=30))
+        rows = query.options(selectinload(Movie.ott_availabilities)).order_by(OttAvailability.ott_release_date.asc() if upcoming else OttAvailability.ott_release_date.desc()).limit(12).all()
+        return [
+            _release_item(movie, item, db.query(OttEvidence).filter(OttEvidence.movie_id == movie.id, OttEvidence.source_url.is_not(None)).count())
+            for movie, item in rows
+        ]
+    return {"coverage": coverage, "by_language": languages, "upcoming": releases(True), "recent": releases(False)}
+
+
+@router.get("/ott-releases")
+def ott_releases(
+    search: str | None = None,
+    status: str | None = None,
+    language: str | None = None,
+    platform: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(40, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    query = db.query(Movie, OttAvailability).join(OttAvailability, OttAvailability.movie_id == Movie.id)
+    if search:
+        query = query.filter(or_(Movie.title.ilike(f"%{search.strip()}%"), Movie.original_title.ilike(f"%{search.strip()}%")))
+    if language:
+        query = query.filter(Movie.original_language == language)
+    if platform:
+        query = query.filter(OttAvailability.provider.ilike(f"%{platform.strip()}%"))
+    if status == "UPCOMING":
+        query = query.filter(OttAvailability.verification_status == "CONFIRMED", OttAvailability.ott_release_date > site_date())
+    elif status == "RELEASED":
+        query = query.filter(OttAvailability.verification_status == "CONFIRMED", OttAvailability.ott_release_date <= site_date())
+    elif status == "PLATFORM_ONLY":
+        query = query.filter(OttAvailability.ott_release_date.is_(None))
+    elif status in {"NEEDS_REVIEW", "CONFLICTING"}:
+        query = query.filter(OttAvailability.verification_status == status)
+    total = query.count()
+    rows = query.order_by(OttAvailability.ott_release_date.desc().nullslast(), OttAvailability.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    movie_ids = [movie.id for movie, _ in rows]
+    counts = dict(db.query(OttEvidence.movie_id, func.count(OttEvidence.id)).filter(OttEvidence.movie_id.in_(movie_ids), OttEvidence.source_url.is_not(None)).group_by(OttEvidence.movie_id).all()) if movie_ids else {}
+    return _pagination(total, page, page_size) | {"items": [_release_item(movie, item, counts.get(movie.id, 0)) for movie, item in rows]}
+
+
+@router.get("/sources")
+def source_health(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    return {"items": _source_health(db), "email": _email_health(db)}
+
+
+@router.post("/sources/{source}/run", dependencies=[Depends(require_same_origin)])
+def run_source(source: str, db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    source = source.lower()
+    if source not in SOURCES:
+        raise HTTPException(422, "Only OTTplay and JustWatch adapter jobs can be started here")
+    service = OttSourceSyncService(db, source)
+    snapshot = service.snapshot()
+    if not snapshot["configured"]:
+        raise HTTPException(409, f"{source.title()} adapter is not enabled and configured")
+    if snapshot["status"] in {"QUEUED", "RUNNING"}:
+        raise HTTPException(409, f"{source.title()} sync is already running")
+    state = db.query(OperationState).filter_by(name=f"source.{source}").first()
+    state.status = "QUEUED"
+    _audit(db, "source_sync_started", "ott_source", source)
+    db.commit()
+    from app.workers.celery_app import celery_app
+    task_name = "sources.ottplay_sync" if source == "ottplay" else "sources.justwatch_refresh"
+    queued = celery_app.send_task(task_name)
+    return {"queued": True, "task_id": queued.id, "source": source}
+
+
+@router.get("/sources/{source}/releases")
+def source_releases(
+    source: str,
+    status: str = "UNMATCHED",
+    page: int = Query(1, ge=1),
+    page_size: int = Query(40, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    source = source.lower()
+    if source not in SOURCES:
+        raise HTTPException(404, "Unknown OTT source")
+    query = db.query(OttSourceRelease).filter(OttSourceRelease.source == source)
+    if status:
+        query = query.filter(OttSourceRelease.status == status)
+    total = query.count()
+    rows = query.order_by(OttSourceRelease.release_date.desc().nullslast(), OttSourceRelease.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    items = []
+    for item in rows:
+        token = next((part for part in _normalized_admin_title(item.title).split() if len(part) >= 3), item.title[:20])
+        matches = db.query(Movie).filter(or_(Movie.title.ilike(f"%{token}%"), Movie.original_title.ilike(f"%{token}%"))).order_by(Movie.popularity.desc().nullslast()).limit(5).all()
+        items.append({
+            "id": item.id, "title": item.title, "original_title": item.original_title,
+            "date": item.release_date, "platform": item.platform, "language": item.language,
+            "source_url": item.source_url, "status": item.status, "matched_movie_id": item.matched_movie_id,
+            "match_reason": item.match_reason,
+            "potential_matches": [{"id": movie.id, "title": movie.title, "year": movie.release_date.year if movie.release_date else None, "language": movie.original_language} for movie in matches],
+        })
+    return _pagination(total, page, page_size) | {"items": items}
+
+
+def _normalized_admin_title(value: str | None) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+
+
+@router.patch("/sources/releases/{release_id}", dependencies=[Depends(require_same_origin)])
+def update_source_release(
+    release_id: int,
+    payload: SourceReleaseAction,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    item = db.get(OttSourceRelease, release_id)
+    if not item:
+        raise HTTPException(404, "Source release not found")
+    if payload.action in {"match", "research"}:
+        movie_id = payload.movie_id or item.matched_movie_id
+        movie = db.get(Movie, movie_id) if movie_id else None
+        if not movie:
+            raise HTTPException(422, "A valid local movie is required")
+        item.status = "MATCHED"
+        item.matched_movie_id = movie.id
+        item.match_reason = "Manual administrator match"
+        if payload.action == "research":
+            OttResearchService(db).queue_movie(movie.id)
+        if item.source_url and item.platform:
+            duplicate = db.query(OttEvidence.id).filter_by(movie_id=movie.id, source_type=item.source, source_url=item.source_url, platform=item.platform, release_date=item.release_date).first()
+            if not duplicate:
+                OttResearchService(db, settings.OTT_CONFIRMATION_THRESHOLD).record_evidence(
+                    movie.id, platform=item.platform, release_date=item.release_date,
+                    source_url=item.source_url, source_title=item.title,
+                    confidence=82.0 if item.source == "ottplay" else 75.0,
+                    summary="Manually matched source adapter record", source_type=item.source,
+                    source_name=item.source.title(), country="IN", inspected=True,
+                )
+    else:
+        item.status = {"ignore": "IGNORED", "tv_series": "TV_SERIES", "duplicate": "DUPLICATE"}[payload.action]
+        item.matched_movie_id = None
+    _audit(db, "ott_source_release_updated", "ott_source_release", item.id, payload.action)
+    db.commit()
+    return {"id": item.id, "status": item.status, "matched_movie_id": item.matched_movie_id}
+
+
+@router.get("/system-health")
+def system_health(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    db.execute(select(1)).scalar_one()
+    redis_status, queue_depth, redis_error = "DOWN", None, None
+    try:
+        import redis
+        client = redis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5, socket_timeout=0.5)
+        client.ping()
+        redis_status = "HEALTHY"
+        queue_depth = client.llen("celery")
+    except Exception as exc:
+        redis_error = type(exc).__name__
+    worker_status, worker_heartbeat = "DEGRADED", None
+    try:
+        from app.workers.celery_app import celery_app
+        replies = celery_app.control.inspect(timeout=1).ping() or {}
+        if replies:
+            worker_status = "HEALTHY"
+            worker_heartbeat = datetime.now(timezone.utc)
+    except Exception:
+        worker_status = "DOWN" if redis_status == "DOWN" else "DEGRADED"
+    recent_success = db.query(func.max(OperationState.last_success_at)).scalar()
+    scheduler_status = "HEALTHY" if recent_success and recent_success >= datetime.now(timezone.utc) - timedelta(days=2) else "DEGRADED"
+    return {
+        "services": [
+            {"name": "API", "status": "HEALTHY", "last_heartbeat": datetime.now(timezone.utc)},
+            {"name": "PostgreSQL", "status": "HEALTHY", "last_heartbeat": datetime.now(timezone.utc)},
+            {"name": "Redis", "status": redis_status, "last_error": redis_error, "queue_depth": queue_depth},
+            {"name": "Celery worker", "status": worker_status, "last_heartbeat": worker_heartbeat, "queue_depth": queue_depth},
+            {"name": "Scheduler", "status": scheduler_status, "last_heartbeat": recent_success},
+            {"name": "Frontend/backend connectivity", "status": "HEALTHY", "last_heartbeat": datetime.now(timezone.utc)},
+        ]
+    }
+
+
+@router.get("/audit")
+def audit_log(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    query = db.query(AdminAuditLog)
+    total = query.count()
+    rows = query.order_by(AdminAuditLog.created_at.desc(), AdminAuditLog.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return _pagination(total, page, page_size) | {"items": [{"id": row.id, "timestamp": row.created_at, "action": row.action, "target_type": row.target_type, "target_id": row.target_id, "summary": row.summary} for row in rows]}
+
+
+@router.post("/email/retry-failed", dependencies=[Depends(require_same_origin)])
+def retry_failed_email(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    rows = db.query(MovieRequest).filter(or_(MovieRequest.confirmation_email_status == "FAILED", MovieRequest.admin_notification_email_status == "FAILED", MovieRequest.completion_email_status == "FAILED", MovieRequest.rejection_email_status == "FAILED")).order_by(MovieRequest.updated_at.asc()).limit(50).all()
+    attempted = sent = 0
+    service = MovieRequestEmailService(db)
+    for item in rows:
+        for kind in EMAIL_KINDS:
+            if getattr(item, f"{kind}_email_status") == "FAILED":
+                result = service.send(item, kind)
+                attempted += 1
+                sent += int(result.get("status") == "SENT")
+    _audit(db, "failed_emails_retried", "movie_request_email", None, f"Attempted {attempted}; sent {sent}")
+    db.commit()
+    return {"attempted": attempted, "sent": sent}
+
+
+@router.post("/email/test", dependencies=[Depends(require_same_origin)])
+def test_email(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
+    if not (settings.SMTP_HOST and settings.SMTP_FROM and settings.ADMIN_NOTIFICATION_EMAIL):
+        raise HTTPException(409, "SMTP and the administrator notification email must be configured")
+    from app.services.notification_service import NotificationService
+    sent = NotificationService(db).notify(
+        "Indian OTT Tracker administrator email test succeeded.",
+        "info",
+        f"admin-email-test:{datetime.now(timezone.utc).isoformat()}",
+        0,
+        channels=("email",),
+    )
+    _audit(db, "admin_email_tested", "smtp", None, "SENT" if sent else "FAILED")
+    db.commit()
+    if not sent:
+        raise HTTPException(502, "SMTP test failed; see Notifications for the safe delivery status")
+    return {"sent": True}
 
 
 @router.get("/notifications")

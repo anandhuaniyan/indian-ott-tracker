@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
-import { Comments, Dashboard, DataHealth, Jobs, OttResearch, Requests } from "./Admin";
+import { Comments, Dashboard, DataHealth, Jobs, Movies, OttResearch, RequestDetail, Requests, Sources } from "./Admin";
 import { Request } from "./Public";
 
 afterEach(() => {
@@ -195,4 +195,44 @@ it("explains release eligibility on the OTT research page", async () => {
   expect(screen.getByText("Upcoming")).toBeInTheDocument();
   expect(screen.getByText("Waiting for theatrical release")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+});
+
+it("renders complete request detail and queues existing workflows", async () => {
+  const fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      request_id: "REQ-DETAIL", verified_title: "Detailed Film", original_title: "Original Film",
+      movie_external_id: 101, imdb_id: "tt101", email: "viewer@example.test", status: "REVIEWING", sla: "ATTENTION",
+      created_at: "2026-08-29T00:00:00Z", updated_at: "2026-08-29T01:00:00Z", age_seconds: 90000,
+      language_name: "Malayalam", release_date: "2026-08-20", genres: ["Drama"], details: "Please review OTT data",
+      local_movie_id: 1, local: { exists: true, id: 1, runtime: 130, directors: ["Director"], cast: ["Actor"], metadata_status: "COMPLETE" },
+      ott: { status: "POSSIBLE", verification_status: "NEEDS_REVIEW", platform: "Netflix", confidence: 82, sources: [] },
+      trailer: { available: true, video_key: "abcdefghijk", name: "Official Trailer" },
+      data_completeness: { poster: true, ott_date: false },
+      emails: { confirmation: { status: "SENT", sent_at: "2026-08-29T00:01:00Z" } },
+    }),
+  });
+  vi.stubGlobal("fetch", fetch);
+  render(<MemoryRouter initialEntries={["/admin/requests/REQ-DETAIL"]}><Routes><Route path="/admin/requests/:requestId" element={<RequestDetail />} /></Routes></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "Detailed Film" })).toBeInTheDocument();
+  expect(screen.getByText("viewer@example.test")).toHaveAttribute("href", "mailto:viewer@example.test");
+  expect(screen.getByText(/OTT date/i)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Research OTT now" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/movies/1/research-ott"), expect.objectContaining({ method: "POST" })));
+});
+
+it("renders paginated admin movie operations", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ total: 1, page: 1, pages: 1, items: [{ id: 1, tmdb_id: 101, title: "Admin Film", poster_path: "/poster.jpg", year: 2026, language: "ml", metadata_health: "INCOMPLETE", metadata_missing: ["runtime"], image_health: "HEALTHY", trailer: false }] }) }));
+  render(<MemoryRouter><Movies /></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "Admin Film" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Research OTT" })).toBeInTheDocument();
+  expect(screen.getByText("Missing: runtime")).toBeInTheDocument();
+});
+
+it("shows isolated source health and unmatched adapter releases", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockImplementation((url) => Promise.resolve({ ok: true, json: async () => url.includes("/releases") ? { items: [{ id: 8, title: "Unmatched Film", platform: "Prime Video", status: "UNMATCHED", potential_matches: [] }] } : { items: [{ source: "ottplay", label: "OTTplay", enabled: false, configured: false, status: "DISABLED", stats: {} }], email: { smtp_configured: false, failed: 0, pending: 0 } } })));
+  render(<MemoryRouter><Sources /></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "OTTplay" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Unmatched Film" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Run sync" })).toBeDisabled();
 });

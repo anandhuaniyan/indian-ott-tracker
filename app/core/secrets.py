@@ -29,6 +29,8 @@ def sanitize_error(value: object, *, limit: int = 2000) -> str:
         settings.OTT_SEARCH_API_KEY,
         settings.GOOGLE_SEARCH_API_KEY,
         settings.TAVILY_API_KEY,
+        settings.OTTPLAY_API_KEY,
+        settings.JUSTWATCH_API_KEY,
         settings.SMTP_PASSWORD,
         settings.SMTP_USERNAME,
         settings.TELEGRAM_BOT_TOKEN,
