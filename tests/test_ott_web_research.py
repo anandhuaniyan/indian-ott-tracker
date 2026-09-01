@@ -48,3 +48,4 @@ def test_web_research_never_maps_article_date_to_ott_date(database, monkeypatch)
     row = database.query(OttAvailability).filter_by(movie_id=movie.id, provider="JioHotstar").one()
     assert row.ott_release_date is None
     assert row.verification_status == "PLATFORM_CONFIRMED"
+    assert row.source_url == "https://www.jiohotstar.com/watch/example"
