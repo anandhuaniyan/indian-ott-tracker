@@ -132,15 +132,27 @@ def image_health():
 
 
 @celery_app.task(
-    name="tmdb.incremental_sync",
+    name="movies.discovery",
     autoretry_for=(Exception,),
     retry_backoff=True,
     max_retries=3,
 )
-def tmdb_incremental_sync():
-    from app.workers.tmdb_worker import run_daily_sync
+def movie_discovery():
+    from app.services.movie_discovery import MovieDiscoveryService
 
-    return run_daily_sync()
+    return _run(lambda db: MovieDiscoveryService(db).run_regular())
+
+
+@celery_app.task(
+    name="movies.discovery_weekly",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def movie_discovery_weekly():
+    from app.services.movie_discovery import MovieDiscoveryService
+
+    return _run(lambda db: MovieDiscoveryService(db).run_weekly())
 
 
 @celery_app.task(

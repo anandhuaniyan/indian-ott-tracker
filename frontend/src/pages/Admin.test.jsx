@@ -3,7 +3,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
-import { Comments, Dashboard, DataHealth, Jobs, Movies, OttGoldSet, OttResearch, RequestDetail, Requests, Sources } from "./Admin";
+import { Comments, Dashboard, DataHealth, Discovery, Jobs, Movies, OttGoldSet, OttResearch, RequestDetail, Requests, Sources } from "./Admin";
 import { Request } from "./Public";
 
 afterEach(() => {
@@ -131,6 +131,34 @@ it("renders and moderates pending comments from the admin route", async () => {
   expect(screen.getByRole("link", { name: "Example Film" })).toHaveAttribute("href", "/movies/1");
   fireEvent.click(screen.getByRole("button", { name: "Approve" }));
   await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/v1/admin/comments/7"), expect.objectContaining({ method: "PATCH" })));
+});
+
+it("renders the twice-daily discovery review queue and language run history", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      timezone: "Asia/Singapore",
+      next_run: "2026-09-01T20:00:00+08:00",
+      page: 1, pages: 1, total: 1,
+      counts: { NEEDS_REVIEW: 1, IMPORTED: 4 },
+      items: [{
+        id: 9, source: "tmdb", external_key: "901", tmdb_id: 901, imdb_id: "tt0000901",
+        title: "Review Film", original_title: "Review Film", language: "ml", release_date: "2026-09-10",
+        status: "NEEDS_REVIEW", matched_movie_id: 1, match_reason: "Normalized title/year/language match",
+        last_seen_at: "2026-09-01T08:00:00Z",
+      }],
+      runs: [{
+        id: 2, run_type: "REGULAR", slot: "MORNING", status: "COMPLETE",
+        window_start: "2026-07-03", window_end: "2027-02-28", candidates_discovered: 5,
+        new_movies_imported: 4, needs_review: 1, failed: 0, completed_at: "2026-09-01T08:02:00+08:00",
+      }],
+    }),
+  }));
+  render(<MemoryRouter><Discovery /></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "Movie discovery" })).toBeInTheDocument();
+  expect(await screen.findByText("Review Film")).toBeInTheDocument();
+  expect(screen.getByText(/Automatic scans run at 08:00 and 20:00/)).toBeInTheDocument();
+  expect(screen.getByText(/REGULAR · MORNING/)).toBeInTheDocument();
 });
 
 it("shows IMDb lifecycle coverage on Data Health", async () => {

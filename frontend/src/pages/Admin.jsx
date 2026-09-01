@@ -43,6 +43,7 @@ const Nav = () => (
     <Link to="/admin">Dashboard</Link>
     <Link to="/admin/requests">Requests</Link>
     <Link to="/admin/movies">Movies</Link>
+    <Link to="/admin/discovery">Discovery</Link>
     <Link to="/admin/comments">Comments</Link>
     <Link to="/admin/data-health">Data health</Link>
     <Link to="/admin/images">Images</Link>
@@ -168,6 +169,9 @@ export function Dashboard() {
           ["Total movies", data.total_movies, "/admin/movies"],
           ["Movies added today", data.movies_added_today, "/admin/movies?sort=newest"],
           ["Movies added this week", data.movies_added_this_week, "/admin/movies?sort=newest"],
+          ["Discovered today", data.discovered_today, "/admin/discovery"],
+          ["Imported today", data.discovery_imported_today, "/admin/discovery?status=IMPORTED"],
+          ["Discovery review", data.discovery_review_today, "/admin/discovery?status=NEEDS_REVIEW"],
           ["Requests pending", data.pending_requests, "/admin/requests?status=PENDING"],
           ["Requests reviewing", data.reviewing_requests, "/admin/requests?status=REVIEWING"],
           ["Requests added", data.added_requests, "/admin/requests?status=ADDED"],
@@ -194,6 +198,21 @@ export function Dashboard() {
             <Link className={`admin-alert admin-alert-${item.severity}`} to={item.href} key={item.href}>{item.label}</Link>
           ))}
           {!data.alerts?.length && <p className="empty">No current alerts.</p>}
+        </div>
+      </section>
+      <section className="admin-panel">
+        <h2>Movie discovery schedule</h2>
+        <p>
+          Runs at 08:00 and 20:00 in {data.discovery?.timezone}. Next run: {when(data.discovery?.next_run)}.
+        </p>
+        <div className="metrics">
+          {["morning", "evening"].map((slot) => {
+            const run = data.discovery?.slots?.[slot];
+            return <article className="metric-link" key={slot}>
+              <strong>{run ? run.status : "NOT RUN"}</strong>
+              <span>{slot[0].toUpperCase() + slot.slice(1)} · {run ? when(run.started_at) : "No history"}</span>
+            </article>;
+          })}
         </div>
       </section>
       <section className="admin-panel">
@@ -252,6 +271,71 @@ export function Dashboard() {
       ))}
     </Page>
   );
+}
+
+export function Discovery() {
+  const location = useLocation();
+  const initial = new URLSearchParams(location.search);
+  const [status, setStatus] = useState(initial.get("status") || "NEEDS_REVIEW");
+  const [language, setLanguage] = useState("");
+  const [page, setPage] = useState(1);
+  const path = `/api/v1/admin/discovery?status=${encodeURIComponent(status)}&language=${encodeURIComponent(language)}&page=${page}`;
+  const [data, error, reload] = useAdmin(path, 60000);
+  const act = (id, action) => {
+    const movieId = action === "match_existing" ? window.prompt("Local movie ID") : undefined;
+    if (action === "match_existing" && !movieId) return;
+    call(`/api/v1/admin/discovery/${id}`, json("PATCH", {
+      action,
+      movie_id: movieId ? Number(movieId) : null,
+    })).then(reload).catch((reason) => window.alert(reason.message));
+  };
+  if (error) return <Guard error={error} />;
+  return <Page title="Movie discovery">
+    <p>
+      Automatic scans run at 08:00 and 20:00 in {data?.timezone || "the site timezone"}.
+      {data?.next_run && <> Next run: {when(data.next_run)}.</>}
+    </p>
+    <div className="filters">
+      <select value={status} onChange={(event) => { setStatus(event.target.value); setPage(1); }}>
+        <option value="NEEDS_REVIEW">Needs review</option>
+        <option value="IMPORTED">Imported</option>
+        <option value="EXISTING">Already exists</option>
+        <option value="FAILED">Failed</option>
+        <option value="FILTERED">Filtered</option>
+        <option value="IGNORED">Ignored</option>
+      </select>
+      <select value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }}>
+        <option value="">All languages</option>
+        <option value="ml">Malayalam</option><option value="ta">Tamil</option>
+        <option value="te">Telugu</option><option value="hi">Hindi</option>
+        <option value="kn">Kannada</option>
+      </select>
+      <button onClick={reload}>Refresh</button>
+    </div>
+    {!data ? <p>Loading…</p> : <>
+      <div className="metrics">
+        {Object.entries(data.counts || {}).map(([label, value]) => (
+          <article className="metric-link" key={label}><strong>{value}</strong><span>{label.replaceAll("_", " ")}</span></article>
+        ))}
+      </div>
+      <Table headers={["Movie", "Identity", "Release", "Status / match", "Last seen", "Actions"]} rows={data.items.map((item) => (
+        <tr key={item.id}>
+          <td><strong>{item.title}</strong>{item.original_title && item.original_title !== item.title && <small>{item.original_title}</small>}</td>
+          <td>{item.source} · {item.tmdb_id || item.external_key}{item.imdb_id && <small>{item.imdb_id}</small>}</td>
+          <td>{item.language || "—"} · {item.release_date || "Unknown"}</td>
+          <td><Status>{item.status}</Status><small>{item.match_reason || item.last_error || "—"}</small>{item.matched_movie_id && <Link to={`/movies/${item.matched_movie_id}`}>Local movie {item.matched_movie_id}</Link>}</td>
+          <td>{when(item.last_seen_at)}</td>
+          <td><div className="admin-actions"><button onClick={() => act(item.id, "match_existing")}>Match</button><button onClick={() => act(item.id, "duplicate")}>Duplicate</button><button onClick={() => act(item.id, "wrong_language")}>Wrong language</button><button onClick={() => act(item.id, "tv_series")}>TV</button><button onClick={() => act(item.id, "ignore")}>Ignore</button></div></td>
+        </tr>
+      ))}/>
+      {!data.items.length && <p className="empty">No discovery candidates match these filters.</p>}
+      <Pager data={data} onPage={setPage}/>
+      <h2>Recent runs</h2>
+      <Table headers={["Slot", "Window", "Result", "Counts", "Completed"]} rows={data.runs.map((run) => (
+        <tr key={run.id}><td>{run.run_type} · {run.slot}</td><td>{run.window_start} – {run.window_end}</td><td><Status>{run.status}</Status></td><td>{run.candidates_discovered} found · {run.new_movies_imported} imported · {run.needs_review} review · {run.failed} failed</td><td>{when(run.completed_at)}</td></tr>
+      ))}/>
+    </>}
+  </Page>;
 }
 
 export function Requests() {

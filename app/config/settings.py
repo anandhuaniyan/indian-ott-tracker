@@ -35,7 +35,12 @@ class Settings(BaseSettings):
     ADMIN_SESSION_SECRET: str = ""
     ADMIN_PASSWORD_HASH: str = ""
     SITE_URL: str = "http://localhost:5173"
-    SITE_TIMEZONE: str = "Asia/Kolkata"
+    SITE_TIMEZONE: str = "Asia/Singapore"
+    MOVIE_DISCOVERY_REGULAR_PAST_DAYS: int = 60
+    MOVIE_DISCOVERY_REGULAR_FUTURE_DAYS: int = 180
+    MOVIE_DISCOVERY_WEEKLY_PAST_DAYS: int = 365
+    MOVIE_DISCOVERY_WEEKLY_FUTURE_DAYS: int = 365
+    MOVIE_DISCOVERY_MAX_PAGES_PER_LANGUAGE: int = 50
     GOOGLE_ANALYTICS_ID: str = ""
     GOOGLE_SITE_VERIFICATION: str = ""
     ADSENSE_PUBLISHER_ID: str = ""
