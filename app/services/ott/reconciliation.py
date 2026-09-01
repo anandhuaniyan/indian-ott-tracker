@@ -268,8 +268,21 @@ class OTTReconciliationService:
                     if row.status not in {"SUPERSEDED", "CONFLICTING"}:
                         row.status = "POSSIBLE"
                 if not canonical.locked_by_admin and not canonical.ott_release_date:
+                    selected = max(
+                        group,
+                        key=lambda row: (
+                            authority(row),
+                            row.platform_confidence or row.confidence or 0,
+                            row.id,
+                        ),
+                    )
                     canonical.verification_status = "PLATFORM_CONFIRMED" if platform_confidence >= 75 else "UNKNOWN"
                     canonical.release_state = "OBSERVED_AVAILABLE" if observation_times else "PLATFORM_ONLY"
+                    canonical.evidence_id = selected.id
+                    canonical.source_type = selected.source_type
+                    canonical.source_url = selected.source_url
+                    canonical.verification_method = selected.verification_method
+                    canonical.verified_at = now
                 state = canonical.release_state or "PLATFORM_ONLY"
                 reason = "India platform availability is known; original OTT date is not confirmed"
 
