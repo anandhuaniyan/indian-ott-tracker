@@ -1,6 +1,7 @@
 """Cookie-authenticated operational administration API."""
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -19,6 +20,7 @@ from app.core.session_auth import (
 )
 from app.database.connection import get_db
 from app.models.movie import Movie
+from app.models.discovery import MovieDiscoveryCandidate, MovieDiscoveryRun
 from app.models.movie_metadata import (
     ExternalId,
     MovieCredit,
@@ -67,6 +69,7 @@ from app.services.release_status import (
     site_date,
 )
 from app.services.tmdb.movie_service import TMDbMovieService
+from app.services.movie_discovery import MovieDiscoveryService, next_regular_discovery
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 REQUEST_STATUSES = {"PENDING", "REVIEWING", "FOUND", "ADDED", "REJECTED"}
@@ -132,6 +135,11 @@ class CommentModeration(BaseModel):
 
 class SourceReleaseAction(BaseModel):
     action: str = Field(pattern="^(match|ignore|tv_series|duplicate|research)$")
+    movie_id: int | None = Field(default=None, ge=1)
+
+
+class DiscoveryCandidateAction(BaseModel):
+    action: str = Field(pattern="^(ignore|duplicate|wrong_language|tv_series|match_existing)$")
     movie_id: int | None = Field(default=None, ge=1)
 
 
@@ -208,7 +216,7 @@ def _source_health(db: Session) -> list[dict]:
             "last_error": state.last_error if state else None,
         }
 
-    tmdb_state = states.get("tmdb.metadata_backfill") or states.get("tmdb.incremental_sync")
+    tmdb_state = states.get("movies.discovery") or states.get("tmdb.metadata_backfill") or states.get("tmdb.incremental_sync")
     tavily_usage = ResearchUsageService(db).monthly_snapshot()
     email = _email_health(db)
     sources = [
@@ -217,7 +225,7 @@ def _source_health(db: Session) -> list[dict]:
             "label": "TMDB",
             "enabled": bool(settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN),
             "healthy": bool(settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN) and not (tmdb_state and tmdb_state.status == "FAILED"),
-            **state_snapshot(tmdb_state.name if tmdb_state else "tmdb.incremental_sync"),
+            **state_snapshot(tmdb_state.name if tmdb_state else "movies.discovery"),
         },
         {
             "source": "tavily",
@@ -645,6 +653,32 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
     with_trailer = select(MovieTrailer.movie_id)
     active_request = MovieRequest.status.in_(["PENDING", "REVIEWING", "FOUND"])
     emails = _email_health(db)
+    site_zone = ZoneInfo(settings.SITE_TIMEZONE)
+    site_today = now.astimezone(site_zone).date()
+    site_day_start = datetime.combine(site_today, time.min, site_zone).astimezone(timezone.utc)
+    last_discovery = db.query(MovieDiscoveryRun).order_by(MovieDiscoveryRun.started_at.desc()).first()
+    last_discovery_success = (
+        db.query(MovieDiscoveryRun)
+        .filter(MovieDiscoveryRun.status == "COMPLETE")
+        .order_by(MovieDiscoveryRun.completed_at.desc())
+        .first()
+    )
+    discovery_today = db.query(
+        func.coalesce(func.sum(MovieDiscoveryRun.candidates_discovered), 0),
+        func.coalesce(func.sum(MovieDiscoveryRun.new_movies_imported), 0),
+        func.coalesce(func.sum(MovieDiscoveryRun.needs_review), 0),
+        func.coalesce(func.sum(MovieDiscoveryRun.failed), 0),
+    ).filter(MovieDiscoveryRun.started_at >= site_day_start).one()
+    discovery_slots = {
+        slot: (
+            db.query(MovieDiscoveryRun)
+            .filter(MovieDiscoveryRun.run_type == "REGULAR", MovieDiscoveryRun.slot == slot)
+            .order_by(MovieDiscoveryRun.started_at.desc())
+            .first()
+        )
+        for slot in ("MORNING", "EVENING")
+    }
+    discovery_stale = not last_discovery_success or last_discovery_success.completed_at < now - timedelta(hours=26)
     failed_jobs = db.query(OperationState).filter(OperationState.status == "FAILED").count()
     recent_activity = [
         {
@@ -689,6 +723,10 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
         "movies_missing_imdb_rating": db.query(Movie).filter(~Movie.id.in_(with_rating)).count(),
         "movies_missing_trailer": db.query(Movie).filter(~Movie.id.in_(with_trailer)).count(),
         "failed_jobs": failed_jobs,
+        "discovered_today": int(discovery_today[0]),
+        "discovery_imported_today": int(discovery_today[1]),
+        "discovery_review_today": int(discovery_today[2]),
+        "discovery_failures_today": int(discovery_today[3]),
         "requests_over_36h": db.query(MovieRequest).filter(active_request, MovieRequest.created_at < now - timedelta(hours=36)).count(),
         "requests_over_48h": db.query(MovieRequest).filter(active_request, MovieRequest.created_at < now - timedelta(hours=48)).count(),
         "failed_emails": emails["failed"],
@@ -700,6 +738,8 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
         {"label": f"{summary['failed_emails']} request emails failed", "severity": "critical", "href": "/admin/requests?email_status=FAILED"},
         {"label": f"{summary['movies_missing_trailer']} movies are missing a trailer", "severity": "neutral", "href": "/admin/movies?trailer=missing"},
         {"label": f"{failed_jobs} background jobs failed", "severity": "critical", "href": "/admin/jobs?status=FAILED"},
+        {"label": "Movie discovery is stale: two scheduled opportunities have passed", "severity": "critical", "href": "/admin/discovery"} if discovery_stale else {"label": "", "severity": "neutral", "href": "/admin/discovery"},
+        {"label": f"Latest movie discovery run is {last_discovery.status.lower()}", "severity": "warning", "href": "/admin/discovery"} if last_discovery and last_discovery.status != "COMPLETE" else {"label": "", "severity": "neutral", "href": "/admin/discovery"},
     ]
     return summary | {
         "movies_with_issues": db.query(
@@ -748,7 +788,23 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
         "failed_research": db.query(OttEvidence)
         .filter(OttEvidence.status == "FAILED")
         .count(),
-        "alerts": [item for item in alerts if not item["label"].startswith("0 ")],
+        "alerts": [item for item in alerts if item["label"] and not item["label"].startswith("0 ")],
+        "discovery": {
+            "timezone": settings.SITE_TIMEZONE,
+            "last_run": MovieDiscoveryService.serialize_run(last_discovery) if last_discovery else None,
+            "next_run": next_regular_discovery(now),
+            "stale": discovery_stale,
+            "today": {
+                "discovered": int(discovery_today[0]),
+                "imported": int(discovery_today[1]),
+                "needs_review": int(discovery_today[2]),
+                "failed": int(discovery_today[3]),
+            },
+            "slots": {
+                slot.lower(): MovieDiscoveryService.serialize_run(item) if item else None
+                for slot, item in discovery_slots.items()
+            },
+        },
         "recent_activity": sorted(recent_activity, key=lambda item: item["timestamp"], reverse=True)[:12],
         "sources": _source_health(db),
         "email": emails,
@@ -774,6 +830,92 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
             for x in jobs
         ],
     }
+
+
+@router.get("/discovery")
+def discovery(
+    status: str | None = None,
+    language: str | None = Query(default=None, pattern="^(ml|ta|te|hi|kn)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    allowed = {"DISCOVERED", "EXISTING", "IMPORTED", "NEEDS_REVIEW", "FAILED", "FILTERED", "IGNORED", "DUPLICATE", "WRONG_LANGUAGE", "TV_SERIES"}
+    query = db.query(MovieDiscoveryCandidate)
+    if status:
+        if status not in allowed:
+            raise HTTPException(422, "Unknown discovery status")
+        query = query.filter(MovieDiscoveryCandidate.status == status)
+    if language:
+        query = query.filter(MovieDiscoveryCandidate.language == language)
+    total = query.count()
+    candidates = query.order_by(
+        MovieDiscoveryCandidate.last_seen_at.desc(), MovieDiscoveryCandidate.id.desc()
+    ).offset((page - 1) * page_size).limit(page_size).all()
+    runs = db.query(MovieDiscoveryRun).order_by(MovieDiscoveryRun.started_at.desc()).limit(20).all()
+    counts = dict(
+        db.query(MovieDiscoveryCandidate.status, func.count(MovieDiscoveryCandidate.id))
+        .group_by(MovieDiscoveryCandidate.status)
+        .all()
+    )
+    return {
+        **_pagination(total, page, page_size),
+        "timezone": settings.SITE_TIMEZONE,
+        "next_run": next_regular_discovery(),
+        "counts": counts,
+        "runs": [MovieDiscoveryService.serialize_run(item) for item in runs],
+        "items": [
+            {
+                "id": item.id,
+                "source": item.source,
+                "external_key": item.external_key,
+                "tmdb_id": item.tmdb_id,
+                "imdb_id": item.imdb_id,
+                "title": item.title,
+                "original_title": item.original_title,
+                "language": item.language,
+                "release_date": item.release_date,
+                "status": item.status,
+                "matched_movie_id": item.matched_movie_id,
+                "match_confidence": item.match_confidence,
+                "match_reason": item.match_reason,
+                "first_discovered_at": item.first_discovered_at,
+                "last_seen_at": item.last_seen_at,
+                "last_error": item.last_error,
+            }
+            for item in candidates
+        ],
+    }
+
+
+@router.patch("/discovery/{candidate_id}", dependencies=[Depends(require_same_origin)])
+def update_discovery_candidate(
+    candidate_id: int,
+    payload: DiscoveryCandidateAction,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    candidate = db.get(MovieDiscoveryCandidate, candidate_id)
+    if not candidate:
+        raise HTTPException(404, "Discovery candidate not found")
+    statuses = {
+        "ignore": "IGNORED",
+        "duplicate": "DUPLICATE",
+        "wrong_language": "WRONG_LANGUAGE",
+        "tv_series": "TV_SERIES",
+        "match_existing": "EXISTING",
+    }
+    if payload.action == "match_existing":
+        if not payload.movie_id or not db.get(Movie, payload.movie_id):
+            raise HTTPException(422, "A valid local movie ID is required")
+        candidate.matched_movie_id = payload.movie_id
+        candidate.match_confidence = 100
+        candidate.match_reason = "Administrator matched existing movie"
+    candidate.status = statuses[payload.action]
+    _audit(db, f"discovery_{payload.action}", "movie_discovery_candidate", candidate.id, candidate.title)
+    db.commit()
+    return {"id": candidate.id, "status": candidate.status, "matched_movie_id": candidate.matched_movie_id}
 
 
 @router.get("/requests")

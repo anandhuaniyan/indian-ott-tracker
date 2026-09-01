@@ -4,6 +4,7 @@ from app.models.enums import AvailabilityType
 from app.models.genre import Genre, movie_genres, tv_show_genres
 from app.models.language import Language, movie_languages, tv_show_languages
 from app.models.movie import Movie
+from app.models.discovery import MovieDiscoveryCandidate, MovieDiscoveryRun
 from app.models.movie_metadata import (
     AlternativeTitle,
     ExternalId,
@@ -40,6 +41,8 @@ __all__ = [
     "Genre",
     "Language",
     "Movie",
+    "MovieDiscoveryCandidate",
+    "MovieDiscoveryRun",
     "AlternativeTitle",
     "ExternalId",
     "Keyword",

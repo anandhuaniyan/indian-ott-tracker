@@ -37,8 +37,9 @@ class MovieMetadataService:
         self.tmdb = TMDbMovieService()
         self.artwork = ArtworkService()
 
-    def enrich_movie(self, movie: Movie) -> Movie:
-        payload = self.tmdb.get_rich_movie_details(movie.tmdb_id)
+    def enrich_movie(self, movie: Movie, payload: dict | None = None) -> Movie:
+        """Enrich a movie, reusing a verified TMDB payload when supplied."""
+        payload = payload or self.tmdb.get_rich_movie_details(movie.tmdb_id)
         self._update_movie_scalars(movie, payload)
         self._upsert_genres_and_languages(movie, payload)
         self._upsert_external_ids(movie, payload.get("external_ids", {}))

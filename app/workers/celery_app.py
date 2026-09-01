@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import task_failure, task_success
 import logging
 from app.config.settings import settings
@@ -12,9 +13,16 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 celery_app = Celery("indian_ott_tracker", broker=settings.REDIS_URL, backend=settings.REDIS_URL, include=["app.workers.tasks"])
 celery_app.conf.update(
     task_acks_late=True, task_default_retry_delay=60, task_serializer="json",
-    result_serializer="json", timezone="UTC", enable_utc=True,
+    result_serializer="json", timezone=settings.SITE_TIMEZONE, enable_utc=True,
     beat_schedule={
-        "tmdb-incremental-sync": {"task": "tmdb.incremental_sync", "schedule": 86400},
+        "movie-discovery-morning-evening": {
+            "task": "movies.discovery",
+            "schedule": crontab(minute=0, hour="8,20"),
+        },
+        "movie-discovery-weekly-reconciliation": {
+            "task": "movies.discovery_weekly",
+            "schedule": crontab(minute=30, hour=3, day_of_week="sun"),
+        },
         "metadata-enrichment": {"task": "tmdb.metadata_enrichment", "schedule": 900},
         "imdb-id-recovery": {"task": "ratings.imdb_id_backfill", "schedule": 18000},
         "imdb-rating-refresh": {"task": "ratings.imdb_refresh", "schedule": 21600},

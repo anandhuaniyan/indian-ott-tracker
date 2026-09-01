@@ -84,3 +84,24 @@ class TMDbMovieService:
                 "page": page,
             },
         )
+
+    def discover_movies_by_language_and_date_range(
+        self,
+        language: str,
+        start_date: date,
+        end_date: date,
+        page: int = 1,
+    ) -> dict:
+        """Discover movies in a bounded release window for one language."""
+        return self.client.get(
+            "/discover/movie",
+            **{
+                "with_original_language": language,
+                "primary_release_date.gte": start_date.isoformat(),
+                "primary_release_date.lte": end_date.isoformat(),
+                "sort_by": "primary_release_date.desc",
+                "include_adult": False,
+                "include_video": False,
+                "page": page,
+            },
+        )
