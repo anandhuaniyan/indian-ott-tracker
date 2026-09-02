@@ -41,6 +41,7 @@ from app.models.operations import (
     OttSourceRelease,
 )
 from app.models.ott_availability import OttAvailability
+from app.models.research import RequestCommunication, ResearchRun
 from app.models.ott_intelligence import (
     OttAvailabilityObservation,
     OttGoldSetCase,
@@ -54,6 +55,7 @@ from app.services.movie_requests import (
     EMAIL_KINDS,
     MovieRequestAutomationService,
     MovieRequestEmailService,
+    MovieRequestUpdateEmailService,
 )
 from app.services.ott_source_sync import OttSourceSyncService, SOURCES
 from app.services.ott.gold_set import OttGoldSetService
@@ -70,6 +72,9 @@ from app.services.release_status import (
 )
 from app.services.tmdb.movie_service import TMDbMovieService
 from app.services.movie_discovery import MovieDiscoveryService, next_regular_discovery
+from app.services.notification_service import NotificationService
+from app.services.rating_provider import IMDbRatingRefreshService
+from app.services.research import ResearchPipelineService
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
 REQUEST_STATUSES = {"PENDING", "REVIEWING", "FOUND", "ADDED", "REJECTED"}
@@ -150,6 +155,16 @@ class GoldSetUpdate(BaseModel):
     expected_state: str = Field(default="UNKNOWN", pattern="^(UNKNOWN|PLATFORM_ONLY|UPCOMING_CONFIRMED|RELEASED_CONFIRMED|NOT_FOUND)$")
     source_url: str | None = Field(default=None, max_length=1000, pattern=r"^https://")
     notes: str | None = Field(default=None, max_length=2000)
+
+
+class ResearchStart(BaseModel):
+    confirmed: bool = False
+    scope: str = Field(default="full", pattern="^(full|tmdb|imdb|ott|web)$")
+
+
+class DiscoveryStart(BaseModel):
+    deep: bool = False
+    confirmed: bool = False
 
 
 def _pagination(total: int, page: int, page_size: int):
@@ -679,6 +694,22 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
         for slot in ("MORNING", "EVENING")
     }
     discovery_stale = not last_discovery_success or last_discovery_success.completed_at < now - timedelta(hours=26)
+    def research_summary(manual: bool) -> dict:
+        query = db.query(ResearchRun).filter(ResearchRun.created_at >= site_day_start)
+        query = query.filter(
+            ResearchRun.trigger_type.in_(("ADMIN_MANUAL", "ADMIN_RETRY"))
+            if manual else
+            ~ResearchRun.trigger_type.in_(("ADMIN_MANUAL", "ADMIN_RETRY"))
+        )
+        rows = query.all()
+        return {
+            "movies_searched": len({row.movie_id for row in rows if row.movie_id}),
+            "ott_platforms_found": sum(bool(row.after_platform and row.after_platform != row.before_platform) for row in rows),
+            "ott_dates_found": sum(bool(row.after_release_date and row.after_release_date != row.before_release_date) for row in rows),
+            "no_change": sum(row.result == "NO_CHANGE" for row in rows),
+            "needs_review": sum(row.result in {"NEEDS_REVIEW", "CONFLICTING"} for row in rows),
+            "failed": sum(row.status == "FAILED" or row.result == "FAILED" for row in rows),
+        }
     failed_jobs = db.query(OperationState).filter(OperationState.status == "FAILED").count()
     recent_activity = [
         {
@@ -808,6 +839,13 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
         "recent_activity": sorted(recent_activity, key=lambda item: item["timestamp"], reverse=True)[:12],
         "sources": _source_health(db),
         "email": emails,
+        "research": {
+            "automated": research_summary(False),
+            "manual": research_summary(True),
+            "currently_running": [ResearchPipelineService.serialize(row) for row in db.query(ResearchRun).filter(ResearchRun.status.in_(("QUEUED", "RUNNING"))).order_by(ResearchRun.created_at.desc()).limit(10)],
+            "recently_completed": [ResearchPipelineService.serialize(row) for row in db.query(ResearchRun).filter(ResearchRun.status == "COMPLETE").order_by(ResearchRun.completed_at.desc()).limit(10)],
+            "recently_failed": [ResearchPipelineService.serialize(row) for row in db.query(ResearchRun).filter(ResearchRun.status == "FAILED").order_by(ResearchRun.completed_at.desc()).limit(10)],
+        },
         "recent_notifications": [
             {
                 "id": x.id,
@@ -916,6 +954,41 @@ def update_discovery_candidate(
     _audit(db, f"discovery_{payload.action}", "movie_discovery_candidate", candidate.id, candidate.title)
     db.commit()
     return {"id": candidate.id, "status": candidate.status, "matched_movie_id": candidate.matched_movie_id}
+
+
+@router.post("/discovery/run", dependencies=[Depends(require_same_origin)])
+def run_discovery_now(
+    payload: DiscoveryStart,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    if not payload.confirmed:
+        raise HTTPException(409, "Confirm the discovery run before starting it")
+    active = db.query(MovieDiscoveryRun).filter(MovieDiscoveryRun.status == "RUNNING").first()
+    if active:
+        raise HTTPException(409, f"Discovery run {active.id} is already running")
+    service = ResearchPipelineService(db)
+    trigger = "DISCOVERY_DEEP" if payload.deep else "DISCOVERY_REGULAR"
+    run, created = service.create_run(
+        trigger_type=trigger,
+        initiated_by="admin",
+        category="DISCOVERY",
+        active_key="discovery:deep" if payload.deep else "discovery:regular",
+    )
+    if not created:
+        raise HTTPException(409, f"Research already running: {run.run_id}")
+    from app.workers.celery_app import celery_app
+    try:
+        queued = celery_app.send_task(
+            "movies.discovery_manual",
+            kwargs={"deep": payload.deep, "research_run_id": run.run_id},
+        )
+    except Exception as exc:
+        service.fail_queued_run(run.run_id, "queue", exc)
+        raise HTTPException(503, f"Could not queue discovery: {sanitize_error(exc)}") from exc
+    _audit(db, "discovery_run_queued", "research_run", run.run_id, trigger)
+    db.commit()
+    return {"queued": True, "run_id": run.run_id, "task_id": queued.id, "trigger_type": trigger}
 
 
 @router.get("/requests")
@@ -1058,6 +1131,32 @@ def _request(item: MovieRequest, db: Session | None = None, rich: bool = False):
     }
     if not (db and rich):
         return result
+    result["research_history"] = [
+        ResearchPipelineService.serialize(row)
+        for row in db.query(ResearchRun)
+        .filter(ResearchRun.request_id == item.request_id)
+        .order_by(ResearchRun.created_at.desc())
+        .limit(25)
+        .all()
+    ]
+    result["notification_history"] = [
+        {
+            "event_type": row.event_type,
+            "channel": row.channel,
+            "status": row.status,
+            "attempt_count": row.attempt_count,
+            "last_attempt_at": row.last_attempt_at,
+            "sent_at": row.sent_at,
+            "last_error": row.last_error,
+        }
+        for row in db.query(RequestCommunication)
+        .filter_by(movie_request_id=item.id)
+        .order_by(RequestCommunication.created_at.desc())
+        .all()
+    ]
+    result["user_email_history"] = [
+        row for row in result["notification_history"] if row["channel"] == "email"
+    ]
     movie = None
     if item.local_movie_id:
         movie = (
@@ -1264,6 +1363,80 @@ def retry_request_email(
     _audit(db, "request_email_retried", "movie_request", request_id, f"{kind} email: {result.get('status', 'attempted')}")
     db.commit()
     return result | {"request": _request(item)}
+
+
+@router.post(
+    "/requests/{request_id}/notifications/{channel}/retry",
+    dependencies=[Depends(require_same_origin)],
+)
+def retry_request_notification(
+    request_id: str,
+    channel: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    if channel not in {"discord", "telegram"}:
+        raise HTTPException(422, "Unknown notification channel")
+    item = db.query(MovieRequest).filter_by(request_id=request_id).first()
+    if not item:
+        raise HTTPException(404, "Request not found")
+    limit(request, "movie-request-notification-retry", 10, 3600, identity=f"{request_id}:{channel}")
+    canonical = db.query(OttAvailability).filter_by(movie_id=item.local_movie_id, country="IN").order_by(OttAvailability.confidence.desc()).first() if item.local_movie_id else None
+    message = (
+        "NEW MOVIE REQUEST\n"
+        f"Request ID: {item.request_id}\nMovie Name: {item.verified_title or item.movie_name}\n"
+        f"Year: {item.release_year or 'Unknown'}\nLanguage: {item.verified_language_name or item.verified_original_language or item.language or 'Unknown'}\n"
+        f"TMDB ID: {item.external_movie_id or 'Unknown'}\nTMDB Release Date: {item.verified_release_date or 'Unknown'}\n"
+        f"OTT Platform: {canonical.provider if canonical else 'Researching'}\n"
+        f"OTT Release Date: {canonical.ott_release_date if canonical and canonical.ott_release_date else 'Researching'}\n"
+        f"Requester Email: {item.email}\nCurrent Status: {item.status}\n"
+        f"Admin: {settings.SITE_URL.rstrip('/')}/admin/requests/{item.request_id}"
+    )
+    now = datetime.now(timezone.utc)
+    record = db.query(RequestCommunication).filter_by(movie_request_id=item.id, event_type="ADMIN_RESEND", channel=channel).first()
+    if not record:
+        record = RequestCommunication(movie_request_id=item.id, event_type="ADMIN_RESEND", channel=channel)
+        db.add(record)
+    record.attempt_count = (record.attempt_count or 0) + 1
+    record.last_attempt_at = now
+    sent = NotificationService(db).notify(
+        message, "info", f"request-resend:{item.request_id}:{channel}:{now.isoformat()}",
+        cooldown_minutes=0, channels=(channel,),
+    )
+    record = db.query(RequestCommunication).filter_by(movie_request_id=item.id, event_type="ADMIN_RESEND", channel=channel).first() or record
+    record.status = "SENT" if sent else "NOT_CONFIGURED_OR_FAILED"
+    record.sent_at = now if sent else record.sent_at
+    record.last_error = None if sent else f"{channel.title()} is not configured or delivery failed"
+    _audit(db, "request_notification_retried", "movie_request", request_id, f"{channel}: {record.status}")
+    db.commit()
+    return {"channel": channel, "status": record.status, "sent": sent}
+
+
+@router.post(
+    "/requests/{request_id}/emails/update/{event_type}",
+    dependencies=[Depends(require_same_origin)],
+)
+def send_requester_update(
+    request_id: str,
+    event_type: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    item = db.query(MovieRequest).filter_by(request_id=request_id).first()
+    if not item:
+        raise HTTPException(404, "Request not found")
+    event_type = event_type.upper()
+    if event_type not in MovieRequestUpdateEmailService.EVENTS:
+        raise HTTPException(422, "Unknown requester update")
+    limit(request, "movie-request-update-email", 6, 3600, identity=f"{request_id}:{event_type}")
+    result = MovieRequestUpdateEmailService(db).send(item, event_type)
+    if result.get("skipped") == "already_sent":
+        raise HTTPException(409, "This update email was already sent")
+    _audit(db, "requester_update_sent", "movie_request", request_id, f"{event_type}: {result['status']}")
+    db.commit()
+    return result
 
 
 @router.get("/comments")
@@ -2059,6 +2232,216 @@ def research_movie_ott(
     return {"queued": True, "movie_id": movie_id, "status": latest.status if latest else "QUEUED"}
 
 
+@router.get("/research/preview")
+def research_preview(
+    batch_size: int | None = Query(default=None, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    return ResearchPipelineService(db).queue_preview(batch_size)
+
+
+@router.post("/research/run", dependencies=[Depends(require_same_origin)])
+def run_research_queue(
+    payload: ResearchStart,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    if not payload.confirmed:
+        raise HTTPException(409, "Confirm the eligible queue before starting research")
+    service = ResearchPipelineService(db)
+    run, created = service.create_run(
+        trigger_type="ADMIN_MANUAL",
+        initiated_by="admin",
+        category="OTT",
+        active_key="manual:eligible_ott_queue",
+    )
+    if not created:
+        raise HTTPException(409, detail={"message": "Research already running", "run_id": run.run_id})
+    from app.workers.celery_app import celery_app
+    try:
+        queued = celery_app.send_task("research.eligible_queue", args=[run.run_id])
+    except Exception as exc:
+        service.fail_queued_run(run.run_id, "queue", exc)
+        raise HTTPException(503, f"Could not queue research: {sanitize_error(exc)}") from exc
+    _audit(db, "research_queue_started", "research_run", run.run_id)
+    db.commit()
+    return {"queued": True, "run_id": run.run_id, "task_id": queued.id}
+
+
+@router.post("/research/movies/{movie_id}", dependencies=[Depends(require_same_origin)])
+def research_selected_movie(
+    movie_id: int,
+    payload: ResearchStart,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    service = ResearchPipelineService(db)
+    try:
+        run, created = service.create_run(
+            movie_id=movie_id,
+            trigger_type="ADMIN_MANUAL",
+            initiated_by="admin",
+            category=payload.scope.upper(),
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if not created:
+        raise HTTPException(409, detail={"message": "Research already running", "run_id": run.run_id})
+    from app.workers.celery_app import celery_app
+    try:
+        queued = celery_app.send_task("research.movie", args=[run.run_id, payload.scope])
+    except Exception as exc:
+        service.fail_queued_run(run.run_id, "queue", exc)
+        raise HTTPException(503, f"Could not queue research: {sanitize_error(exc)}") from exc
+    _audit(db, "movie_research_started", "research_run", run.run_id, f"movie={movie_id}; scope={payload.scope}")
+    db.commit()
+    return {"queued": True, "run_id": run.run_id, "task_id": queued.id}
+
+
+@router.post("/research/requests/{request_id}", dependencies=[Depends(require_same_origin)])
+def research_selected_request(
+    request_id: str,
+    payload: ResearchStart,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    service = ResearchPipelineService(db)
+    try:
+        item, movie, _ = service.prepare_request(request_id)
+        run, created = service.create_run(
+            movie_id=movie.id,
+            request_id=item.request_id,
+            trigger_type="ADMIN_MANUAL",
+            initiated_by="admin",
+            category=payload.scope.upper(),
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(502, f"Movie identity preparation failed: {sanitize_error(exc)}") from exc
+    if not created:
+        raise HTTPException(409, detail={"message": "Research already running", "run_id": run.run_id})
+    from app.workers.celery_app import celery_app
+    try:
+        queued = celery_app.send_task("research.movie", args=[run.run_id, payload.scope])
+    except Exception as exc:
+        service.fail_queued_run(run.run_id, "queue", exc)
+        raise HTTPException(503, f"Could not queue research: {sanitize_error(exc)}") from exc
+    _audit(db, "request_research_started", "research_run", run.run_id, request_id)
+    db.commit()
+    return {"queued": True, "run_id": run.run_id, "movie_id": movie.id, "task_id": queued.id}
+
+
+@router.get("/research-history")
+def research_history(
+    tab: str = Query("all", pattern="^(all|automated|manual|movie_requests|failed|needs_review)$"),
+    category: str | None = None,
+    result: str | None = None,
+    language: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    query = db.query(ResearchRun, Movie).outerjoin(Movie, Movie.id == ResearchRun.movie_id)
+    if tab == "automated":
+        query = query.filter(ResearchRun.trigger_type == "AUTOMATED_SCHEDULE")
+    elif tab == "manual":
+        query = query.filter(ResearchRun.trigger_type.in_(("ADMIN_MANUAL", "ADMIN_RETRY")))
+    elif tab == "movie_requests":
+        query = query.filter(ResearchRun.request_id.is_not(None))
+    elif tab == "failed":
+        query = query.filter(or_(ResearchRun.status == "FAILED", ResearchRun.result == "FAILED"))
+    elif tab == "needs_review":
+        query = query.filter(ResearchRun.result.in_(("NEEDS_REVIEW", "CONFLICTING")))
+    if category:
+        query = query.filter(ResearchRun.category == category.upper())
+    if result:
+        query = query.filter(ResearchRun.result == result.upper())
+    if language:
+        query = query.filter(Movie.original_language == language)
+    if date_from:
+        query = query.filter(ResearchRun.created_at >= datetime.combine(date_from, time.min, tzinfo=timezone.utc))
+    if date_to:
+        query = query.filter(ResearchRun.created_at < datetime.combine(date_to + timedelta(days=1), time.min, tzinfo=timezone.utc))
+    total = query.count()
+    rows = query.order_by(ResearchRun.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    items = []
+    for run, movie in rows:
+        item = ResearchPipelineService.serialize(run)
+        imdb_id = db.query(ExternalId.external_id).filter(
+            ExternalId.movie_id == run.movie_id,
+            func.lower(ExternalId.provider) == "imdb",
+        ).scalar() if run.movie_id else None
+        item["movie"] = ({
+            "title": movie.title,
+            "poster_path": movie.poster_path,
+            "year": movie.release_date.year if movie.release_date else None,
+            "language": movie.original_language,
+            "tmdb_id": movie.tmdb_id,
+            "imdb_id": imdb_id,
+        } if movie else None)
+        items.append(item)
+    return _pagination(total, page, page_size) | {"items": items}
+
+
+@router.get("/research-history/{run_id}")
+def research_history_detail(
+    run_id: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    run = db.query(ResearchRun).filter_by(run_id=run_id).first()
+    if not run:
+        raise HTTPException(404, "Research run not found")
+    result = ResearchPipelineService.serialize(run)
+    movie = db.get(Movie, run.movie_id) if run.movie_id else None
+    imdb_id = db.query(ExternalId.external_id).filter(
+        ExternalId.movie_id == run.movie_id,
+        func.lower(ExternalId.provider) == "imdb",
+    ).scalar() if run.movie_id else None
+    result["movie"] = ({
+        "id": movie.id,
+        "title": movie.title,
+        "original_title": movie.original_title,
+        "poster_path": movie.poster_path,
+        "language": movie.original_language,
+        "tmdb_id": movie.tmdb_id,
+        "imdb_id": imdb_id,
+        "theatrical_release_date": movie.theatrical_release_date or movie.release_date,
+    } if movie else None)
+    evidence = db.query(OttEvidence).filter_by(research_run_id=run_id).order_by(OttEvidence.id).all()
+    result["evidence"] = [{
+        "id": row.id,
+        "source_name": row.source_name,
+        "source_title": row.source_title,
+        "source_url": row.source_url,
+        "published_date": row.source_published_at,
+        "checked_date": row.inspected_at or row.last_checked,
+        "platform": row.platform,
+        "ott_date": row.release_date,
+        "confidence": row.confidence,
+        "summary": row.summary,
+        "disposition": "REJECTED" if row.rejected_at else "CONFLICTING" if row.status == "CONFLICTING" else "SUPERSEDED" if row.superseded_by_id else "SUPPORTING" if row.status == "CONFIRMED" else row.status,
+    } for row in evidence]
+    decisions = db.query(OttReconciliationDecision).filter_by(movie_id=run.movie_id).filter(
+        OttReconciliationDecision.decided_at >= (run.started_at or run.created_at)
+    ).order_by(OttReconciliationDecision.decided_at).all() if run.movie_id else []
+    result["decisions"] = [{
+        "state": row.state,
+        "platform": row.platform,
+        "release_date": row.release_date,
+        "reason": row.reason,
+        "supporting_evidence_ids": row.supporting_evidence_ids,
+        "conflicting_evidence_ids": row.conflicting_evidence_ids,
+        "confidence": max(row.platform_confidence or 0, row.date_confidence or 0),
+    } for row in decisions]
+    return result
+
+
 def _queue_deep_repair(movie: Movie) -> dict:
     from app.workers.celery_app import celery_app
 
@@ -2757,6 +3140,8 @@ def system_health(db: Session = Depends(get_db), _: None = Depends(require_admin
         worker_status = "DOWN" if redis_status == "DOWN" else "DEGRADED"
     recent_success = db.query(func.max(OperationState.last_success_at)).scalar()
     scheduler_status = "HEALTHY" if recent_success and recent_success >= datetime.now(timezone.utc) - timedelta(days=2) else "DEGRADED"
+    omdb = IMDbRatingRefreshService(db).health()
+    discord = NotificationService.discord_method()
     return {
         "services": [
             {"name": "API", "status": "HEALTHY", "last_heartbeat": datetime.now(timezone.utc)},
@@ -2765,7 +3150,61 @@ def system_health(db: Session = Depends(get_db), _: None = Depends(require_admin
             {"name": "Celery worker", "status": worker_status, "last_heartbeat": worker_heartbeat, "queue_depth": queue_depth},
             {"name": "Scheduler", "status": scheduler_status, "last_heartbeat": recent_success},
             {"name": "Frontend/backend connectivity", "status": "HEALTHY", "last_heartbeat": datetime.now(timezone.utc)},
-        ]
+        ],
+        "providers": [
+            {
+                "name": "OMDb",
+                "configured": omdb["configured"],
+                "status": omdb["status"],
+                "missing": omdb["missing"],
+                "last_successful_request": omdb["last_success_at"],
+                "last_failed_request": omdb["last_failure_at"],
+                "last_error": omdb["last_error"],
+                "last_request_at": omdb["last_request_at"],
+                "last_imdb_rating_status": omdb["last_rating_status"],
+            },
+            {
+                "name": "Discord",
+                "configured": discord["configured"],
+                "status": "READY" if discord["configured"] else "NOT_CONFIGURED",
+                "notification_method": discord["method"],
+            },
+        ],
+    }
+
+
+@router.post("/system-health/omdb/test", dependencies=[Depends(require_same_origin)])
+def test_omdb_provider(
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    service = IMDbRatingRefreshService(db)
+    configuration = service.configuration_status()
+    if not configuration["configured"]:
+        raise HTTPException(409, detail={"message": "OMDb is not configured", "missing": configuration["missing"]})
+    movie_id = db.query(ExternalId.movie_id).filter(
+        func.lower(ExternalId.provider) == "imdb",
+        ExternalId.external_id.like("tt%"),
+    ).order_by(ExternalId.movie_id).scalar()
+    if not movie_id:
+        raise HTTPException(409, "No known IMDb ID is available for a safe test")
+    result = service.refresh_movie(movie_id)
+    _audit(db, "omdb_provider_tested", "provider", "omdb", result.get("status"))
+    db.commit()
+    failed = result.get("status") in {"TEMPORARY_FAILURE", "BLOCKED_BY_QUOTA", "INVALID_ID"}
+    if failed:
+        raise HTTPException(502, detail={
+            "connection": "failed",
+            "response": "invalid",
+            "status_category": result.get("status"),
+            "error": result.get("last_error"),
+        })
+    return {
+        "connection": "successful",
+        "response": "valid",
+        "status_category": result.get("status"),
+        "movie_id": movie_id,
+        "rating_updated": result.get("updated", False),
     }
 
 

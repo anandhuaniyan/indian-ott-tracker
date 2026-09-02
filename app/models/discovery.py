@@ -31,6 +31,9 @@ class MovieDiscoveryRun(TimestampMixin, Base):
     language_stats: Mapped[dict | None] = mapped_column(JSON)
     source_stats: Mapped[dict | None] = mapped_column(JSON)
     last_error: Mapped[str | None] = mapped_column(Text)
+    trigger_type: Mapped[str] = mapped_column(String(40), nullable=False, default="AUTOMATED_SCHEDULE", index=True)
+    initiated_by: Mapped[str] = mapped_column(String(100), nullable=False, default="celery:beat", index=True)
+    research_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
 
 
 class MovieDiscoveryCandidate(TimestampMixin, Base):

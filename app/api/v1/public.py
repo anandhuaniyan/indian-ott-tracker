@@ -284,7 +284,7 @@ def _queue_on_demand_repair(
     try:
         from app.workers.celery_app import celery_app
 
-        celery_app.send_task("repair.movie", args=[movie.id])
+        celery_app.send_task("repair.movie", args=[movie.id], ignore_result=True)
         return True
     except Exception as exc:
         state = db.query(OperationState).filter_by(name=name).first()

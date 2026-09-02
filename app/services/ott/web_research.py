@@ -70,7 +70,7 @@ class WebOttResearchService:
         )
         return rows
 
-    def _save_result(self, movie: Movie, result: dict) -> int:
+    def _save_result(self, movie: Movie, result: dict, research_run_id: str | None = None) -> int:
         """Inspect, identity-check and persist one source; returns evidence count."""
         inspected = inspect_source(movie, result)
         if not inspected or inspected.get("country") != "IN":
@@ -106,10 +106,40 @@ class WebOttResearchService:
             availability_type="SUBSCRIPTION",
             summary=(inspected.get("evidence_summary") or "")[:1000],
             allow_publication=True,
+            research_run_id=research_run_id,
         )
         return int(bool(evidence))
 
-    def run(self, limit: int = 30) -> dict:
+    def research_movie(self, movie_id: int, research_run_id: str | None = None, max_queries: int = 3) -> dict:
+        """Research one selected movie and return auditable query/source facts."""
+        movie = self.db.get(Movie, movie_id)
+        if not movie:
+            raise LookupError("Movie not found")
+        report = {
+            "movie_id": movie_id,
+            "provider": type(self.provider).__name__,
+            "configured": bool(getattr(self.provider, "configured", False)),
+            "queries": [],
+            "sources": [],
+            "results": 0,
+            "evidence_created": 0,
+        }
+        if not report["configured"]:
+            return report | {"status": "NOT_CONFIGURED"}
+        results = self.provider.search(movie, max_queries=max_queries)
+        report["results"] = len(results)
+        for result in results[:8]:
+            query = result.get("query")
+            if query and query not in report["queries"]:
+                report["queries"].append(query)
+            url = result.get("url")
+            if url:
+                report["sources"].append({"url": url, "title": result.get("title"), "source": result.get("source_name")})
+            report["evidence_created"] += self._save_result(movie, result, research_run_id)
+        report["status"] = "COMPLETE"
+        return report
+
+    def run(self, limit: int = 30, research_run_id: str | None = None) -> dict:
         state, now = self._state(), datetime.now(timezone.utc)
         before = self.targets(limit=500)
         report = {"operation": self.operation, "target_movies": min(len(before), limit), "researched": 0, "evidence_created": 0, "technical_failures": 0, "not_found": 0, "platform_only": 0, "date_confirmed": 0, "skipped_locked": 0}
@@ -125,7 +155,7 @@ class WebOttResearchService:
                 results = self.provider.search(movie, max_queries=3)
                 report["researched"] += 1
                 for result in results[:8]:
-                    report["evidence_created"] += self._save_result(movie, result)
+                    report["evidence_created"] += self._save_result(movie, result, research_run_id)
                 canonical = self.db.query(OttAvailability).filter_by(movie_id=movie.id, country="IN").first()
                 if canonical and canonical.ott_release_date and canonical.verification_status == "CONFIRMED": report["date_confirmed"] += 1
                 elif canonical and canonical.provider: report["platform_only"] += 1

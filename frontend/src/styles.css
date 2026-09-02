@@ -1627,10 +1627,49 @@ th {
 .admin-checklist .missing { color: #ff9ba0; }
 .pre-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 .admin-movie-grid,
-.admin-unmatched-list {
+.admin-unmatched-list,
+.admin-research-grid {
   display: grid;
   gap: 1rem;
   min-width: 0;
+}
+.admin-research-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+}
+.admin-research-grid > article {
+  min-width: 0;
+  padding: 1rem;
+  border: 1px solid #30333f;
+  border-radius: 0.65rem;
+  background: #191b22;
+  overflow-wrap: anywhere;
+}
+.admin-research-grid > article > header,
+.admin-research-grid > article > header > div {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.7rem;
+  min-width: 0;
+}
+.admin-research-grid > article > header img {
+  width: 48px;
+  aspect-ratio: 2 / 3;
+  object-fit: cover;
+  border-radius: 0.35rem;
+}
+.admin-research-grid h2 { margin: 0; font-size: 1.05rem; }
+.research-before-after {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 1rem;
+}
+.research-before-after article {
+  min-width: 0;
+  padding: 0.8rem;
+  border: 1px solid #30333f;
+  border-radius: 0.5rem;
+  overflow-wrap: anywhere;
 }
 .admin-movie-grid > article {
   display: grid;

@@ -166,6 +166,7 @@ class OttEvidence(TimestampMixin, Base):
     superseded_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("ott_evidence.id", ondelete="SET NULL"), index=True
     )
+    research_run_id: Mapped[str | None] = mapped_column(String(36), index=True)
 
 
 class DataQualityIssue(TimestampMixin, Base):

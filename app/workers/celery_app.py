@@ -9,6 +9,21 @@ from app.core.secrets import sanitize_error
 # be query parameters, so only warnings/errors are allowed into worker logs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+_omdb_missing = [
+    name for name, present in (
+        ("IMDB_RATING_PROVIDER", settings.IMDB_RATING_PROVIDER.strip().lower() == "omdb"),
+        ("IMDB_RATING_API_URL", bool(settings.IMDB_RATING_API_URL)),
+        ("IMDB_RATING_API_KEY", bool(settings.IMDB_RATING_API_KEY)),
+    ) if not present
+]
+_startup_log = logging.getLogger(__name__)
+if _omdb_missing:
+    _startup_log.warning(
+        "OMDb worker configuration: NOT_CONFIGURED; missing=%s",
+        ",".join(_omdb_missing),
+    )
+else:
+    _startup_log.info("OMDb worker configuration: READY")
 
 celery_app = Celery("indian_ott_tracker", broker=settings.REDIS_URL, backend=settings.REDIS_URL, include=["app.workers.tasks"])
 celery_app.conf.update(
@@ -51,6 +66,7 @@ def notify_task_failure(sender=None, exception=None, **_):
     """Persist and fan out important worker failures without affecting task handling."""
     from app.database.connection import SessionLocal
     from app.models.operations import OperationState
+    from app.models.research import ResearchRun
     from app.services.notification_service import NotificationService
     from datetime import datetime, timezone
     db = SessionLocal()
@@ -60,6 +76,24 @@ def notify_task_failure(sender=None, exception=None, **_):
         if not state: state = OperationState(name=name); db.add(state)
         safe_error = sanitize_error(exception)
         state.last_failure_at = datetime.now(timezone.utc); state.last_error = safe_error
+        task_args = _.get("args") or ()
+        task_kwargs = _.get("kwargs") or {}
+        run_id = (
+            task_args[0]
+            if name in {"research.movie", "research.eligible_queue"} and task_args
+            else task_kwargs.get("research_run_id")
+            if name == "movies.discovery_manual"
+            else None
+        )
+        if run_id:
+            run = db.query(ResearchRun).filter_by(run_id=str(run_id)).first()
+            if run and run.status not in {"COMPLETE", "FAILED"}:
+                run.status, run.result, run.active_key = "FAILED", "FAILED", None
+                run.completed_at = datetime.now(timezone.utc)
+                run.errors = [
+                    *(run.errors or []),
+                    {"step": "worker", "error": safe_error},
+                ]
         db.commit()
         NotificationService(db).notify(f"Background job failed: {name}: {safe_error[:500]}", "high", f"task-failure:{name}", 60)
     finally:

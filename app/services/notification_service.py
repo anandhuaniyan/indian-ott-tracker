@@ -4,6 +4,7 @@ import hashlib, httpx, logging, smtplib
 from email.message import EmailMessage
 from sqlalchemy.orm import Session
 from app.config.settings import settings
+from app.core.secrets import sanitize_error
 from app.models.operations import NotificationLog
 
 class NotificationService:
@@ -22,15 +23,33 @@ class NotificationService:
                 continue
             try:
                 sent = bool(send(message)); deliveries.append((channel, sent))
-            except Exception:
-                logging.getLogger(__name__).exception("Notification channel failed: %s", channel)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Notification channel failed: %s: %s", channel, sanitize_error(exc)
+                )
                 deliveries.append((channel, False))
         for channel, sent in deliveries:
             self.db.add(NotificationLog(fingerprint=fingerprint, channel=channel, severity=severity, message=message, last_notified_at=now if sent else None))
         self.db.commit(); return any(sent for _, sent in deliveries)
     def _discord(self, message):
+        if settings.DISCORD_BOT_ENDPOINT:
+            headers = {"Authorization": f"Bearer {settings.DISCORD_BOT_SHARED_SECRET}"} if settings.DISCORD_BOT_SHARED_SECRET else {}
+            httpx.post(
+                settings.DISCORD_BOT_ENDPOINT,
+                json={"content": message[:1900], "source": "indian-ott-tracker"},
+                headers=headers,
+                timeout=10,
+            ).raise_for_status()
+            return True
         if not settings.DISCORD_WEBHOOK_URL: return False
         httpx.post(settings.DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10).raise_for_status(); return True
+    @staticmethod
+    def discord_method():
+        if settings.DISCORD_BOT_ENDPOINT:
+            return {"method": "EXISTING_BOT_ADAPTER", "configured": True}
+        if settings.DISCORD_WEBHOOK_URL:
+            return {"method": "WEBHOOK_FALLBACK", "configured": True}
+        return {"method": "NOT_CONFIGURED", "configured": False}
     def _telegram(self, message):
         if not (settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID): return False
         httpx.post(f"https://api.telegram.org/bot{settings.TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": settings.TELEGRAM_CHAT_ID, "text": message}, timeout=10).raise_for_status(); return True

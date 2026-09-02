@@ -10,7 +10,9 @@ Celery registers and Beat schedules: twice-daily movie discovery, bounded metada
 
 Data, metadata and image tasks persist cursors. Celery success/failure signals update job state for every task; failure signals also dispatch an administrator notification without altering retry behavior. Tasks acknowledge late and external/operational tasks use bounded batches and retry backoff.
 
-`ratings.imdb_refresh` runs every six hours in batches of 25. It prioritizes missing ratings, then recently released and popular movies; recent scores become due daily, popular scores every three days and older scores every 30 days. It runs only when the configured lawful rating provider credentials are present and records progress in `operation_states`.
+Scheduled movie discovery, IMDb refresh, OTT verification and OTT web research also create durable `research_runs` with `trigger_type=AUTOMATED_SCHEDULE` and `initiated_by=celery:beat`. Admin-triggered regular/deep discovery uses the same `MovieDiscoveryService`, records its parent research run, and never restarts an existing checkpointed catalogue backfill. The unified `research.movie`, `research.eligible_queue`, and `research.movie_request` tasks reuse the existing metadata, rating, OTT provider, web evidence, reconciliation, data-health and notification services rather than maintaining a second research engine.
+
+`ratings.imdb_refresh` runs every six hours in batches of 25. It prioritizes missing ratings, then recently released and popular movies; recent scores become due daily, popular scores every three days and older scores every 30 days. It runs only when the configured lawful rating provider credentials are present and records progress in `operation_states` and Research History. A targeted Admin IMDb refresh looks up the movie by its stored IMDb ID, applies the same `N/A`/retry lifecycle, and cannot block TMDB or OTT work.
 
 Inspect registration with `docker compose exec worker celery -A app.workers.celery_app.celery_app inspect registered` and Beat logs with `docker compose logs beat`.
 

@@ -120,7 +120,7 @@ class OTTIntelligenceService:
             )
             self.db.commit()
 
-    def _persist(self, movie: Movie, item: NormalizedOttEvidence):
+    def _persist(self, movie: Movie, item: NormalizedOttEvidence, research_run_id: str | None = None):
         match = self.matcher.match(item)
         if match.status != "MATCHED" or not match.movie or match.movie.id != movie.id:
             return None
@@ -147,12 +147,13 @@ class OTTIntelligenceService:
             verification_method=item.verification_method,
             observed_at=item.observed_at,
             allow_publication=settings.OTT_INTELLIGENCE_AUTO_PUBLICATION_ENABLED,
+            research_run_id=research_run_id,
         )
         self._observe(movie.id, item, evidence.id)
         self.db.commit()
         return evidence
 
-    def refresh_movie(self, movie_id: int, provider_names: set[str] | None = None) -> dict:
+    def refresh_movie(self, movie_id: int, provider_names: set[str] | None = None, research_run_id: str | None = None) -> dict:
         movie = self._movie(movie_id)
         if not movie:
             raise LookupError("Movie not found")
@@ -179,7 +180,7 @@ class OTTIntelligenceService:
             except Exception as exc:
                 report["providers"][provider.name] = {"status": "DOWN", "error": sanitize_error(exc), "evidence": 0}
                 continue
-            saved = sum(1 for item in items if self._persist(movie, item))
+            saved = sum(1 for item in items if self._persist(movie, item, research_run_id))
             if not items:
                 self._observe_absent(movie.id, provider.name)
             report["providers"][provider.name] = {"status": "HEALTHY", "source": source, "evidence": saved}

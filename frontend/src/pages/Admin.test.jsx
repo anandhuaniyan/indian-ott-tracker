@@ -3,7 +3,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
-import { Comments, Dashboard, DataHealth, Discovery, Jobs, Movies, OttGoldSet, OttResearch, RequestDetail, Requests, Sources } from "./Admin";
+import { Comments, Dashboard, DataHealth, Discovery, Jobs, Movies, OttGoldSet, OttResearch, ResearchHistory, ResearchRunDetail, RequestDetail, Requests, Sources } from "./Admin";
 import { Request } from "./Public";
 
 afterEach(() => {
@@ -266,15 +266,15 @@ it("renders complete request detail and queues existing workflows", async () => 
   expect(await screen.findByRole("heading", { name: "Detailed Film" })).toBeInTheDocument();
   expect(screen.getByText("viewer@example.test")).toHaveAttribute("href", "mailto:viewer@example.test");
   expect(screen.getByText(/OTT date/i)).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Research OTT now" }));
-  await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/movies/1/research-ott"), expect.objectContaining({ method: "POST" })));
+  fireEvent.click(screen.getByRole("button", { name: "Refresh OTT" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/research/requests/REQ-DETAIL"), expect.objectContaining({ method: "POST" })));
 });
 
 it("renders paginated admin movie operations", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ total: 1, page: 1, pages: 1, items: [{ id: 1, tmdb_id: 101, title: "Admin Film", poster_path: "/poster.jpg", year: 2026, language: "ml", metadata_health: "INCOMPLETE", metadata_missing: ["runtime"], image_health: "HEALTHY", trailer: false }] }) }));
   render(<MemoryRouter><Movies /></MemoryRouter>);
   expect(await screen.findByRole("heading", { name: "Admin Film" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Research OTT" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "RESEARCH THIS MOVIE" })).toBeInTheDocument();
   expect(screen.getByText("Missing: runtime")).toBeInTheDocument();
 });
 
@@ -284,4 +284,21 @@ it("shows isolated source health and unmatched adapter releases", async () => {
   expect(await screen.findByRole("heading", { name: "OTTplay" })).toBeInTheDocument();
   expect(await screen.findByRole("heading", { name: "Unmatched Film" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Run sync" })).toBeDisabled();
+});
+
+it("renders responsive manual and automated research history cards", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ total: 1, page: 1, pages: 1, items: [{ run_id: "run-1", category: "OTT", trigger_type: "ADMIN_MANUAL", status: "COMPLETE", result: "NO_CHANGE", created_at: "2026-09-02T10:00:00Z", started_at: "2026-09-02T10:00:00Z", completed_at: "2026-09-02T10:01:00Z", evidence_created: 0, confidence: null, before: { platform: null, release_date: null }, after: { platform: null, release_date: null }, movie: { title: "Research Film", year: 2026, language: "ml", tmdb_id: 101, imdb_id: "tt1234567" } }] }) }));
+  render(<MemoryRouter><ResearchHistory /></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "Research Film" })).toBeInTheDocument();
+  expect(screen.getByText("NO CHANGE")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "View details" })).toHaveAttribute("href", "/admin/research-history/run-1");
+});
+
+it("renders research run before-after, queries, sources, decisions, and errors", async () => {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ run_id: "run-1", category: "OTT", trigger_type: "ADMIN_MANUAL", initiated_by: "admin", status: "COMPLETE", result: "UPDATED", started_at: "2026-09-02T10:00:00Z", completed_at: "2026-09-02T10:01:00Z", providers_attempted: ["TMDB", "OMDb"], queries_attempted: ["Research Film OTT release date"], database_changes: ["platform"], notification_results: { admin_chat: "SENT" }, errors: [], before: { platform: null, release_date: null, imdb_rating: null }, after: { platform: "Netflix", release_date: "2026-09-01", imdb_rating: 8 }, movie: { title: "Research Film", tmdb_id: 101, imdb_id: "tt1234567", language: "ml", theatrical_release_date: "2026-08-01" }, evidence: [{ id: 4, source_name: "Official", source_title: "OTT announcement", source_url: "https://example.test/source", platform: "Netflix", ott_date: "2026-09-01", confidence: 95, disposition: "SUPPORTING" }], decisions: [{ platform: "Netflix", state: "RELEASED_CONFIRMED", release_date: "2026-09-01", confidence: 95, reason: "Official evidence" }] }) }));
+  render(<MemoryRouter initialEntries={["/admin/research-history/run-1"]}><ResearchRunDetail /></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "Research Film" })).toBeInTheDocument();
+  expect(screen.getByText("Research Film OTT release date")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Open source" })).toHaveAttribute("href", "https://example.test/source");
+  expect(screen.getByText("Official evidence")).toBeInTheDocument();
 });

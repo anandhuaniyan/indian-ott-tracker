@@ -195,6 +195,77 @@ class IMDbRatingRefreshService:
         self.db = db
         self.provider = provider if provider is not None else configured_rating_provider()
 
+    @staticmethod
+    def configuration_status() -> dict:
+        missing = []
+        if settings.IMDB_RATING_PROVIDER.strip().lower() != "omdb":
+            missing.append("IMDB_RATING_PROVIDER")
+        if not settings.IMDB_RATING_API_URL:
+            missing.append("IMDB_RATING_API_URL")
+        if not settings.IMDB_RATING_API_KEY:
+            missing.append("IMDB_RATING_API_KEY")
+        return {
+            "provider": "OMDb",
+            "configured": not missing,
+            "missing": missing,
+        }
+
+    def refresh_movie(self, movie_id: int) -> dict:
+        """Refresh exactly one movie, preserving lifecycle/backoff state."""
+        movie = self.db.get(Movie, movie_id)
+        if not movie:
+            raise LookupError("Movie not found")
+        external_id = self.db.query(ExternalId).filter(
+            ExternalId.movie_id == movie_id,
+            func.lower(ExternalId.provider) == "imdb",
+        ).first()
+        status = self.configuration_status()
+        if not external_id:
+            return status | {"movie_id": movie_id, "updated": False, "status": "MISSING_IMDB_ID"}
+        if not self.provider:
+            return status | {"movie_id": movie_id, "imdb_id": external_id.external_id, "updated": False, "status": "NOT_CONFIGURED"}
+        record = ensure_pending_rating(self.db, movie_id)
+        now = datetime.now(timezone.utc)
+        try:
+            result = self.provider.fetch(external_id.external_id)
+            if result is None:
+                mark_rating_failure(record, movie, RATING_INVALID_ID, "Invalid IMDb identifier", now)
+            else:
+                apply_rating_result(record, movie, result)
+            self.db.commit()
+        except (ProviderRateLimited, ProviderQuotaExhausted) as exc:
+            mark_rating_failure(record, movie, RATING_BLOCKED_BY_QUOTA, exc, now)
+            self.db.commit()
+        except Exception as exc:
+            mark_rating_failure(record, movie, RATING_TEMPORARY_FAILURE, exc, now)
+            self.db.commit()
+        return status | {
+            "movie_id": movie_id,
+            "imdb_id": external_id.external_id,
+            "updated": record.status == RATING_AVAILABLE,
+            "status": record.status,
+            "rating": record.rating,
+            "vote_count": record.vote_count,
+            "attempt_count": record.attempt_count,
+            "last_error": record.last_error,
+        }
+
+    def health(self) -> dict:
+        status = self.configuration_status()
+        state = self.db.query(OperationState).filter_by(name=self.operation).first()
+        latest = self.db.query(MovieRating).filter(
+            func.lower(MovieRating.source) == "imdb",
+            MovieRating.last_attempt_at.is_not(None),
+        ).order_by(MovieRating.last_attempt_at.desc()).first()
+        return status | {
+            "status": (state.status if state else "NOT_RUN") if status["configured"] else "NOT_CONFIGURED",
+            "last_success_at": state.last_success_at.isoformat() if state and state.last_success_at else None,
+            "last_failure_at": state.last_failure_at.isoformat() if state and state.last_failure_at else None,
+            "last_error": state.last_error if state else None,
+            "last_request_at": latest.last_attempt_at.isoformat() if latest and latest.last_attempt_at else None,
+            "last_rating_status": latest.status if latest else None,
+        }
+
     def refresh(self, batch_size: int = 25) -> dict:
         state = self.db.query(OperationState).filter_by(name=self.operation).first()
         if not state:
