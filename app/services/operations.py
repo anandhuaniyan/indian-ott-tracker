@@ -523,6 +523,7 @@ class OttResearchService:
         verification_method="AUTOMATED",
         observed_at=None,
         allow_publication=True,
+        research_run_id=None,
     ):
         """Persist source evidence, then recompute the canonical result.
 
@@ -568,6 +569,7 @@ class OttResearchService:
             date_confidence=100 if manually_verified else date_confidence,
             verification_method="MANUAL" if manually_verified else verification_method,
             observed_at=observed_at or now,
+            research_run_id=research_run_id,
         )
         self.db.add(evidence)
         self.db.flush()

@@ -5,13 +5,11 @@ import { API, imageUrl } from "../services/api";
 const call = (path, options) =>
   fetch(`${API}${path}`, { credentials: "include", ...options }).then(
     async (response) => {
-      if (!response.ok)
-        throw new Error(
-          response.status === 401
-            ? "Unauthenticated"
-            : (await response.json().catch(() => ({}))).detail ||
-              "Request failed",
-        );
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        const detail = payload.detail;
+        throw new Error(response.status === 401 ? "Unauthenticated" : (typeof detail === "object" ? detail.message : detail) || "Request failed");
+      }
       return response.json();
     },
   );
@@ -44,6 +42,7 @@ const Nav = () => (
     <Link to="/admin/requests">Requests</Link>
     <Link to="/admin/movies">Movies</Link>
     <Link to="/admin/discovery">Discovery</Link>
+    <Link to="/admin/research-history">Research history</Link>
     <Link to="/admin/comments">Comments</Link>
     <Link to="/admin/data-health">Data health</Link>
     <Link to="/admin/images">Images</Link>
@@ -226,6 +225,11 @@ export function Dashboard() {
           <Link className="button-link" to="/admin/sources">Run source sync</Link>
         </div>
       </section>
+      <section className="admin-panel">
+        <header><h2>Research today</h2><Link to="/admin/research-history">Open history</Link></header>
+        <div className="admin-source-grid">{[["Automated research", data.research?.automated], ["Manual research", data.research?.manual]].map(([label, values]) => <article key={label}><h3>{label}</h3><dl>{Object.entries(values || {}).map(([name, value]) => <div key={name}><dt>{name.replaceAll("_", " ")}</dt><dd>{value}</dd></div>)}</dl></article>)}</div>
+        <h3>Currently running</h3><div className="admin-activity">{(data.research?.currently_running || []).map((run) => <article key={run.run_id}><time>{when(run.started_at || run.created_at)}</time><strong>{run.category}</strong><span>{run.trigger_type.replaceAll("_", " ")}</span><Link to={`/admin/research-history/${run.run_id}`}>View</Link></article>)}{!data.research?.currently_running?.length && <p className="empty">No research is currently running.</p>}</div>
+      </section>
       <h2>Source health</h2>
       <div className="admin-source-grid">
         {(data.sources || []).map((source) => (
@@ -281,6 +285,14 @@ export function Discovery() {
   const [page, setPage] = useState(1);
   const path = `/api/v1/admin/discovery?status=${encodeURIComponent(status)}&language=${encodeURIComponent(language)}&page=${page}`;
   const [data, error, reload] = useAdmin(path, 60000);
+  const [runMessage, setRunMessage] = useState("");
+  const runDiscovery = (deep) => {
+    const label = deep ? "deep 365-day reconciliation" : "regular movie discovery";
+    if (!window.confirm(`Start ${label} now?`)) return;
+    call("/api/v1/admin/discovery/run", json("POST", { deep, confirmed: true }))
+      .then((value) => setRunMessage(`Queued ${label}. Research run ${value.run_id}.`))
+      .catch((reason) => setRunMessage(reason.message));
+  };
   const act = (id, action) => {
     const movieId = action === "match_existing" ? window.prompt("Local movie ID") : undefined;
     if (action === "match_existing" && !movieId) return;
@@ -295,6 +307,12 @@ export function Discovery() {
       Automatic scans run at 08:00 and 20:00 in {data?.timezone || "the site timezone"}.
       {data?.next_run && <> Next run: {when(data.next_run)}.</>}
     </p>
+    <div className="admin-request-actions">
+      <button onClick={() => runDiscovery(false)}>RUN MOVIE DISCOVERY NOW</button>
+      <button onClick={() => runDiscovery(true)}>RUN DEEP RECONCILIATION</button>
+      <Link className="button-link" to="/admin/research-history?category=DISCOVERY">View research history</Link>
+    </div>
+    {runMessage && <p role="status">{runMessage}</p>}
     <div className="filters">
       <select value={status} onChange={(event) => { setStatus(event.target.value); setPage(1); }}>
         <option value="NEEDS_REVIEW">Needs review</option>
@@ -364,6 +382,17 @@ export function Requests() {
     `/api/v1/admin/requests/${id}/emails/${kind}/retry`,
     { method: "POST" },
   );
+  const researchQueue = () => call("/api/v1/admin/research/preview")
+    .then((preview) => {
+      if (!window.confirm(`Eligible movies: ${preview.eligible_count}\nEstimated batch size: ${preview.batch_size}\n\nStart research?`)) return null;
+      return call("/api/v1/admin/research/run", json("POST", { confirmed: true, scope: "full" }));
+    })
+    .then((value) => value && setActionError(`Research queued. Run ${value.run_id}`))
+    .catch((reason) => setActionError(reason.message));
+  const researchRequest = (id) => action(
+    `/api/v1/admin/research/requests/${encodeURIComponent(id)}`,
+    json("POST", { confirmed: true, scope: "full" }),
+  );
   const applyFilters = (overrides = {}) => {
     const params = new URLSearchParams();
     const values = { search, status, email_status: emailStatus, local, age, sort, page: overrides.page || 1, ...overrides };
@@ -423,6 +452,10 @@ export function Requests() {
         <button type="button" onClick={reload}>Refresh</button>
       </form>
       {actionError && <p className="admin-error" role="alert">{actionError}</p>}
+      <div className="admin-request-actions">
+        <button type="button" onClick={researchQueue}>RESEARCH NOW</button>
+        <Link className="button-link" to="/admin/research-history?tab=movie_requests">Request research history</Link>
+      </div>
       {data?.counters && (
         <div className="admin-counter-tabs" aria-label="Request status counters">
           {Object.entries(data.counters).map(([key, value]) => (
@@ -476,6 +509,7 @@ export function Requests() {
                 </div>
                 <div className="admin-request-actions">
                   <Link className="button-link" to={`/admin/requests/${item.request_id}`}>Open details</Link>
+                  <button onClick={() => researchRequest(item.request_id)}>RESEARCH THIS MOVIE</button>
                   {item.status === "PENDING" && <button onClick={() => update(item.request_id, "REVIEWING")}>Review</button>}
                   {["PENDING", "REVIEWING"].includes(item.status) && <button onClick={() => update(item.request_id, "FOUND")}>Mark Found</button>}
                   {["PENDING", "REVIEWING", "FOUND"].includes(item.status) && item.movie_external_id && !item.local_movie_id && (
@@ -587,12 +621,39 @@ export function RequestDetail() {
         })}</div>
       </section>
       <section className="admin-panel">
+        <h2>Research history</h2>
+        <div className="admin-research-grid">
+          {(data.research_history || []).map((run) => <article key={run.run_id}>
+            <header><strong>{run.category}</strong><Status>{run.result || run.status}</Status></header>
+            <p>{run.trigger_type.replaceAll("_", " ")} · {when(run.started_at || run.created_at)}</p>
+            <p>{run.after?.platform || "No platform"} · {run.after?.release_date || "Date not confirmed"} · {run.evidence_created} evidence</p>
+            <Link to={`/admin/research-history/${run.run_id}`}>Open run details</Link>
+          </article>)}
+          {!data.research_history?.length && <p className="empty">No research runs recorded yet.</p>}
+        </div>
+        <h3>Notification history</h3>
+        <div className="admin-research-grid">
+          {(data.notification_history || []).map((item, index) => <article key={`${item.event_type}-${item.channel}-${index}`}><header><strong>{item.event_type.replaceAll("_", " ")}</strong><Status>{item.status}</Status></header><p>{item.channel} · {item.attempt_count} attempt(s)</p><small>{item.sent_at ? when(item.sent_at) : item.last_error || "Not sent"}</small></article>)}
+          {!data.notification_history?.length && <p className="empty">No additional notification events recorded.</p>}
+        </div>
+        <h3>User email history</h3>
+        <div className="admin-research-grid">{(data.user_email_history || []).map((item, index) => <article key={`${item.event_type}-${index}`}><header><strong>{item.event_type.replaceAll("_", " ")}</strong><Status>{item.status}</Status></header><p>{item.attempt_count} attempt(s) · {item.sent_at ? when(item.sent_at) : item.last_error || "Not sent"}</p></article>)}{!data.user_email_history?.length && <p className="empty">No matched, OTT-found, or needs-information emails yet.</p>}</div>
+      </section>
+      <section className="admin-panel">
         <h2>Admin actions</h2>
         <div className="admin-request-actions">
+          <button onClick={() => act(`/api/v1/admin/research/requests/${encodeURIComponent(requestId)}`, json("POST", { confirmed: true, scope: "full" }))}>RESEARCH THIS MOVIE</button>
+          <button onClick={() => act(`/api/v1/admin/research/requests/${encodeURIComponent(requestId)}`, json("POST", { confirmed: true, scope: "tmdb" }))}>Refresh TMDB</button>
+          <button onClick={() => act(`/api/v1/admin/research/requests/${encodeURIComponent(requestId)}`, json("POST", { confirmed: true, scope: "imdb" }))}>Refresh IMDb</button>
+          <button onClick={() => act(`/api/v1/admin/research/requests/${encodeURIComponent(requestId)}`, json("POST", { confirmed: true, scope: "ott" }))}>Refresh OTT</button>
+          <button onClick={() => act(`/api/v1/admin/research/requests/${encodeURIComponent(requestId)}`, json("POST", { confirmed: true, scope: "web" }))}>Run Web Research</button>
           {data.status === "PENDING" && <button onClick={() => update("REVIEWING")}>Start review</button>}
           {["PENDING", "REVIEWING"].includes(data.status) && <button onClick={() => update("FOUND")}>Mark found</button>}
           {!localId && data.movie_external_id && <button onClick={() => act(`/api/v1/admin/deep-search/movies/${data.movie_external_id}/import`, { method: "POST" })}>Add / Import movie</button>}
-          {localId && <><Link className="button-link" to={`/movies/${localId}`}>Open local movie</Link><button onClick={() => act(`/api/v1/admin/movies/${localId}/repair`, { method: "POST" })}>Refresh metadata / images / trailer / IMDb</button><button onClick={() => act(`/api/v1/admin/movies/${localId}/research-ott`, { method: "POST" })}>Research OTT now</button></>}
+          {localId && <><Link className="button-link" to={`/movies/${localId}`}>Open local movie</Link><button onClick={() => act(`/api/v1/admin/movies/${localId}/repair`, { method: "POST" })}>Refresh metadata / images / trailer / IMDb</button></>}
+          <button onClick={() => act(`/api/v1/admin/requests/${encodeURIComponent(requestId)}/emails/update/NEEDS_INFORMATION`, { method: "POST" })}>Email User</button>
+          <button onClick={() => act(`/api/v1/admin/requests/${encodeURIComponent(requestId)}/notifications/telegram/retry`, { method: "POST" })}>Resend Telegram</button>
+          <button onClick={() => act(`/api/v1/admin/requests/${encodeURIComponent(requestId)}/notifications/discord/retry`, { method: "POST" })}>Resend Discord</button>
           {localId && data.status !== "ADDED" && <button onClick={() => update("ADDED")}>Mark added</button>}
           {!(["ADDED", "REJECTED"].includes(data.status)) && <button onClick={() => update("REJECTED")}>Reject</button>}
         </div>
@@ -856,13 +917,24 @@ export function OttResearch() {
     call("/api/v1/admin/ott-gold-set/generate", { method: "POST" })
       .then((value) => { setMessage(`Gold set contains ${value.total} movies`); reloadCommand(); })
       .catch((reason) => setActionError(reason.message));
+  const runEligibleQueue = () => call("/api/v1/admin/research/preview")
+    .then((preview) => {
+      if (!window.confirm(`Eligible movies: ${preview.eligible_count}\nEstimated batch size: ${preview.batch_size}\n\nStart research?`)) return null;
+      return call("/api/v1/admin/research/run", json("POST", { confirmed: true, scope: "full" }));
+    })
+    .then((value) => value && setMessage(`Research queued. Run ${value.run_id}.`))
+    .catch((reason) => setActionError(reason.message));
+  const researchMovie = (movieId) => call(`/api/v1/admin/research/movies/${movieId}`, json("POST", { confirmed: true, scope: "full" }))
+    .then((value) => setMessage(`Movie research queued. Run ${value.run_id}.`))
+    .catch((reason) => setActionError(reason.message));
   const intelligence = command?.gold_set && command?.summary && Array.isArray(command?.providers)
     ? command
     : null;
   if (error) return <Guard error={error} />;
   return (
     <Page title="OTT research">
-      <div className="admin-subnav"><Link to="/admin/ott-research">Research queue</Link><Link to="/admin/sources">Source health</Link><Link to="/admin/sources?source=ottplay&view=unmatched">OTTplay unmatched</Link></div>
+      <div className="admin-subnav"><Link to="/admin/ott-research">Research queue</Link><Link to="/admin/research-history">Research history</Link><Link to="/admin/sources">Source health</Link><Link to="/admin/sources?source=ottplay&view=unmatched">OTTplay unmatched</Link></div>
+      <section className="admin-panel"><header><h2>Manual research</h2></header><p>Runs the current bounded eligible queue through the same provider, evidence, and reconciliation services as scheduled research.</p><button onClick={runEligibleQueue}>RUN OTT RESEARCH NOW</button></section>
       {message && <p role="status">{message}</p>}
       {commandError && <p className="admin-error" role="alert">{commandError}</p>}
       {intelligence && <>
@@ -995,6 +1067,7 @@ export function OttResearch() {
                       Review
                     </button>
                   )}
+                  <button onClick={() => researchMovie(item.movie_id)}>RESEARCH THIS MOVIE</button>
                   <button onClick={() => inspect(item.movie_id)}>Inspect evidence</button>
                 </td>
               </tr>
@@ -1116,7 +1189,7 @@ export function Movies() {
     setQuery(params.toString());
   };
   const repair = (id, label = "Repair") => call(`/api/v1/admin/movies/${id}/repair`, { method: "POST" }).then(() => setMessage(`${label} queued for movie ${id}`)).catch((reason) => setMessage(reason.message));
-  const research = (id) => call(`/api/v1/admin/movies/${id}/research-ott`, { method: "POST" }).then(() => setMessage(`OTT research queued for movie ${id}`)).catch((reason) => setMessage(reason.message));
+  const research = (id, scope = "full") => call(`/api/v1/admin/research/movies/${id}`, json("POST", { confirmed: true, scope })).then((value) => setMessage(`${scope.toUpperCase()} research queued for movie ${id}. Run ${value.run_id}`)).catch((reason) => setMessage(reason.message));
   if (error) return <Guard error={error} />;
   return <Page title="Movies">
     <form className="admin-filter-grid" onSubmit={(event) => { event.preventDefault(); apply(); }}>
@@ -1133,7 +1206,7 @@ export function Movies() {
       <button>Apply filters</button><button type="button" onClick={reload}>Refresh</button>
     </form>
     {message && <p role="status">{message}</p>}
-    {!data ? <p>Loading…</p> : <><p>{data.total} movies</p><div className="admin-movie-grid">{data.items.map((movie) => <article key={movie.id}><img src={imageUrl(movie.poster_path)} alt={`${movie.title} poster`} loading="lazy" /><div><header><div><h2>{movie.title}</h2>{movie.original_title && movie.original_title !== movie.title && <small>{movie.original_title}</small>}</div><Status>{movie.metadata_health}</Status></header><dl className="admin-request-facts"><div><dt>Year / language</dt><dd>{movie.year || "Unknown"} · {movie.language || "Unknown"}</dd></div><div><dt>TMDB / IMDb</dt><dd>{movie.tmdb_id} · {movie.imdb_id || "Missing"}</dd></div><div><dt>IMDb rating</dt><dd>{movie.imdb_rating ?? "Missing"}</dd></div><div><dt>Theatrical</dt><dd>{movie.theatrical_date || "Unknown"}</dd></div><div><dt>OTT</dt><dd>{movie.ott_platform || "Missing"} · {movie.ott_release_date || "Date unknown"}</dd></div><div><dt>Trailer</dt><dd>{movie.trailer ? "Available" : "Missing"}</dd></div><div><dt>Image health</dt><dd>{movie.image_health}</dd></div><div><dt>Updated</dt><dd>{when(movie.updated_at)}</dd></div></dl>{movie.metadata_missing?.length > 0 && <p className="admin-safe-error">Missing: {movie.metadata_missing.join(", ")}</p>}<div className="admin-request-actions"><Link className="button-link" to={`/movies/${movie.id}`}>Open movie</Link><button onClick={() => repair(movie.id, "Metadata refresh")}>Refresh metadata</button><button onClick={() => research(movie.id)}>Research OTT</button><button onClick={() => repair(movie.id, "Trailer search")}>Find trailer</button><button onClick={() => repair(movie.id, "Image refresh")}>Refresh images</button><button onClick={() => repair(movie.id, "IMDb refresh")}>Refresh IMDb</button>{movie.trailer_key && <a className="button-link" href={`https://www.youtube.com/watch?v=${encodeURIComponent(movie.trailer_key)}`} rel="noreferrer">YouTube</a>}</div></div></article>)}</div><Pager data={data} onPage={apply} /></>}
+    {!data ? <p>Loading…</p> : <><p>{data.total} movies</p><div className="admin-movie-grid">{data.items.map((movie) => <article key={movie.id}><img src={imageUrl(movie.poster_path)} alt={`${movie.title} poster`} loading="lazy" /><div><header><div><h2>{movie.title}</h2>{movie.original_title && movie.original_title !== movie.title && <small>{movie.original_title}</small>}</div><Status>{movie.metadata_health}</Status></header><dl className="admin-request-facts"><div><dt>Year / language</dt><dd>{movie.year || "Unknown"} · {movie.language || "Unknown"}</dd></div><div><dt>TMDB / IMDb</dt><dd>{movie.tmdb_id} · {movie.imdb_id || "Missing"}</dd></div><div><dt>IMDb rating</dt><dd>{movie.imdb_rating ?? "Missing"}</dd></div><div><dt>Theatrical</dt><dd>{movie.theatrical_date || "Unknown"}</dd></div><div><dt>OTT</dt><dd>{movie.ott_platform || "Missing"} · {movie.ott_release_date || "Date unknown"}</dd></div><div><dt>Trailer</dt><dd>{movie.trailer ? "Available" : "Missing"}</dd></div><div><dt>Image health</dt><dd>{movie.image_health}</dd></div><div><dt>Updated</dt><dd>{when(movie.updated_at)}</dd></div></dl>{movie.metadata_missing?.length > 0 && <p className="admin-safe-error">Missing: {movie.metadata_missing.join(", ")}</p>}<div className="admin-request-actions"><Link className="button-link" to={`/movies/${movie.id}`}>Open movie</Link><button onClick={() => repair(movie.id, "Metadata refresh")}>Refresh metadata</button><button onClick={() => research(movie.id)}>RESEARCH THIS MOVIE</button><button onClick={() => repair(movie.id, "Trailer search")}>Find trailer</button><button onClick={() => repair(movie.id, "Image refresh")}>Refresh images</button><button onClick={() => research(movie.id, "imdb")}>Refresh IMDb</button>{movie.trailer_key && <a className="button-link" href={`https://www.youtube.com/watch?v=${encodeURIComponent(movie.trailer_key)}`} rel="noreferrer">YouTube</a>}</div></div></article>)}</div><Pager data={data} onPage={apply} /></>}
   </Page>;
 }
 
@@ -1155,12 +1228,62 @@ export function Sources() {
   </Page>;
 }
 
+export function ResearchHistory() {
+  const initial = new URLSearchParams(useLocation().search);
+  const [tab, setTab] = useState(initial.get("tab") || "all");
+  const [category, setCategory] = useState(initial.get("category") || "");
+  const [result, setResult] = useState(initial.get("result") || "");
+  const [language, setLanguage] = useState(initial.get("language") || "");
+  const [page, setPage] = useState(1);
+  const query = new URLSearchParams({ tab, page: String(page), page_size: "50", ...(category && { category }), ...(result && { result }), ...(language && { language }) });
+  const [data, error, reload] = useAdmin(`/api/v1/admin/research-history?${query}`, 15000);
+  if (error) return <Guard error={error} />;
+  return <Page title="Research history">
+    <div className="admin-counter-tabs">{[["all", "All"], ["automated", "Automated"], ["manual", "Manual"], ["movie_requests", "Movie requests"], ["failed", "Failed"], ["needs_review", "Needs review"]].map(([value, label]) => <button key={value} className={tab === value ? "active" : ""} onClick={() => { setTab(value); setPage(1); }}>{label}</button>)}</div>
+    <div className="admin-filter-grid">
+      <select aria-label="Research category" value={category} onChange={(event) => { setCategory(event.target.value); setPage(1); }}><option value="">All categories</option>{["DISCOVERY", "FULL", "OTT", "WEB", "IMDB", "TMDB"].map((value) => <option key={value}>{value}</option>)}</select>
+      <select aria-label="Research result" value={result} onChange={(event) => { setResult(event.target.value); setPage(1); }}><option value="">All results</option>{["UPDATED", "NO_CHANGE", "NEEDS_REVIEW", "CONFLICTING", "NOT_FOUND", "FAILED"].map((value) => <option key={value}>{value}</option>)}</select>
+      <select aria-label="Movie language" value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }}><option value="">All languages</option>{[["ml", "Malayalam"], ["ta", "Tamil"], ["te", "Telugu"], ["hi", "Hindi"], ["kn", "Kannada"]].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+      <button onClick={reload}>Refresh</button>
+    </div>
+    {!data ? <p>Loading…</p> : <>
+      <p>{data.total} recorded runs</p>
+      <div className="admin-research-grid">{data.items.map((run) => <article key={run.run_id}>
+        <header><div>{run.movie?.poster_path && <img src={imageUrl(run.movie.poster_path)} alt="" loading="lazy" />}<div><h2>{run.movie?.title || run.category}</h2><small>{run.movie ? `${run.movie.year || "?"} · ${run.movie.language || "?"}` : "Batch operation"}</small></div></div><Status>{run.result || run.status}</Status></header>
+        <dl className="admin-request-facts"><div><dt>Trigger</dt><dd>{run.trigger_type.replaceAll("_", " ")}</dd></div><div><dt>Started</dt><dd>{when(run.started_at || run.created_at)}</dd></div><div><dt>Completed</dt><dd>{when(run.completed_at)}</dd></div><div><dt>TMDB / IMDb</dt><dd>{run.movie?.tmdb_id || "—"} · {run.movie?.imdb_id || "—"}</dd></div><div><dt>Platform</dt><dd>{run.before.platform || "Unknown"} → {run.after.platform || "Unknown"}</dd></div><div><dt>OTT date</dt><dd>{run.before.release_date || "Unknown"} → {run.after.release_date || "Unknown"}</dd></div><div><dt>Evidence</dt><dd>{run.evidence_created}</dd></div><div><dt>Confidence</dt><dd>{run.confidence == null ? "—" : `${run.confidence}%`}</dd></div></dl>
+        <Link className="button-link" to={`/admin/research-history/${run.run_id}`}>View details</Link>
+      </article>)}</div>
+      {!data.items.length && <p className="empty">No research runs match these filters.</p>}
+      <Pager data={data} onPage={setPage} />
+    </>}
+  </Page>;
+}
+
+export function ResearchRunDetail() {
+  const { runId } = useParams();
+  const [data, error, reload] = useAdmin(`/api/v1/admin/research-history/${encodeURIComponent(runId)}`, 10000);
+  if (error) return <Guard error={error} />;
+  if (!data) return <Page title="Research run"><p>Loading…</p></Page>;
+  return <Page title={`Research run ${data.run_id}`}>
+    <Link to="/admin/research-history">← Back to research history</Link>
+    <button onClick={reload}>Refresh</button>
+    <section className="admin-panel"><header><div><h2>{data.movie?.title || data.category}</h2><p>{data.movie?.original_title || ""}</p></div><Status>{data.result || data.status}</Status></header><dl className="admin-request-facts"><div><dt>Trigger</dt><dd>{data.trigger_type.replaceAll("_", " ")}</dd></div><div><dt>Initiated by</dt><dd>{data.initiated_by}</dd></div><div><dt>Started</dt><dd>{when(data.started_at)}</dd></div><div><dt>Completed</dt><dd>{when(data.completed_at)}</dd></div><div><dt>TMDB / IMDb</dt><dd>{data.movie?.tmdb_id || "—"} · {data.movie?.imdb_id || "—"}</dd></div><div><dt>Language</dt><dd>{data.movie?.language || "—"}</dd></div><div><dt>Theatrical release</dt><dd>{data.movie?.theatrical_release_date || "—"}</dd></div><div><dt>Providers</dt><dd>{data.providers_attempted.join(", ") || "None"}</dd></div></dl></section>
+    <section className="admin-panel"><h2>Database change</h2><div className="research-before-after"><article><h3>Before</h3><p>Platform: {data.before.platform || "Unknown"}</p><p>OTT date: {data.before.release_date || "Unknown"}</p><p>IMDb rating: {data.before.imdb_rating ?? "Unknown"}</p></article><article><h3>After</h3><p>Platform: {data.after.platform || "Unknown"}</p><p>OTT date: {data.after.release_date || "Unknown"}</p><p>IMDb rating: {data.after.imdb_rating ?? "Unknown"}</p></article></div><p>Changed fields: {data.database_changes.join(", ") || "None — NO_CHANGE is retained for audit."}</p></section>
+    <section className="admin-panel"><h2>Web search queries</h2>{data.queries_attempted.length ? <ul>{data.queries_attempted.map((query) => <li key={query}>{query}</li>)}</ul> : <p className="empty">No configured web search query was sent.</p>}</section>
+    <section className="admin-panel"><h2>Evidence and sources</h2><div className="admin-evidence-list">{data.evidence.map((item) => <article key={item.id}><header><strong>{item.source_name || "Source"}</strong><Status>{item.disposition}</Status></header><p>{item.source_title || "Untitled source"}</p><p>{item.platform || "No platform claim"} · {item.ott_date || "No date claim"} · {item.confidence}%</p><p>{item.summary || "No summary"}</p>{item.source_url && <a href={item.source_url} rel="noreferrer">Open source</a>}<small>Published {item.published_date || "unknown"} · Checked {when(item.checked_date)}</small></article>)}</div>{!data.evidence.length && <p className="empty">No source evidence was created in this run.</p>}</section>
+    <section className="admin-panel"><h2>Reconciliation decisions</h2>{data.decisions.map((item, index) => <article key={`${item.platform}-${index}`}><header><strong>{item.platform || "No platform"}</strong><Status>{item.state}</Status></header><p>{item.release_date || "Date not confirmed"} · {item.confidence}%</p><p>{item.reason}</p></article>)}{!data.decisions.length && <p className="empty">No reconciliation decision was created.</p>}</section>
+    <section className="admin-panel"><h2>Notifications and errors</h2><pre className="pre-wrap">{JSON.stringify(data.notification_results, null, 2)}</pre>{data.errors.length ? data.errors.map((item, index) => <p className="admin-safe-error" key={index}>{item.step}: {item.error}</p>) : <p>No errors.</p>}</section>
+  </Page>;
+}
+
 export function SystemHealth() {
   const [health, healthError, reload] = useAdmin("/api/v1/admin/system-health", 30000);
   const [audit, auditError] = useAdmin("/api/v1/admin/audit");
+  const [testMessage, setTestMessage] = useState("");
+  const testOmdb = () => call("/api/v1/admin/system-health/omdb/test", { method: "POST" }).then((value) => { setTestMessage(`OMDb ${value.connection}; response ${value.response}.`); reload(); }).catch((reason) => setTestMessage(reason.message));
   const error = healthError || auditError;
   if (error) return <Guard error={error} />;
-  return <Page title="System health"><button onClick={reload}>Refresh health</button><div className="admin-source-grid">{(health?.services || []).map((service) => <article key={service.name}><header><h2>{service.name}</h2><Status>{service.status}</Status></header><p>Last heartbeat: {when(service.last_heartbeat)}</p>{service.queue_depth != null && <p>Queue depth: {service.queue_depth}</p>}{service.last_error && <p className="admin-safe-error">{service.last_error}</p>}</article>)}</div><h2>Administrator audit trail</h2>{audit && <Table headers={["Timestamp", "Action", "Target", "Summary"]} rows={audit.items.map((item) => <tr key={item.id}><td>{when(item.timestamp)}</td><td>{item.action.replaceAll("_", " ")}</td><td>{item.target_type} {item.target_id || ""}</td><td>{item.summary || "—"}</td></tr>)} />}</Page>;
+  return <Page title="System health"><button onClick={reload}>Refresh health</button>{testMessage && <p role="status">{testMessage}</p>}<div className="admin-source-grid">{(health?.services || []).map((service) => <article key={service.name}><header><h2>{service.name}</h2><Status>{service.status}</Status></header><p>Last heartbeat: {when(service.last_heartbeat)}</p>{service.queue_depth != null && <p>Queue depth: {service.queue_depth}</p>}{service.last_error && <p className="admin-safe-error">{service.last_error}</p>}</article>)}</div><h2>Providers</h2><div className="admin-source-grid">{(health?.providers || []).map((provider) => <article key={provider.name}><header><h2>{provider.name}</h2><Status>{provider.status}</Status></header><p>Configured: {provider.configured ? "Yes" : "No"}</p>{provider.notification_method && <p>Notification method: {provider.notification_method.replaceAll("_", " ")}</p>}{provider.missing?.length > 0 && <p>Missing: {provider.missing.join(", ")}</p>}<p>Last successful request: {when(provider.last_successful_request)}</p><p>Last failed request: {when(provider.last_failed_request)}</p>{provider.last_error && <p className="admin-safe-error">{provider.last_error}</p>}{provider.name === "OMDb" && <button disabled={!provider.configured} onClick={testOmdb}>TEST PROVIDER</button>}</article>)}</div><h2>Administrator audit trail</h2>{audit && <Table headers={["Timestamp", "Action", "Target", "Summary"]} rows={audit.items.map((item) => <tr key={item.id}><td>{when(item.timestamp)}</td><td>{item.action.replaceAll("_", " ")}</td><td>{item.target_type} {item.target_id || ""}</td><td>{item.summary || "—"}</td></tr>)} />}</Page>;
 }
 
 export function Jobs() {

@@ -15,6 +15,21 @@ from app.config.settings import settings
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+_omdb_missing = [
+    name for name, present in (
+        ("IMDB_RATING_PROVIDER", settings.IMDB_RATING_PROVIDER.strip().lower() == "omdb"),
+        ("IMDB_RATING_API_URL", bool(settings.IMDB_RATING_API_URL)),
+        ("IMDB_RATING_API_KEY", bool(settings.IMDB_RATING_API_KEY)),
+    ) if not present
+]
+_startup_log = logging.getLogger(__name__)
+if _omdb_missing:
+    _startup_log.warning(
+        "OMDb startup configuration: NOT_CONFIGURED; missing=%s",
+        ",".join(_omdb_missing),
+    )
+else:
+    _startup_log.info("OMDb startup configuration: READY")
 
 
 frontend_origins = [origin.strip().rstrip("/") for origin in settings.FRONTEND_ORIGINS.split(",") if origin.strip()]

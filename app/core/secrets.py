@@ -37,6 +37,7 @@ def sanitize_error(value: object, *, limit: int = 2000) -> str:
         settings.SMTP_USERNAME,
         settings.TELEGRAM_BOT_TOKEN,
         settings.DISCORD_WEBHOOK_URL,
+        settings.DISCORD_BOT_SHARED_SECRET,
     )
     for secret in known_secrets:
         if secret:

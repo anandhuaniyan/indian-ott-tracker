@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     TAVILY_MONTHLY_APP_BUDGET: int = 800
     TAVILY_MAX_QUERIES_PER_MOVIE: int = 2
     DISCORD_WEBHOOK_URL: str = ""
+    DISCORD_BOT_ENDPOINT: str = ""
+    DISCORD_BOT_SHARED_SECRET: str = ""
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
     SMTP_HOST: str = ""

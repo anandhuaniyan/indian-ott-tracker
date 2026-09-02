@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import case, exists, func, select
@@ -30,12 +31,64 @@ from app.models.ott_availability import OttAvailability
 log = logging.getLogger(__name__)
 
 
+def _json_safe(value):
+    """Make service reports safe for PostgreSQL JSON without losing audit text."""
+    return json.loads(json.dumps(value, default=str))
+
+
+def _changed_batch_fields(result: dict) -> list[str]:
+    # Merely checking/processing a record is not a database data change.
+    keys = ("updated", "evidence_created", "queued", "transitions", "new_movies_imported")
+    return [key for key in keys if result.get(key)]
+
+
 def _run(service):
     db = SessionLocal()
     try:
         return service(db)
     finally:
         db.close()
+
+
+def _logged_automated(category: str, active_key: str, runner):
+    """Persist scheduled batch provenance without changing its underlying service."""
+    from app.models.research import ResearchRun
+    from app.services.research import ResearchPipelineService
+
+    def run(db):
+        service = ResearchPipelineService(db)
+        record, created = service.create_run(
+            trigger_type="AUTOMATED_SCHEDULE",
+            initiated_by="celery:beat",
+            category=category,
+            active_key=active_key,
+        )
+        if not created:
+            return service.serialize(record) | {"skipped": "already_running"}
+        record.status, record.started_at = "RUNNING", datetime.now(timezone.utc)
+        db.commit()
+        try:
+            result = runner(db, record.run_id)
+            record = db.query(ResearchRun).filter_by(run_id=record.run_id).one()
+            changed_fields = _changed_batch_fields(result)
+            record.status = "COMPLETE"
+            record.result = "UPDATED" if changed_fields else "NO_CHANGE"
+            record.completed_at, record.active_key = datetime.now(timezone.utc), None
+            record.details = {"batch": _json_safe(result)}
+            record.database_changes = changed_fields
+            record.evidence_created = int(result.get("evidence_created") or 0)
+            record.web_searches_attempted = int(result.get("queries") or 0)
+            db.commit()
+            return service.serialize(record)
+        except Exception as exc:
+            db.rollback()
+            record = db.query(ResearchRun).filter_by(run_id=record.run_id).one()
+            record.status, record.result, record.active_key = "FAILED", "FAILED", None
+            record.completed_at = datetime.now(timezone.utc)
+            record.errors = [{"step": category.lower(), "error": sanitize_error(exc)}]
+            db.commit()
+            raise
+    return _run(run)
 
 
 def _continue(task, result, *, batch_size=None, countdown=2):
@@ -139,8 +192,12 @@ def image_health():
 )
 def movie_discovery():
     from app.services.movie_discovery import MovieDiscoveryService
-
-    return _run(lambda db: MovieDiscoveryService(db).run_regular())
+    return _logged_automated(
+        "DISCOVERY", "scheduled:movie_discovery",
+        lambda db, run_id: MovieDiscoveryService(db).run_regular(
+            trigger_type="AUTOMATED_SCHEDULE", initiated_by="celery:beat", research_run_id=run_id
+        ),
+    )
 
 
 @celery_app.task(
@@ -151,8 +208,58 @@ def movie_discovery():
 )
 def movie_discovery_weekly():
     from app.services.movie_discovery import MovieDiscoveryService
+    return _logged_automated(
+        "DISCOVERY", "scheduled:movie_discovery_weekly",
+        lambda db, run_id: MovieDiscoveryService(db).run_weekly(
+            trigger_type="AUTOMATED_SCHEDULE", initiated_by="celery:beat", research_run_id=run_id
+        ),
+    )
 
-    return _run(lambda db: MovieDiscoveryService(db).run_weekly())
+
+@celery_app.task(
+    name="movies.discovery_manual",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def movie_discovery_manual(deep: bool = False, research_run_id: str | None = None):
+    from app.services.movie_discovery import MovieDiscoveryService
+    from app.models.research import ResearchRun
+
+    def run(db):
+        service = MovieDiscoveryService(db)
+        try:
+            result = (
+                service.run_weekly(trigger_type="DISCOVERY_DEEP", initiated_by="admin", research_run_id=research_run_id)
+                if deep else
+                service.run_regular(trigger_type="DISCOVERY_REGULAR", initiated_by="admin", research_run_id=research_run_id)
+            )
+            if research_run_id:
+                record = db.query(ResearchRun).filter_by(run_id=research_run_id).first()
+                if record:
+                    record.status = "COMPLETE" if result.get("status") == "COMPLETE" else "FAILED"
+                    record.result = "UPDATED" if result.get("new_movies_imported", 0) else "NO_CHANGE"
+                    record.completed_at = datetime.now(timezone.utc)
+                    record.active_key = None
+                    record.details = {"discovery": _json_safe(result)}
+                    record.database_changes = ["movies_imported"] if result.get("new_movies_imported", 0) else []
+                    db.commit()
+            return result
+        except Exception as exc:
+            db.rollback()
+            if research_run_id:
+                record = db.query(ResearchRun).filter_by(run_id=research_run_id).first()
+                if record:
+                    # Keep the lock while Celery retries; the final failure signal
+                    # releases it if retry recovery is exhausted.
+                    record.status, record.result = "RETRYING", None
+                    record.errors = [
+                        *(record.errors or []),
+                        {"step": "discovery", "error": sanitize_error(exc)},
+                    ]
+                    db.commit()
+            raise
+    return _run(run)
 
 
 @celery_app.task(
@@ -208,8 +315,10 @@ def metadata_enrichment():
 )
 def imdb_rating_refresh():
     from app.services.rating_provider import IMDbRatingRefreshService
-
-    return _run(lambda db: IMDbRatingRefreshService(db).refresh())
+    return _logged_automated(
+        "IMDB", "scheduled:imdb_refresh",
+        lambda db, _run_id: IMDbRatingRefreshService(db).refresh(),
+    )
 
 
 @celery_app.task(bind=True, name="ratings.imdb_id_backfill")
@@ -355,7 +464,7 @@ def ott_verification():
         db.commit()
         return {"queued": queued, "transitions": transitions}
 
-    return _run(run)
+    return _logged_automated("OTT_VERIFICATION", "scheduled:ott_verification", lambda db, _run_id: run(db))
 
 
 @celery_app.task(
@@ -438,7 +547,7 @@ def cleanup():
     return _run(run)
 
 
-def _ott_research_batch(db):
+def _ott_research_batch(db, research_run_id: str | None = None):
     provider = configured_ott_provider()
     service = OttResearchService(db, settings.OTT_CONFIRMATION_THRESHOLD)
     if not getattr(provider, "configured", False):
@@ -603,6 +712,7 @@ def _ott_research_batch(db):
                 source_name=evidence_result.get("source_name"),
                 country=evidence_result.get("country") or "UNKNOWN",
                 inspected=bool(inspected),
+                research_run_id=research_run_id,
             )
             if evidence.status == "CONFIRMED":
                 evaluated = "CONFIRMED"
@@ -650,7 +760,75 @@ def _ott_research_batch(db):
     max_retries=3,
 )
 def ott_research():
-    return _run(_ott_research_batch)
+    from app.models.research import ResearchRun
+    from app.services.research import ResearchPipelineService
+
+    def run(db):
+        service = ResearchPipelineService(db)
+        parent, created = service.create_run(
+            trigger_type="AUTOMATED_SCHEDULE", initiated_by="celery:beat",
+            category="OTT", active_key="scheduled:ott_research",
+        )
+        if not created:
+            return service.serialize(parent) | {"skipped": "already_running"}
+        parent.status, parent.started_at = "RUNNING", datetime.now(timezone.utc)
+        db.commit()
+        try:
+            result = _ott_research_batch(db, parent.run_id)
+            parent = db.query(ResearchRun).filter_by(run_id=parent.run_id).one()
+            parent.status = "COMPLETE"
+            parent.evidence_created = db.query(func.count(OttEvidence.id)).filter_by(research_run_id=parent.run_id).scalar() or 0
+            parent.result = "UPDATED" if parent.evidence_created else "NO_CHANGE"
+            parent.database_changes = ["evidence_created"] if parent.evidence_created else []
+            parent.details = {"batch": _json_safe(result)}
+            parent.completed_at, parent.active_key = datetime.now(timezone.utc), None
+            db.commit()
+            return service.serialize(parent)
+        except Exception:
+            parent = db.query(ResearchRun).filter_by(run_id=parent.run_id).one()
+            parent.status, parent.result, parent.active_key = "FAILED", "FAILED", None
+            parent.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            raise
+    return _run(run)
+
+
+@celery_app.task(
+    name="research.movie",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=2,
+)
+def research_movie(run_id: str, scope: str = "full"):
+    from app.services.research import ResearchPipelineService
+    return _run(lambda db: ResearchPipelineService(db).execute(run_id, scope))
+
+
+@celery_app.task(
+    name="research.eligible_queue",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=2,
+)
+def research_eligible_queue(run_id: str):
+    from app.services.research import ResearchPipelineService
+    return _run(lambda db: ResearchPipelineService(db).execute_queue(run_id))
+
+
+@celery_app.task(
+    name="research.movie_request",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def research_movie_request(request_id: str):
+    from app.services.research import ResearchPipelineService
+
+    def run(db):
+        service = ResearchPipelineService(db)
+        record, created = service.create_request_run(request_id)
+        return service.execute(record.run_id) if created else service.serialize(record)
+    return _run(run)
 
 
 @celery_app.task(
@@ -699,7 +877,10 @@ def ott_web_research(limit: int = 30):
     """Bounded AI/web evidence pass; technical failures remain distinguishable."""
     from app.services.ott.web_research import WebOttResearchService
 
-    return _run(lambda db: WebOttResearchService(db).run(limit=limit))
+    return _logged_automated(
+        "WEB", "scheduled:ott_web_research",
+        lambda db, run_id: WebOttResearchService(db).run(limit=limit, research_run_id=run_id),
+    )
 
 
 @celery_app.task(name="operations.ott_gold_set_evaluate")

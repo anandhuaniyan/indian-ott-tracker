@@ -74,7 +74,7 @@ class MovieDiscoveryService:
         self.db = db
         self.tmdb = tmdb or TMDbMovieService()
 
-    def run_regular(self, now: datetime | None = None) -> dict:
+    def run_regular(self, now: datetime | None = None, *, trigger_type: str = "AUTOMATED_SCHEDULE", initiated_by: str = "celery:beat", research_run_id: str | None = None) -> dict:
         now = now or datetime.now(timezone.utc)
         local_today = now.astimezone(_site_timezone()).date()
         return self.run(
@@ -82,9 +82,12 @@ class MovieDiscoveryService:
             window_end=local_today + timedelta(days=settings.MOVIE_DISCOVERY_REGULAR_FUTURE_DAYS),
             run_type="REGULAR",
             now=now,
+            trigger_type=trigger_type,
+            initiated_by=initiated_by,
+            research_run_id=research_run_id,
         )
 
-    def run_weekly(self, now: datetime | None = None) -> dict:
+    def run_weekly(self, now: datetime | None = None, *, trigger_type: str = "AUTOMATED_SCHEDULE", initiated_by: str = "celery:beat", research_run_id: str | None = None) -> dict:
         now = now or datetime.now(timezone.utc)
         local_today = now.astimezone(_site_timezone()).date()
         return self.run(
@@ -92,6 +95,9 @@ class MovieDiscoveryService:
             window_end=local_today + timedelta(days=settings.MOVIE_DISCOVERY_WEEKLY_FUTURE_DAYS),
             run_type="WEEKLY",
             now=now,
+            trigger_type=trigger_type,
+            initiated_by=initiated_by,
+            research_run_id=research_run_id,
         )
 
     def run(
@@ -101,6 +107,9 @@ class MovieDiscoveryService:
         window_end: date,
         run_type: str = "MANUAL",
         now: datetime | None = None,
+        trigger_type: str = "ADMIN_MANUAL",
+        initiated_by: str = "admin",
+        research_run_id: str | None = None,
     ) -> dict:
         now = now or datetime.now(timezone.utc)
         local_hour = now.astimezone(_site_timezone()).hour
@@ -118,6 +127,9 @@ class MovieDiscoveryService:
             languages=list(LANGUAGES),
             language_stats={},
             source_stats={},
+            trigger_type=trigger_type,
+            initiated_by=initiated_by,
+            research_run_id=research_run_id,
         )
         self.db.add(run)
         self.db.commit()
@@ -513,4 +525,7 @@ class MovieDiscoveryService:
             "language_stats": run.language_stats or {},
             "source_stats": run.source_stats or {},
             "last_error": run.last_error,
+            "trigger_type": run.trigger_type,
+            "initiated_by": run.initiated_by,
+            "research_run_id": run.research_run_id,
         }

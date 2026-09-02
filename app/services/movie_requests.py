@@ -13,6 +13,7 @@ from app.config.settings import settings
 from app.core.secrets import sanitize_error
 from app.models.movie import Movie
 from app.models.operations import MovieRequest
+from app.models.research import RequestCommunication
 from app.services.notification_service import NotificationService
 
 
@@ -176,6 +177,61 @@ class MovieRequestEmailService:
         setattr(item, error_name, None)
         self.db.commit()
         return {"kind": kind, "status": "SENT", "sent": True}
+
+
+class MovieRequestUpdateEmailService:
+    """Idempotent requester updates beyond the fixed received/added/rejected fields."""
+
+    EVENTS = {"MATCHED", "OTT_FOUND", "NEEDS_INFORMATION"}
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def send(self, item: MovieRequest, event_type: str) -> dict:
+        event_type = event_type.upper()
+        if event_type not in self.EVENTS:
+            raise ValueError("Unknown requester update")
+        record = self.db.query(RequestCommunication).filter_by(
+            movie_request_id=item.id, event_type=event_type, channel="email"
+        ).first()
+        if not record:
+            record = RequestCommunication(
+                movie_request_id=item.id, event_type=event_type, channel="email", status="PENDING"
+            )
+            self.db.add(record)
+            self.db.flush()
+        if record.status == "SENT":
+            return {"event_type": event_type, "status": "SENT", "sent": False, "skipped": "already_sent"}
+        now = datetime.now(timezone.utc)
+        record.attempt_count = (record.attempt_count or 0) + 1
+        record.last_attempt_at = now
+        title = item.verified_title or item.movie_name
+        movie_url = f"{settings.SITE_URL.rstrip('/')}/movies/{item.local_movie_id}" if item.local_movie_id else settings.SITE_URL.rstrip("/")
+        content = {
+            "MATCHED": (f"Movie Request Matched — {title}", f"We matched your request for {title} to a verified movie record. Research is continuing.\n\n{movie_url}"),
+            "OTT_FOUND": (f"OTT Availability Found — {title}", f"We found verified streaming information for {title}. View the current details here:\n\n{movie_url}"),
+            "NEEDS_INFORMATION": (f"More Information Needed — {title}", f"We need more information to complete your request for {title}. Please reply to this email and include request reference {item.request_id}."),
+        }[event_type]
+        record.subject = content[0]
+        if not MovieRequestEmailService.configured():
+            record.status, record.last_error = "NOT_CONFIGURED", "SMTP is not configured"
+            self.db.commit()
+            return {"event_type": event_type, "status": record.status, "sent": False}
+        message = EmailMessage()
+        message["Subject"], message["From"], message["To"] = content[0], settings.SMTP_FROM, item.email
+        message.set_content(content[1])
+        message.add_alternative(
+            '<div style="max-width:600px;margin:auto;padding:20px;font-family:Arial,sans-serif;line-height:1.55">'
+            f"<h2>{escape(content[0])}</h2><p>{escape(content[1]).replace(chr(10), '<br>')}</p></div>",
+            subtype="html",
+        )
+        try:
+            MovieRequestEmailService._deliver(message)
+            record.status, record.sent_at, record.last_error = "SENT", now, None
+        except Exception as exc:
+            record.status, record.last_error = "FAILED", _safe_error(exc)
+        self.db.commit()
+        return {"event_type": event_type, "status": record.status, "sent": record.status == "SENT"}
 
 
 class MovieRequestAutomationService:

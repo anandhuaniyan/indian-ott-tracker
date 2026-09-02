@@ -8,10 +8,12 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.core.admin import require_admin
+from app.config.settings import settings
 from app.database.connection import get_db
 from app.models.movie import Movie
 from app.core.rate_limit import limit
 from app.models.operations import DataQualityIssue, MovieRequest, OttEvidence
+from app.models.research import RequestCommunication
 from app.services.deep_search import DeepSearchService
 from app.services.movie_requests import (
     ACTIVE_REQUEST_STATUSES,
@@ -174,28 +176,49 @@ def request_movie(
     from app.services.notification_service import NotificationService
 
     try:
-        NotificationService(db).notify(
-            f"New movie request: {item.movie_name} (ID {item.external_movie_id}; {item.request_id})",
-            severity="info",
-            fingerprint=f"movie-request:{item.request_id}",
-            channels=("discord", "telegram"),
+        release_label = item.verified_release_date or item.release_year or "Unknown"
+        message = (
+            "NEW MOVIE REQUEST\n"
+            f"Request ID: {item.request_id}\nMovie Name: {item.movie_name}\n"
+            f"Year: {item.release_year or 'Unknown'}\n"
+            f"Language: {item.verified_language_name or item.verified_original_language or item.language or 'Unknown'}\n"
+            f"TMDB ID: {item.external_movie_id}\nTMDB Release Date: {release_label}\n"
+            "OTT Platform: Researching\nOTT Release Date: Researching\n"
+            f"Requester Email: {item.email}\nCurrent Status: {item.status}\n"
+            f"Admin: {settings.SITE_URL.rstrip('/')}/admin/requests/{item.request_id}"
         )
+        for channel in ("telegram", "discord"):
+            sent = NotificationService(db).notify(
+                message,
+                severity="info",
+                fingerprint=f"movie-request:{item.request_id}:{channel}",
+                channels=(channel,),
+            )
+            db.add(RequestCommunication(
+                movie_request_id=item.id,
+                event_type="NEW_REQUEST",
+                channel=channel,
+                status="SENT" if sent else "NOT_CONFIGURED_OR_FAILED",
+                attempt_count=1,
+                last_attempt_at=datetime.now(timezone.utc),
+                sent_at=datetime.now(timezone.utc) if sent else None,
+                last_error=None if sent else f"{channel.title()} is not configured or delivery failed",
+                fingerprint=f"movie-request:{item.request_id}:{channel}",
+            ))
+            db.commit()
     except Exception:
         # Requester confirmation and the committed request are independent of
         # administrator-channel availability.
         db.rollback()
-    if local:
-        # A request is the highest research priority. Queue the existing
-        # all-purpose repair plus the independent OTT evidence collectors only
-        # after the request transaction has committed.
-        try:
-            from app.workers.celery_app import celery_app
-
-            celery_app.send_task("repair.movie", args=[local.id])
-            celery_app.send_task("operations.ott_intelligence_movie", args=[local.id])
-        except Exception:
-            # Queue availability must never undo or misreport a saved request.
-            pass
+    # A request is the highest research priority. The single unified task may
+    # safely import the verified TMDB identity when missing, then runs the same
+    # research services used by administrator and scheduled actions.
+    try:
+        from app.workers.celery_app import celery_app
+        celery_app.send_task("research.movie_request", args=[item.request_id], ignore_result=True)
+    except Exception:
+        # Queue availability must never undo or misreport a saved request.
+        pass
     return {
         "request_id": item.request_id,
         "status": item.status,
