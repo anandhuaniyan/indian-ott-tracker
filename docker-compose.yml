@@ -151,6 +151,20 @@ services:
       timeout: 5s
       retries: 5
 
+  cloudflared:
+    image: cloudflare/cloudflared:2026.8.3
+    container_name: indian_ott_cloudflared
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run
+    volumes:
+      - "${CLOUDFLARED_CONFIG_DIR:-C:/Users/anadh/.cloudflared}:/etc/cloudflared:ro"
+    depends_on:
+      frontend:
+        condition: service_healthy
+    networks:
+      - indian_ott_network
+
 
 networks:
 
