@@ -14,7 +14,7 @@ services:
       - ott_postgres_data:/var/lib/postgresql/data
 
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
 
     networks:
       - indian_ott_network
@@ -36,7 +36,7 @@ services:
       PGADMIN_DEFAULT_PASSWORD: admin_password
 
     ports:
-      - "5050:80"
+      - "127.0.0.1:5050:80"
 
     depends_on:
       - postgres
@@ -51,7 +51,7 @@ services:
     restart: unless-stopped
 
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
 
     networks:
       - indian_ott_network
@@ -74,7 +74,7 @@ services:
       - .env
 
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
     depends_on:
       postgres:
@@ -106,6 +106,7 @@ services:
         VITE_ADSENSE_CLIENT_ID: ${VITE_ADSENSE_CLIENT_ID:-}
         VITE_ADSENSE_SLOT_ID: ${VITE_ADSENSE_SLOT_ID:-}
         VITE_GOOGLE_SITE_VERIFICATION: ${GOOGLE_SITE_VERIFICATION:-}
+    restart: unless-stopped
     ports:
       - "5173:80"
     depends_on:
