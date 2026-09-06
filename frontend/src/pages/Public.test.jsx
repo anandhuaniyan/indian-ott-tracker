@@ -20,6 +20,7 @@ import {
   OttPlatform,
   Person,
   Request,
+  Support,
 } from "./Public";
 
 const get = vi.fn();
@@ -243,6 +244,9 @@ it("restores the previous request template and accepts a Deep Search selection",
     </MemoryRouter>,
   );
   expect(screen.getByLabelText("Movie Name *")).toHaveValue("Aadu");
+  expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+  expect(document.querySelector("main")).not.toHaveClass("request-page");
+  expect(document.querySelector("form.request")).not.toHaveClass("request-card");
   expect(screen.getByLabelText("ID (optional)")).toHaveValue(326282);
   expect(screen.queryByText(/TMDB ID/i)).not.toBeInTheDocument();
   expect(screen.getByLabelText("Year")).toHaveValue(2015);
@@ -267,12 +271,11 @@ it("keeps a successful request when confirmation email delivery fails", async ()
   expect(screen.getByText(/request was received, but we could not send the confirmation email/i)).toBeInTheDocument();
 });
 
-it("restores issue and access as the second tab on the Request page", async () => {
+it("keeps issue and access on the separate public support page", async () => {
   get.mockResolvedValue([]);
   post.mockResolvedValue({ request_id: "WEB-1", status: "NEW", type: "ACCESS_REQUEST", discord_status: "PENDING", receipt_email_status: "NOT_SUPPLIED" });
-  render(<MemoryRouter initialEntries={["/request-movie?tab=contact&type=ACCESS_REQUEST"]}><Routes><Route path="/request-movie" element={<Request/>}/></Routes></MemoryRouter>);
-  expect(screen.getByRole("tab", { name: "Request movie" })).toHaveAttribute("aria-selected", "false");
-  expect(screen.getByRole("tab", { name: "Report issue / request access" })).toHaveAttribute("aria-selected", "true");
+  render(<MemoryRouter initialEntries={["/support?type=ACCESS_REQUEST"]}><Routes><Route path="/support" element={<Support/>}/></Routes></MemoryRouter>);
+  expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Report issue / request access" })).toBeInTheDocument();
   expect(screen.getByLabelText("Name")).not.toBeRequired();
   fireEvent.change(screen.getByRole("combobox", { name: /Request type/i }), { target: { value: "INCORRECT_MOVIE" } });

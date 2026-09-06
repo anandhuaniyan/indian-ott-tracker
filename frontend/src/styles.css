@@ -556,29 +556,12 @@ th {
   display: grid;
   gap: 0.35rem;
 }
-.request > button {
+.support-page .request > button {
   min-height: 44px;
   width: fit-content;
 }
-.request-page { max-width: 1000px; }
-.request-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin: 1.25rem 0;
-}
-.request-tabs button {
-  min-height: 48px;
-  padding: 0.75rem 1rem;
-  border: 1px solid #4a4c57;
-  background: #242630;
-  color: #f7f7f8;
-}
-.request-tabs button.active {
-  border-color: #ffbf47;
-  background: #ffbf47;
-  color: #1c1609;
-}
+.support-page { max-width: 1000px; }
+.support-success { grid-template-columns: minmax(0, 1fr); }
 .request-card {
   padding: clamp(1rem, 3vw, 1.5rem);
   border: 1px solid #30333f;
@@ -1839,8 +1822,7 @@ th {
   }
   .request-field-grid { grid-template-columns: 1fr; }
   .request-field-grid .wide { grid-column: auto; }
-  .request-tabs button,
-  .request > button { width: 100%; }
+  .support-page .request > button { width: 100%; }
   .consent > div {
     flex-wrap: wrap;
   }
