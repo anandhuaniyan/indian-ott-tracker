@@ -266,6 +266,7 @@ it("renders complete request detail and queues existing workflows", async () => 
   vi.stubGlobal("fetch", fetch);
   render(<MemoryRouter initialEntries={["/admin/requests/REQ-DETAIL"]}><Routes><Route path="/admin/requests/:requestId" element={<RequestDetail />} /></Routes></MemoryRouter>);
   expect(await screen.findByRole("heading", { name: "Detailed Film" })).toBeInTheDocument();
+  expect(screen.getByText("External / TMDB ID")).toBeInTheDocument();
   expect(screen.getByText("viewer@example.test")).toHaveAttribute("href", "mailto:viewer@example.test");
   expect(screen.getByText(/OTT date/i)).toBeInTheDocument();
   expect(screen.getByText("Adapter unavailable")).toBeInTheDocument();

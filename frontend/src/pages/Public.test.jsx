@@ -243,7 +243,8 @@ it("restores the previous request template and accepts a Deep Search selection",
     </MemoryRouter>,
   );
   expect(screen.getByLabelText("Movie Name *")).toHaveValue("Aadu");
-  expect(screen.getByLabelText("TMDB ID (optional)")).toHaveValue(326282);
+  expect(screen.getByLabelText("ID (optional)")).toHaveValue(326282);
+  expect(screen.queryByText(/TMDB ID/i)).not.toBeInTheDocument();
   expect(screen.getByLabelText("Year")).toHaveValue(2015);
   expect(screen.getByLabelText("Language")).toHaveValue("ml");
   fireEvent.change(screen.getByLabelText("Email *"), { target: { value: "viewer@example.com" } });
@@ -274,6 +275,10 @@ it("restores issue and access as the second tab on the Request page", async () =
   expect(screen.getByRole("tab", { name: "Report issue / request access" })).toHaveAttribute("aria-selected", "true");
   expect(screen.getByRole("heading", { name: "Report issue / request access" })).toBeInTheDocument();
   expect(screen.getByLabelText("Name")).not.toBeRequired();
+  fireEvent.change(screen.getByRole("combobox", { name: /Request type/i }), { target: { value: "INCORRECT_MOVIE" } });
+  expect(screen.getByLabelText("ID")).toBeInTheDocument();
+  expect(screen.queryByText(/TMDB ID/i)).not.toBeInTheDocument();
+  fireEvent.change(screen.getByRole("combobox", { name: /Request type/i }), { target: { value: "ACCESS_REQUEST" } });
   fireEvent.change(screen.getByLabelText("WhatsApp Number (Preferred)"), { target: { value: "+65 8000 0000" } });
   fireEvent.change(screen.getByLabelText("Comment / Description *"), { target: { value: "Please review access." } });
   fireEvent.click(screen.getByRole("button", { name: "Send to administrator" }));
