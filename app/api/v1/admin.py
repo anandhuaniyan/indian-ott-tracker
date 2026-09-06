@@ -32,6 +32,7 @@ from app.models.genre import movie_genres
 from app.models.operations import (
     AdminAuditLog,
     BackfillRecord,
+    ContactRequest,
     DataQualityIssue,
     MovieComment,
     MovieRequest,
@@ -39,6 +40,7 @@ from app.models.operations import (
     OperationState,
     OttEvidence,
     OttSourceRelease,
+    RequestNotificationDelivery,
 )
 from app.models.ott_availability import OttAvailability
 from app.models.research import RequestCommunication, ResearchRun
@@ -57,6 +59,7 @@ from app.services.movie_requests import (
     MovieRequestEmailService,
     MovieRequestUpdateEmailService,
 )
+from app.services.contact_requests import ContactRequestNotificationService, TYPE_LABELS
 from app.services.ott_source_sync import OttSourceSyncService, SOURCES
 from app.services.ott.gold_set import OttGoldSetService
 from app.services.ott.provider_controls import OTTApiBudgetManager
@@ -73,6 +76,7 @@ from app.services.release_status import (
 from app.services.tmdb.movie_service import TMDbMovieService
 from app.services.movie_discovery import MovieDiscoveryService, next_regular_discovery
 from app.services.notification_service import NotificationService
+from app.services.request_discord import RequestDiscordService, serialize_delivery
 from app.services.rating_provider import IMDbRatingRefreshService
 from app.services.research import ResearchPipelineService
 
@@ -113,6 +117,11 @@ class RequestStatus(BaseModel):
     status: str
     public_rejection_reason: str | None = Field(default=None, max_length=1000)
     internal_reason: str | None = Field(default=None, max_length=2000)
+
+
+class ContactRequestAction(BaseModel):
+    action: str = Field(pattern="^(IN_PROGRESS|RESOLVED|REJECTED|APPROVED|ACCEPT_OTT)$")
+    admin_notes: str | None = Field(default=None, max_length=2000)
 
 
 class OttAction(BaseModel):
@@ -1089,6 +1098,7 @@ def _request(item: MovieRequest, db: Session | None = None, rich: bool = False):
         "original_title": item.original_title,
         "movie_external_id": item.external_movie_id,
         "email": item.email,
+        "whatsapp_phone": item.whatsapp_phone,
         "release_year": item.release_year,
         "release_date": item.verified_release_date,
         "language": item.verified_original_language or item.language,
@@ -1157,6 +1167,16 @@ def _request(item: MovieRequest, db: Session | None = None, rich: bool = False):
     result["user_email_history"] = [
         row for row in result["notification_history"] if row["channel"] == "email"
     ]
+    discord_rows = (
+        db.query(RequestNotificationDelivery)
+        .filter_by(request_id=item.request_id, request_kind="MOVIE_REQUEST", provider="DISCORD")
+        .order_by(RequestNotificationDelivery.created_at.desc())
+        .all()
+    )
+    result["discord_delivery_history"] = [serialize_delivery(row) for row in discord_rows]
+    result["discord_notification_status"] = (
+        discord_rows[0].status if discord_rows else "NOT_CONFIGURED"
+    )
     movie = None
     if item.local_movie_id:
         movie = (
@@ -1279,6 +1299,216 @@ def _request(item: MovieRequest, db: Session | None = None, rich: bool = False):
     return result
 
 
+def _contact_request(item: ContactRequest, db: Session | None = None) -> dict:
+    result = {
+        "request_id": item.request_id,
+        "request_type": item.request_type,
+        "type_label": TYPE_LABELS.get(item.request_type, item.request_type.replace("_", " ").title()),
+        "status": item.status,
+        "name": item.name,
+        "whatsapp": item.whatsapp,
+        "phone": item.phone,
+        "email": item.email,
+        "comment": item.comment,
+        "movie_name": item.movie_name,
+        "movie_url": item.movie_url,
+        "tmdb_id": item.tmdb_id,
+        "issue_type": item.issue_type,
+        "expected_ott_platform": item.expected_ott_platform,
+        "expected_ott_release_date": item.expected_ott_release_date,
+        "evidence_url": item.evidence_url,
+        "local_movie_id": item.local_movie_id,
+        "ott_evidence_id": item.ott_evidence_id,
+        "discord_status": item.discord_status,
+        "receipt_email_status": item.receipt_email_status,
+        "outcome_email_status": item.outcome_email_status,
+        "admin_notes": item.admin_notes,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+        "resolved_at": item.resolved_at,
+        "access_approved_at": item.access_approved_at,
+    }
+    if db:
+        rows = (
+            db.query(RequestNotificationDelivery)
+            .filter_by(request_id=item.request_id, request_kind="CONTACT_REQUEST")
+            .order_by(RequestNotificationDelivery.created_at.desc())
+            .all()
+        )
+        result["discord_delivery_history"] = [
+            serialize_delivery(row) for row in rows if row.provider == "DISCORD"
+        ]
+        result["email_delivery_history"] = [
+            serialize_delivery(row) for row in rows if row.provider == "EMAIL"
+        ]
+    return result
+
+
+@router.get("/contact-requests")
+def contact_requests(
+    request_type: str | None = None,
+    status: str | None = None,
+    search: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    query = db.query(ContactRequest)
+    if request_type:
+        if request_type not in TYPE_LABELS:
+            raise HTTPException(422, "Unknown contact request type")
+        query = query.filter(ContactRequest.request_type == request_type)
+    if status:
+        if status not in {"NEW", "IN_PROGRESS", "RESOLVED", "REJECTED", "APPROVED"}:
+            raise HTTPException(422, "Unknown contact request status")
+        query = query.filter(ContactRequest.status == status)
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.filter(or_(
+            ContactRequest.request_id.ilike(term), ContactRequest.name.ilike(term),
+            ContactRequest.email.ilike(term), ContactRequest.whatsapp.ilike(term),
+            ContactRequest.phone.ilike(term), ContactRequest.movie_name.ilike(term),
+            ContactRequest.comment.ilike(term),
+        ))
+    total = query.count()
+    rows = query.order_by(ContactRequest.created_at.desc(), ContactRequest.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    type_counts = dict(db.query(ContactRequest.request_type, func.count(ContactRequest.id)).group_by(ContactRequest.request_type).all())
+    status_counts = dict(db.query(ContactRequest.status, func.count(ContactRequest.id)).group_by(ContactRequest.status).all())
+    return _pagination(total, page, page_size) | {
+        "type_counts": {"ALL": sum(type_counts.values())} | {key: type_counts.get(key, 0) for key in TYPE_LABELS},
+        "status_counts": {key: status_counts.get(key, 0) for key in ("NEW", "IN_PROGRESS", "RESOLVED", "REJECTED", "APPROVED")},
+        "items": [_contact_request(item, db) for item in rows],
+    }
+
+
+@router.get("/contact-requests/{request_id}")
+def contact_request_detail(
+    request_id: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    item = db.query(ContactRequest).filter_by(request_id=request_id).first()
+    if not item:
+        raise HTTPException(404, "Contact request not found")
+    return _contact_request(item, db)
+
+
+@router.patch("/contact-requests/{request_id}", dependencies=[Depends(require_same_origin)])
+def update_contact_request(
+    request_id: str,
+    payload: ContactRequestAction,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    item = db.query(ContactRequest).filter_by(request_id=request_id).first()
+    if not item:
+        raise HTTPException(404, "Contact request not found")
+    now = datetime.now(timezone.utc)
+    if payload.action == "APPROVED":
+        if item.request_type != "ACCESS_REQUEST":
+            raise HTTPException(409, "Only access requests can be approved")
+        item.status = "APPROVED"
+        item.access_approved_at = now
+        item.resolved_at = now
+        # Approval is a review decision only; no account, session, or credential is created here.
+    elif payload.action == "ACCEPT_OTT":
+        if item.request_type != "INCORRECT_OTT" or not item.local_movie_id:
+            raise HTTPException(409, "This report is not linked to a local movie")
+        if not item.expected_ott_platform or not item.evidence_url:
+            raise HTTPException(409, "A platform and evidence URL are required for manual acceptance")
+        evidence = OttResearchService(db).manually_verify(
+            item.local_movie_id,
+            platform=item.expected_ott_platform,
+            release_date=item.expected_ott_release_date,
+            source_url=item.evidence_url,
+            source_name="Administrator-reviewed user report",
+            summary=item.comment,
+        )
+        item.ott_evidence_id = evidence.id
+        item.status = "RESOLVED"
+        item.resolved_at = now
+    else:
+        item.status = payload.action
+        if payload.action in {"RESOLVED", "REJECTED"}:
+            item.resolved_at = now
+        if payload.action == "REJECTED" and item.ott_evidence_id:
+            OttResearchService(db).reject_evidence(item.ott_evidence_id, payload.admin_notes or "Rejected during admin review")
+    if payload.admin_notes is not None:
+        item.admin_notes = payload.admin_notes.strip() or None
+    email_event = item.status if item.status in {"IN_PROGRESS", "RESOLVED", "REJECTED", "APPROVED"} else None
+    if email_event:
+        ContactRequestNotificationService(db).schedule_email(item, email_event)
+    _audit(db, "contact_request_updated", "contact_request", item.request_id, payload.action)
+    db.commit()
+    return _contact_request(item, db)
+
+
+@router.post(
+    "/contact-requests/{request_id}/notifications/discord/retry",
+    dependencies=[Depends(require_same_origin)],
+)
+def retry_contact_request_discord(
+    request_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    item = db.query(ContactRequest).filter_by(request_id=request_id).first()
+    if not item:
+        raise HTTPException(404, "Contact request not found")
+    limit(request, "contact-request-discord-retry", 10, 3600, identity=request_id)
+    delivery = RequestDiscordService(db).schedule_admin_resend(item)
+    _audit(
+        db,
+        "contact_request_discord_retried",
+        "contact_request",
+        request_id,
+        f"Discord: {delivery.status}",
+    )
+    db.commit()
+    return {"provider": "DISCORD", "status": delivery.status, "delivery_id": delivery.id}
+
+
+@router.post(
+    "/contact-requests/{request_id}/emails/{event}/retry",
+    dependencies=[Depends(require_same_origin)],
+)
+def retry_contact_request_email(
+    request_id: str,
+    event: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    item = db.query(ContactRequest).filter_by(request_id=request_id).first()
+    if not item:
+        raise HTTPException(404, "Contact request not found")
+    if not item.email:
+        raise HTTPException(409, "This submission has no email address")
+    event = event.upper()
+    allowed = {"RECEIVED"}
+    if item.status in {"IN_PROGRESS", "RESOLVED", "APPROVED", "REJECTED"}:
+        allowed.add(item.status)
+    if event not in allowed:
+        raise HTTPException(409, "This email event does not match the request status")
+    limit(request, "contact-request-email-retry", 8, 3600, identity=f"{request_id}:{event}")
+    delivery = ContactRequestNotificationService(db).schedule_email(
+        item, event, force_enqueue=True
+    )
+    if delivery and delivery.status == "SENT":
+        raise HTTPException(409, "This email was already sent")
+    _audit(
+        db,
+        "contact_request_email_retried",
+        "contact_request",
+        request_id,
+        f"{event}: {delivery.status if delivery else 'NOT_SUPPLIED'}",
+    )
+    db.commit()
+    return serialize_delivery(delivery) if delivery else {"status": "NOT_SUPPLIED"}
+
+
 @router.get("/requests/{request_id}")
 def request_detail(
     request_id: str,
@@ -1382,6 +1612,22 @@ def retry_request_notification(
     if not item:
         raise HTTPException(404, "Request not found")
     limit(request, "movie-request-notification-retry", 10, 3600, identity=f"{request_id}:{channel}")
+    if channel == "discord":
+        delivery = RequestDiscordService(db).schedule_admin_resend(item)
+        _audit(
+            db,
+            "request_notification_retried",
+            "movie_request",
+            request_id,
+            f"discord: {delivery.status}",
+        )
+        db.commit()
+        return {
+            "channel": "discord",
+            "status": delivery.status,
+            "sent": delivery.status == "SENT",
+            "delivery_id": delivery.id,
+        }
     canonical = db.query(OttAvailability).filter_by(movie_id=item.local_movie_id, country="IN").order_by(OttAvailability.confidence.desc()).first() if item.local_movie_id else None
     message = (
         "NEW MOVIE REQUEST\n"
@@ -1841,6 +2087,7 @@ def ott_research_detail(
                 "date_confidence": item.date_confidence,
                 "observed_at": item.observed_at,
                 "verification_method": item.verification_method,
+                "research_run_id": item.research_run_id,
                 "superseded_by_id": item.superseded_by_id,
                 "checked_at": item.last_checked,
                 "inspected_at": item.inspected_at,
@@ -2354,9 +2601,9 @@ def research_history(
     elif tab == "movie_requests":
         query = query.filter(ResearchRun.request_id.is_not(None))
     elif tab == "failed":
-        query = query.filter(or_(ResearchRun.status == "FAILED", ResearchRun.result == "FAILED"))
+        query = query.filter(or_(ResearchRun.status == "FAILED", ResearchRun.result.in_(("FAILED", "TECHNICAL_FAILURE"))))
     elif tab == "needs_review":
-        query = query.filter(ResearchRun.result.in_(("NEEDS_REVIEW", "CONFLICTING")))
+        query = query.filter(ResearchRun.result.in_(("LOW_CONFIDENCE", "NEEDS_REVIEW", "CONFLICTING")))
     if category:
         query = query.filter(ResearchRun.category == category.upper())
     if result:
@@ -3139,9 +3386,53 @@ def system_health(db: Session = Depends(get_db), _: None = Depends(require_admin
     except Exception:
         worker_status = "DOWN" if redis_status == "DOWN" else "DEGRADED"
     recent_success = db.query(func.max(OperationState.last_success_at)).scalar()
+    recent_success = (
+        recent_success
+        if not recent_success or recent_success.tzinfo
+        else recent_success.replace(tzinfo=timezone.utc)
+    )
     scheduler_status = "HEALTHY" if recent_success and recent_success >= datetime.now(timezone.utc) - timedelta(days=2) else "DEGRADED"
     omdb = IMDbRatingRefreshService(db).health()
     discord = NotificationService.discord_method()
+    latest_discord = db.query(NotificationLog).filter_by(channel="discord").order_by(NotificationLog.created_at.desc()).first()
+    discord_status = (
+        "NOT_CONFIGURED" if not discord["configured"] else
+        "HEALTHY" if not latest_discord or latest_discord.last_notified_at else "DEGRADED"
+    )
+    now = datetime.now(timezone.utc)
+
+    def automation(name: str, operation: str, interval: timedelta, *, configured: bool = True, next_run=None):
+        state = db.query(OperationState).filter_by(name=operation).first()
+        success = state.last_success_at if state else None
+        failure = state.last_failure_at if state else None
+        success = success if not success or success.tzinfo else success.replace(tzinfo=timezone.utc)
+        failure = failure if not failure or failure.tzinfo else failure.replace(tzinfo=timezone.utc)
+        last_run = max((value for value in (success, failure) if value), default=None)
+        stale = not success or success < now - interval * 1.5
+        status = "NOT_CONFIGURED" if not configured else "STALE" if stale else "DEGRADED" if failure and (not success or failure > success) else "HEALTHY"
+        if status == "STALE":
+            NotificationService(db).notify(
+                f"{name} STALE: no successful run within the expected tolerance.",
+                "high", f"automation-stale:{operation}", cooldown_minutes=360,
+                channels=("discord", "telegram", "email"),
+            )
+        return {
+            "name": name,
+            "status": status,
+            "last_run": last_run,
+            "last_success": success,
+            "last_failure": failure,
+            "next_run": next_run or (success + interval if success else None),
+            "last_error": state.last_error if state else None,
+        }
+
+    automations = [
+        automation("MOVIE DISCOVERY", "movies.discovery", timedelta(hours=12), next_run=next_regular_discovery(now)),
+        automation("OTT RESEARCH", "operations.ott_research", timedelta(minutes=30)),
+        automation("OTT WEB RESEARCH", "operations.ott_web_research", timedelta(days=1)),
+        automation("OTT VERIFICATION", "operations.ott_verification", timedelta(days=1)),
+        automation("IMDb REFRESH", "ratings.imdb_refresh", timedelta(hours=6), configured=omdb["configured"]),
+    ]
     return {
         "services": [
             {"name": "API", "status": "HEALTHY", "last_heartbeat": datetime.now(timezone.utc)},
@@ -3162,14 +3453,17 @@ def system_health(db: Session = Depends(get_db), _: None = Depends(require_admin
                 "last_error": omdb["last_error"],
                 "last_request_at": omdb["last_request_at"],
                 "last_imdb_rating_status": omdb["last_rating_status"],
+                "requests_today": omdb["requests_today"],
+                "last_rating_updated": omdb["last_rating_updated"],
             },
             {
                 "name": "Discord",
                 "configured": discord["configured"],
-                "status": "READY" if discord["configured"] else "NOT_CONFIGURED",
+                "status": discord_status,
                 "notification_method": discord["method"],
             },
         ],
+        "automations": automations,
     }
 
 
@@ -3185,7 +3479,7 @@ def test_omdb_provider(
     movie_id = db.query(ExternalId.movie_id).filter(
         func.lower(ExternalId.provider) == "imdb",
         ExternalId.external_id.like("tt%"),
-    ).order_by(ExternalId.movie_id).scalar()
+    ).order_by(ExternalId.movie_id).limit(1).scalar()
     if not movie_id:
         raise HTTPException(409, "No known IMDb ID is available for a safe test")
     result = service.refresh_movie(movie_id)

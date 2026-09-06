@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from app.models.movie import Movie
 from app.models.movie_metadata import ExternalId, MovieCredit, MovieRating, MovieReleaseDate, MovieTrailer, Person
 from app.models.operations import BackfillRecord, OttEvidence
+from app.models.ott_availability import OttAvailability
 from app.services.backfill import IMDbBackfillService, MetadataBackfillService, OttQueueBackfillService, PersonBackfillService, SingleMovieRepairService, TrailerBackfillService
 from app.config.settings import settings
 from app.services.movie_metadata_service import MovieMetadataService
@@ -129,6 +130,27 @@ def test_metadata_enrichment_promotes_core_paths_relations_and_tmdb_watch_provid
     assert movie.poster_path == "/provider-poster.jpg" and movie.backdrop_path == "/provider-backdrop.jpg"
     assert movie.genres[0].name == "Drama" and movie.languages[0].iso_639_1 == "ml"
     assert movie.ott_availabilities[0].provider == "Provider One" and movie.ott_availabilities[0].watch_type == "subscription"
+
+
+def test_tmdb_watch_provider_refresh_prefers_existing_normalized_row(database):
+    movie = database.get(Movie, 2)
+    database.add_all([
+        OttAvailability(movie_id=movie.id, provider="Amazon Prime Video with Ads", country="IN", watch_type="subscription"),
+        OttAvailability(movie_id=movie.id, provider="Prime Video", country="IN", watch_type="subscription"),
+    ])
+    database.commit()
+
+    MovieMetadataService(database)._upsert_watch_providers(movie, {
+        "results": {"IN": {
+            "link": "https://www.themoviedb.org/movie/102/watch",
+            "flatrate": [{"provider_name": "Amazon Prime Video", "logo_path": "/prime.png"}],
+        }}
+    })
+    database.commit()
+
+    rows = database.query(OttAvailability).filter_by(movie_id=movie.id, watch_type="subscription").all()
+    assert len(rows) == 2
+    assert next(row for row in rows if row.provider == "Prime Video").provider_logo == "/prime.png"
 
 
 def test_external_id_upsert_skips_shared_social_identity_without_failing(database):

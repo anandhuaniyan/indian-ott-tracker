@@ -3,7 +3,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
-import { Comments, Dashboard, DataHealth, Discovery, Jobs, Movies, OttGoldSet, OttResearch, ResearchHistory, ResearchRunDetail, RequestDetail, Requests, Sources } from "./Admin";
+import { Comments, ContactRequests, Dashboard, DataHealth, Discovery, Jobs, Movies, OttGoldSet, OttResearch, ResearchHistory, ResearchRunDetail, RequestDetail, Requests, Sources } from "./Admin";
 import { Request } from "./Public";
 
 afterEach(() => {
@@ -37,7 +37,7 @@ it("renders the validated movie request form", () => {
     screen.getByRole("heading", { name: "Request a movie" }),
   ).toBeInTheDocument();
   expect(screen.getByLabelText("Email *")).toHaveAttribute("type", "email");
-  expect(screen.getByLabelText("ID *")).toHaveAttribute("type", "number");
+  expect(screen.getByLabelText("WhatsApp / Phone")).toHaveAttribute("type", "tel");
   expect(
     screen.getByRole("button", { name: "Submit request" }),
   ).toBeInTheDocument();
@@ -258,6 +258,8 @@ it("renders complete request detail and queues existing workflows", async () => 
       ott: { status: "POSSIBLE", verification_status: "NEEDS_REVIEW", platform: "Netflix", confidence: 82, sources: [] },
       trailer: { available: true, video_key: "abcdefghijk", name: "Official Trailer" },
       data_completeness: { poster: true, ott_date: false },
+      discord_notification_status: "FAILED",
+      discord_delivery_history: [{ notification_type: "MOVIE_REQUEST_SUBMITTED", status: "FAILED", attempt_count: 2, sanitized_error: "Adapter unavailable" }],
       emails: { confirmation: { status: "SENT", sent_at: "2026-08-29T00:01:00Z" } },
     }),
   });
@@ -266,8 +268,35 @@ it("renders complete request detail and queues existing workflows", async () => 
   expect(await screen.findByRole("heading", { name: "Detailed Film" })).toBeInTheDocument();
   expect(screen.getByText("viewer@example.test")).toHaveAttribute("href", "mailto:viewer@example.test");
   expect(screen.getByText(/OTT date/i)).toBeInTheDocument();
+  expect(screen.getByText("Adapter unavailable")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Resend Discord" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Refresh OTT" }));
   await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/research/requests/REQ-DETAIL"), expect.objectContaining({ method: "POST" })));
+});
+
+it("shows contact delivery history and provides admin resend", async () => {
+  const data = {
+    total: 1, page: 1, pages: 1,
+    type_counts: { ALL: 1, WEBSITE_ISSUE: 1 },
+    status_counts: { NEW: 1 },
+    items: [{
+      request_id: "WEB-123", request_type: "WEBSITE_ISSUE", type_label: "Report Website Issue",
+      status: "NEW", whatsapp: "+65 8000 0000", email: "viewer@example.test", comment: "Broken navigation", discord_status: "FAILED", receipt_email_status: "FAILED", outcome_email_status: null,
+      created_at: "2026-09-06T00:00:00Z",
+      discord_delivery_history: [{ notification_type: "WEBSITE_ISSUE_SUBMITTED", status: "FAILED", attempt_count: 1, sanitized_error: "Temporary failure" }],
+      email_delivery_history: [{ notification_type: "CONTACT_EMAIL_RECEIVED", status: "FAILED", attempt_count: 1, attempted_at: "2026-09-06T00:01:00Z", sanitized_error: "SMTP unavailable" }],
+    }],
+  };
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => data });
+  vi.stubGlobal("fetch", fetch);
+  render(<MemoryRouter><ContactRequests /></MemoryRouter>);
+  expect(await screen.findByText("Broken navigation")).toBeInTheDocument();
+  expect(screen.getByText("Temporary failure")).toBeInTheDocument();
+  expect(screen.getByText(/SMTP unavailable/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Resend email" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/contact-requests/WEB-123/emails/RECEIVED/retry"), expect.objectContaining({ method: "POST" })));
+  fireEvent.click(screen.getByRole("button", { name: "Resend Discord" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/contact-requests/WEB-123/notifications/discord/retry"), expect.objectContaining({ method: "POST" })));
 });
 
 it("renders paginated admin movie operations", async () => {

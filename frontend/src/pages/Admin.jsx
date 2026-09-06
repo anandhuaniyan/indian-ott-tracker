@@ -40,6 +40,7 @@ const Nav = () => (
   <nav className="admin-nav">
     <Link to="/admin">Dashboard</Link>
     <Link to="/admin/requests">Requests</Link>
+    <Link to="/admin/contact-requests">Contact requests</Link>
     <Link to="/admin/movies">Movies</Link>
     <Link to="/admin/discovery">Discovery</Link>
     <Link to="/admin/research-history">Research history</Link>
@@ -95,7 +96,7 @@ const Status = ({ children }) => {
   const value = String(children || "UNKNOWN");
   const tone = /FAILED|DOWN|CONFLICT|OVERDUE|REJECTED/.test(value)
     ? "danger"
-    : /PENDING|POSSIBLE|ATTENTION|URGENT|REVIEW|DEGRADED|QUEUED|RUNNING/.test(value)
+    : /PENDING|POSSIBLE|ATTENTION|URGENT|REVIEW|DEGRADED|STALE|QUEUED|RUNNING/.test(value)
       ? "warning"
       : /HEALTHY|SENT|ADDED|APPROVED|CONFIRMED|COMPLETE|MATCHED/.test(value)
         ? "success"
@@ -488,6 +489,7 @@ export function Requests() {
                   <div><dt>Language</dt><dd>{item.language_name || item.language || "—"}</dd></div>
                   <div><dt>Director</dt><dd>{item.director || "—"}</dd></div>
                   <div><dt>Requester</dt><dd>{item.email}</dd></div>
+                  <div><dt>WhatsApp / Phone</dt><dd>{item.whatsapp_phone || "Not supplied"}</dd></div>
                   <div><dt>Reference</dt><dd>{item.request_id}</dd></div>
                   <div><dt>Created</dt><dd>{new Date(item.created_at).toLocaleString()}</dd></div>
                   <div><dt>Last updated</dt><dd>{when(item.updated_at)}</dd></div>
@@ -535,6 +537,78 @@ export function Requests() {
   );
 }
 
+export function ContactRequests() {
+  const { requestId } = useParams();
+  const [type, setType] = useState("");
+  const [status, setStatus] = useState("");
+  const [search, setSearch] = useState(requestId || "");
+  const [page, setPage] = useState(1);
+  const [message, setMessage] = useState("");
+  const query = new URLSearchParams({ ...(type && { request_type: type }), ...(status && { status }), ...(search && { search }), page: String(page), page_size: "50" });
+  const [data, error, reload] = useAdmin(`/api/v1/admin/contact-requests?${query}`, 15000);
+  const update = (id, action) => {
+    setMessage("");
+    call(`/api/v1/admin/contact-requests/${encodeURIComponent(id)}`, json("PATCH", { action }))
+      .then(() => { setMessage(`${id} updated.`); reload(); })
+      .catch((reason) => setMessage(reason.message));
+  };
+  const research = (item, scope) => {
+    if (!item.local_movie_id) return setMessage("This report is not linked to a local movie yet.");
+    return call(`/api/v1/admin/research/movies/${item.local_movie_id}`, json("POST", { confirmed: true, scope }))
+      .then((value) => setMessage(`Research queued. Run ${value.run_id}.`))
+      .catch((reason) => setMessage(reason.message));
+  };
+  const resendDiscord = (item) => {
+    setMessage("");
+    return call(`/api/v1/admin/contact-requests/${encodeURIComponent(item.request_id)}/notifications/discord/retry`, { method: "POST" })
+      .then((value) => { setMessage(`Discord delivery ${value.status.toLowerCase()}.`); reload(); })
+      .catch((reason) => setMessage(reason.message));
+  };
+  const resendEmail = (item, event = "RECEIVED") => {
+    setMessage("");
+    return call(`/api/v1/admin/contact-requests/${encodeURIComponent(item.request_id)}/emails/${event}/retry`, { method: "POST" })
+      .then((value) => { setMessage(`Email delivery ${value.status.toLowerCase()}.`); reload(); })
+      .catch((reason) => setMessage(reason.message));
+  };
+  const typeTabs = [["", "All"], ["WEBSITE_ISSUE", "Issues"], ["INCORRECT_MOVIE", "Incorrect movie data"], ["INCORRECT_OTT", "Incorrect OTT data"], ["ACCESS_REQUEST", "Access requests"], ["OTHER", "Other"]];
+  const statusTabs = [["NEW", "New"], ["IN_PROGRESS", "In progress"], ["RESOLVED", "Resolved"], ["APPROVED", "Approved"], ["REJECTED", "Rejected"]];
+  if (error) return <Guard error={error} />;
+  return <Page title="Contact requests">
+    <p>Private issue, correction, and access submissions. Contact details are visible only in this authenticated admin area.</p>
+    <div className="admin-counter-tabs" aria-label="Contact request types">{typeTabs.map(([value, label]) => <button key={label} className={type === value ? "active" : ""} onClick={() => { setType(value); setPage(1); }}>{label} {data?.type_counts?.[value || "ALL"] ?? 0}</button>)}</div>
+    <div className="admin-counter-tabs" aria-label="Contact request statuses">{statusTabs.map(([value, label]) => <button key={value} className={status === value ? "active" : ""} onClick={() => { setStatus(status === value ? "" : value); setPage(1); }}>{label} {data?.status_counts?.[value] ?? 0}</button>)}</div>
+    <form className="toolbar" onSubmit={(event) => { event.preventDefault(); setPage(1); reload(); }}><label>Search private inbox<input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, contact, movie, comment or ID" /></label><button>Search</button><button type="button" onClick={reload}>Refresh</button></form>
+    {message && <p role="status">{message}</p>}
+    {!data ? <p>Loading…</p> : <div className="admin-contact-list">{data.items.map((item) => <article className="admin-panel" key={item.request_id}>
+      <header><div><h2>{item.type_label}</h2><p>{item.request_id} · {when(item.created_at)}</p></div><Status>{item.status}</Status></header>
+      <dl className="admin-request-facts">
+        <div><dt>Name</dt><dd>{item.name || "Not supplied"}</dd></div><div><dt>WhatsApp</dt><dd>{item.whatsapp ? <a href={`https://wa.me/${item.whatsapp.replace(/\D/g, "")}`}>{item.whatsapp}</a> : "Not supplied"}</dd></div><div><dt>Phone</dt><dd>{item.phone ? <a href={`tel:${item.phone}`}>{item.phone}</a> : "Not supplied"}</dd></div><div><dt>Email</dt><dd>{item.email ? <a href={`mailto:${item.email}`}>{item.email}</a> : "Not supplied"}</dd></div>
+        <div><dt>Movie</dt><dd>{item.movie_name || "Not applicable"}</dd></div><div><dt>TMDB ID</dt><dd>{item.tmdb_id || "Not supplied"}</dd></div><div><dt>Issue type</dt><dd>{item.issue_type || "Not supplied"}</dd></div><div><dt>Discord</dt><dd><Status>{item.discord_status}</Status></dd></div>
+        <div><dt>Receipt email</dt><dd><Status>{item.receipt_email_status}</Status></dd></div><div><dt>Outcome email</dt><dd><Status>{item.outcome_email_status || "PENDING"}</Status></dd></div>
+        {item.request_type === "INCORRECT_OTT" && <><div><dt>Reported platform</dt><dd>{item.expected_ott_platform || "Unknown"}</dd></div><div><dt>Reported OTT date</dt><dd>{item.expected_ott_release_date || "Unknown"}</dd></div></>}
+      </dl>
+      <h3>Comment</h3><p className="pre-wrap">{item.comment}</p>
+      <h3>Discord delivery history</h3>
+      <div className="admin-research-grid">{(item.discord_delivery_history || []).map((delivery, index) => <article key={`${delivery.notification_type}-${index}`}><header><strong>{delivery.notification_type.replaceAll("_", " ")}</strong><Status>{delivery.status}</Status></header><p>{delivery.attempt_count} attempt(s) · {delivery.sent_at ? when(delivery.sent_at) : delivery.attempted_at ? when(delivery.attempted_at) : "Not attempted yet"}</p>{delivery.sanitized_error && <small>{delivery.sanitized_error}</small>}</article>)}{!item.discord_delivery_history?.length && <p className="empty">No Discord delivery events recorded.</p>}</div>
+      <h3>Email delivery history</h3>
+      <div className="admin-research-grid">{(item.email_delivery_history || []).map((delivery, index) => {
+        const event = delivery.notification_type.replace("CONTACT_EMAIL_", "");
+        return <article key={`${delivery.notification_type}-${index}`}><header><strong>{event.replaceAll("_", " ")}</strong><Status>{delivery.status}</Status></header><p>{delivery.attempt_count} attempt(s)</p><small>Last attempt: {delivery.attempted_at ? when(delivery.attempted_at) : "Not attempted"}<br />Last success: {delivery.sent_at ? when(delivery.sent_at) : "Not sent"}{delivery.sanitized_error && <><br />Last error: {delivery.sanitized_error}</>}</small>{delivery.status !== "SENT" && <button onClick={() => resendEmail(item, event)}>Resend email</button>}</article>;
+      })}{!item.email_delivery_history?.length && <p className="empty">{item.email ? "No email delivery event recorded yet." : "No email address was supplied."}</p>}</div>
+      <div className="admin-request-actions">
+        {item.movie_url && <a className="button-link" href={item.movie_url} rel="noreferrer">Open submitted movie URL</a>}{item.evidence_url && <a className="button-link" href={item.evidence_url} rel="noreferrer">Open evidence</a>}{item.local_movie_id && <Link className="button-link" to={`/movies/${item.local_movie_id}`}>Open Movie</Link>}
+        {item.local_movie_id && <><button onClick={() => research(item, "full")}>Research Movie</button><button onClick={() => research(item, "ott")}>Research OTT</button></>}
+        {item.status === "NEW" && <button onClick={() => update(item.request_id, "IN_PROGRESS")}>Mark In Progress</button>}
+        {!(["RESOLVED", "REJECTED", "APPROVED"].includes(item.status)) && <><button onClick={() => update(item.request_id, "RESOLVED")}>Mark Resolved</button><button onClick={() => update(item.request_id, "REJECTED")}>Reject</button></>}
+        {item.request_type === "ACCESS_REQUEST" && !(["APPROVED", "REJECTED"].includes(item.status)) && <button onClick={() => update(item.request_id, "APPROVED")}>Approve</button>}
+        {item.request_type === "INCORRECT_OTT" && item.local_movie_id && item.expected_ott_platform && item.evidence_url && item.status !== "RESOLVED" && <button onClick={() => update(item.request_id, "ACCEPT_OTT")}>Accept Manually</button>}
+        {item.email && !item.email_delivery_history?.length && <button onClick={() => resendEmail(item)}>Resend email</button>}
+        <button onClick={() => resendDiscord(item)}>Resend Discord</button>
+      </div>
+    </article>)}{!data.items.length && <p className="empty">No contact requests match these filters.</p>}<Pager data={data} onPage={setPage} /></div>}
+  </Page>;
+}
+
 export function RequestDetail() {
   const { requestId } = useParams();
   const [data, error, reload] = useAdmin(`/api/v1/admin/requests/${encodeURIComponent(requestId)}`, 15000);
@@ -561,6 +635,7 @@ export function RequestDetail() {
             <div><dt>Age</dt><dd>{duration(data.age_seconds)}</dd></div>
             <div><dt>Last updated</dt><dd>{when(data.updated_at)}</dd></div>
             <div><dt>Requester</dt><dd><a href={`mailto:${data.email}`}>{data.email}</a></dd></div>
+            <div><dt>WhatsApp / Phone</dt><dd>{data.whatsapp_phone ? <a href={`tel:${data.whatsapp_phone}`}>{data.whatsapp_phone}</a> : "Not supplied"}</dd></div>
           </dl>
         </div>
       </section>
@@ -622,6 +697,7 @@ export function RequestDetail() {
       </section>
       <section className="admin-panel">
         <h2>Research history</h2>
+        <p>Discord Notification: <Status>{data.discord_notification_status || "NOT_CONFIGURED"}</Status></p>
         <div className="admin-research-grid">
           {(data.research_history || []).map((run) => <article key={run.run_id}>
             <header><strong>{run.category}</strong><Status>{run.result || run.status}</Status></header>
@@ -635,6 +711,11 @@ export function RequestDetail() {
         <div className="admin-research-grid">
           {(data.notification_history || []).map((item, index) => <article key={`${item.event_type}-${item.channel}-${index}`}><header><strong>{item.event_type.replaceAll("_", " ")}</strong><Status>{item.status}</Status></header><p>{item.channel} · {item.attempt_count} attempt(s)</p><small>{item.sent_at ? when(item.sent_at) : item.last_error || "Not sent"}</small></article>)}
           {!data.notification_history?.length && <p className="empty">No additional notification events recorded.</p>}
+        </div>
+        <h3>Discord delivery history</h3>
+        <div className="admin-research-grid">
+          {(data.discord_delivery_history || []).map((item, index) => <article key={`${item.notification_type}-${index}`}><header><strong>{item.notification_type.replaceAll("_", " ")}</strong><Status>{item.status}</Status></header><p>DISCORD · {item.attempt_count} attempt(s)</p><small>{item.sent_at ? when(item.sent_at) : item.sanitized_error || "Not attempted yet"}</small></article>)}
+          {!data.discord_delivery_history?.length && <p className="empty">No Discord delivery events recorded.</p>}
         </div>
         <h3>User email history</h3>
         <div className="admin-research-grid">{(data.user_email_history || []).map((item, index) => <article key={`${item.event_type}-${index}`}><header><strong>{item.event_type.replaceAll("_", " ")}</strong><Status>{item.status}</Status></header><p>{item.attempt_count} attempt(s) · {item.sent_at ? when(item.sent_at) : item.last_error || "Not sent"}</p></article>)}{!data.user_email_history?.length && <p className="empty">No matched, OTT-found, or needs-information emails yet.</p>}</div>
@@ -1088,6 +1169,7 @@ export function OttResearch() {
                     <strong>{item.source_name || item.source_type}</strong>
                     <p>{item.fact_type || "EVIDENCE"} · {item.platform_found || "No platform"} · {item.release_date_found || "No date"} · {item.result_status}</p>
                     <p>Match {item.movie_match_confidence}% · Platform {item.platform_confidence}% · Date {item.date_confidence}%</p>
+                    <small>{item.verification_method || "UNKNOWN METHOD"}{item.research_run_id ? ` · Research run ${item.research_run_id}` : ""}</small>
                     <p>{item.evidence_summary || "No summary"}</p>
                     <a href={item.source_url} rel="noreferrer">Open source</a>
                     {!item.rejected_at && (
@@ -1242,7 +1324,7 @@ export function ResearchHistory() {
     <div className="admin-counter-tabs">{[["all", "All"], ["automated", "Automated"], ["manual", "Manual"], ["movie_requests", "Movie requests"], ["failed", "Failed"], ["needs_review", "Needs review"]].map(([value, label]) => <button key={value} className={tab === value ? "active" : ""} onClick={() => { setTab(value); setPage(1); }}>{label}</button>)}</div>
     <div className="admin-filter-grid">
       <select aria-label="Research category" value={category} onChange={(event) => { setCategory(event.target.value); setPage(1); }}><option value="">All categories</option>{["DISCOVERY", "FULL", "OTT", "WEB", "IMDB", "TMDB"].map((value) => <option key={value}>{value}</option>)}</select>
-      <select aria-label="Research result" value={result} onChange={(event) => { setResult(event.target.value); setPage(1); }}><option value="">All results</option>{["UPDATED", "NO_CHANGE", "NEEDS_REVIEW", "CONFLICTING", "NOT_FOUND", "FAILED"].map((value) => <option key={value}>{value}</option>)}</select>
+      <select aria-label="Research result" value={result} onChange={(event) => { setResult(event.target.value); setPage(1); }}><option value="">All results</option>{["UPDATED", "NO_CHANGE", "LOW_CONFIDENCE", "NEEDS_REVIEW", "CONFLICTING", "NOT_FOUND", "TECHNICAL_FAILURE", "FAILED"].map((value) => <option key={value}>{value}</option>)}</select>
       <select aria-label="Movie language" value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }}><option value="">All languages</option>{[["ml", "Malayalam"], ["ta", "Tamil"], ["te", "Telugu"], ["hi", "Hindi"], ["kn", "Kannada"]].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
       <button onClick={reload}>Refresh</button>
     </div>
@@ -1283,7 +1365,15 @@ export function SystemHealth() {
   const testOmdb = () => call("/api/v1/admin/system-health/omdb/test", { method: "POST" }).then((value) => { setTestMessage(`OMDb ${value.connection}; response ${value.response}.`); reload(); }).catch((reason) => setTestMessage(reason.message));
   const error = healthError || auditError;
   if (error) return <Guard error={error} />;
-  return <Page title="System health"><button onClick={reload}>Refresh health</button>{testMessage && <p role="status">{testMessage}</p>}<div className="admin-source-grid">{(health?.services || []).map((service) => <article key={service.name}><header><h2>{service.name}</h2><Status>{service.status}</Status></header><p>Last heartbeat: {when(service.last_heartbeat)}</p>{service.queue_depth != null && <p>Queue depth: {service.queue_depth}</p>}{service.last_error && <p className="admin-safe-error">{service.last_error}</p>}</article>)}</div><h2>Providers</h2><div className="admin-source-grid">{(health?.providers || []).map((provider) => <article key={provider.name}><header><h2>{provider.name}</h2><Status>{provider.status}</Status></header><p>Configured: {provider.configured ? "Yes" : "No"}</p>{provider.notification_method && <p>Notification method: {provider.notification_method.replaceAll("_", " ")}</p>}{provider.missing?.length > 0 && <p>Missing: {provider.missing.join(", ")}</p>}<p>Last successful request: {when(provider.last_successful_request)}</p><p>Last failed request: {when(provider.last_failed_request)}</p>{provider.last_error && <p className="admin-safe-error">{provider.last_error}</p>}{provider.name === "OMDb" && <button disabled={!provider.configured} onClick={testOmdb}>TEST PROVIDER</button>}</article>)}</div><h2>Administrator audit trail</h2>{audit && <Table headers={["Timestamp", "Action", "Target", "Summary"]} rows={audit.items.map((item) => <tr key={item.id}><td>{when(item.timestamp)}</td><td>{item.action.replaceAll("_", " ")}</td><td>{item.target_type} {item.target_id || ""}</td><td>{item.summary || "—"}</td></tr>)} />}</Page>;
+  return <Page title="System health">
+    <button onClick={reload}>Refresh health</button>{testMessage && <p role="status">{testMessage}</p>}
+    <div className="admin-source-grid">{(health?.services || []).map((service) => <article key={service.name}><header><h2>{service.name}</h2><Status>{service.status}</Status></header><p>Last heartbeat: {when(service.last_heartbeat)}</p>{service.queue_depth != null && <p>Queue depth: {service.queue_depth}</p>}{service.last_error && <p className="admin-safe-error">{service.last_error}</p>}</article>)}</div>
+    <h2>Providers</h2>
+    <div className="admin-source-grid">{(health?.providers || []).map((provider) => <article key={provider.name}><header><h2>{provider.name}</h2><Status>{provider.status}</Status></header><p>Configured: {provider.configured ? "Yes" : "No"}</p>{provider.notification_method && <p>Method: {provider.notification_method.replaceAll("_", " ")}</p>}{provider.missing?.length > 0 && <p>Missing: {provider.missing.join(", ")}</p>}<p>Last successful request: {when(provider.last_successful_request)}</p><p>Last failed request: {when(provider.last_failed_request)}</p>{provider.requests_today != null && <p>Requests today: {provider.requests_today}</p>}{provider.last_rating_updated && <p>Last rating updated: {when(provider.last_rating_updated)}</p>}{provider.last_error && <p className="admin-safe-error">{provider.last_error}</p>}{provider.name === "OMDb" && <button disabled={!provider.configured} onClick={testOmdb}>TEST PROVIDER</button>}</article>)}</div>
+    <h2>Automations</h2>
+    <div className="admin-source-grid">{(health?.automations || []).map((automation) => <article key={automation.name}><header><h2>{automation.name}</h2><Status>{automation.status}</Status></header><p>Last run: {when(automation.last_run)}</p><p>Last success: {when(automation.last_success)}</p><p>Last failure: {when(automation.last_failure)}</p><p>Next run: {when(automation.next_run)}</p>{automation.last_error && <p className="admin-safe-error">{automation.last_error}</p>}</article>)}</div>
+    <h2>Administrator audit trail</h2>{audit && <Table headers={["Timestamp", "Action", "Target", "Summary"]} rows={audit.items.map((item) => <tr key={item.id}><td>{when(item.timestamp)}</td><td>{item.action.replaceAll("_", " ")}</td><td>{item.target_type} {item.target_id || ""}</td><td>{item.summary || "—"}</td></tr>)} />}
+  </Page>;
 }
 
 export function Jobs() {

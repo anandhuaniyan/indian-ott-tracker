@@ -31,7 +31,8 @@ export async function post(path, body) {
   const response = await fetch(`${API}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(typeof payload.detail === "string" ? payload.detail : "Unable to submit request");
+    const validationMessage = Array.isArray(payload.detail) ? payload.detail.map(item => item.msg).filter(Boolean).join(" ") : null;
+    const error = new Error(typeof payload.detail === "string" ? payload.detail : validationMessage || payload.detail?.message || "Unable to submit request");
     error.data = payload;
     throw error;
   }

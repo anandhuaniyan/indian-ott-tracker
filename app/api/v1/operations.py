@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -12,7 +12,7 @@ from app.config.settings import settings
 from app.database.connection import get_db
 from app.models.movie import Movie
 from app.core.rate_limit import limit
-from app.models.operations import DataQualityIssue, MovieRequest, OttEvidence
+from app.models.operations import ContactRequest, DataQualityIssue, MovieRequest, OttEvidence
 from app.models.research import RequestCommunication
 from app.services.deep_search import DeepSearchService
 from app.services.movie_requests import (
@@ -20,6 +20,9 @@ from app.services.movie_requests import (
     MovieRequestEmailService,
 )
 from app.services.tmdb.client import TMDbRequestError
+from app.services.contact_requests import ContactRequestNotificationService
+from app.services.operations import OttResearchService
+from app.services.release_status import best_canonical_ott
 
 router = APIRouter(prefix="/api/v1", tags=["Operations"])
 
@@ -27,9 +30,10 @@ router = APIRouter(prefix="/api/v1", tags=["Operations"])
 class RequestMovie(BaseModel):
     movie_name: str = Field(min_length=2, max_length=500)
     email: str = Field(max_length=320)
-    movie_external_id: int = Field(ge=1, le=2_147_483_647)
+    movie_external_id: int | None = Field(default=None, ge=1, le=2_147_483_647)
     release_year: int | None = Field(default=None, ge=1888, le=2100)
     language: str | None = Field(default=None, max_length=20)
+    whatsapp_phone: str | None = Field(default=None, max_length=50)
     details: str | None = Field(default=None, max_length=2000)
 
     @field_validator("email")
@@ -40,6 +44,59 @@ class RequestMovie(BaseModel):
             raise ValueError("A valid email address is required")
         return value
 
+    @field_validator("movie_name", "language", "whatsapp_phone", "details", mode="before")
+    @classmethod
+    def clean_optional_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+CONTACT_TYPES = {"WEBSITE_ISSUE", "INCORRECT_MOVIE", "INCORRECT_OTT", "ACCESS_REQUEST", "OTHER"}
+
+
+class ContactSubmission(BaseModel):
+    request_type: str
+    name: str | None = Field(default=None, max_length=200)
+    whatsapp: str | None = Field(default=None, max_length=50)
+    phone: str | None = Field(default=None, max_length=50)
+    email: str | None = Field(default=None, max_length=320)
+    comment: str = Field(min_length=5, max_length=5000)
+    movie_name: str | None = Field(default=None, max_length=500)
+    movie_url: str | None = Field(default=None, max_length=1000, pattern=r"^https?://")
+    tmdb_id: int | None = Field(default=None, ge=1, le=2_147_483_647)
+    issue_type: str | None = Field(default=None, max_length=100)
+    expected_ott_platform: str | None = Field(default=None, max_length=100)
+    expected_ott_release_date: date | None = None
+    evidence_url: str | None = Field(default=None, max_length=1000, pattern=r"^https?://")
+
+    @field_validator("request_type")
+    @classmethod
+    def valid_type(cls, value):
+        value = value.strip().upper()
+        if value not in CONTACT_TYPES:
+            raise ValueError("Unknown request type")
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def optional_email(cls, value):
+        if value in (None, ""):
+            return None
+        value = value.strip().lower()
+        if "@" not in value or value.startswith("@") or value.endswith("@"):
+            raise ValueError("Enter a valid email address")
+        return value
+
+    @field_validator("name", "whatsapp", "phone", "comment", "movie_name", "issue_type", "expected_ott_platform", mode="before")
+    @classmethod
+    def clean_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def contact_required(self):
+        if not any((self.whatsapp, self.phone, self.email)):
+            raise ValueError("Provide at least one contact method: WhatsApp, phone, or email")
+        return self
+
 
 @router.post("/movie-requests", status_code=201)
 def request_movie(
@@ -48,11 +105,37 @@ def request_movie(
     limit(request, "movie-request", 5, 3600)
     limit(request, "movie-request-email-hour", 8, 3600, identity=payload.email)
     limit(request, "movie-request-email-day", 20, 86400, identity=payload.email)
-    limit(request, "movie-request-id", 8, 3600, identity=payload.movie_external_id)
+    movie_external_id = payload.movie_external_id
+    if movie_external_id is None:
+        try:
+            search = DeepSearchService(db).search_movies(
+                payload.movie_name, year=payload.release_year, language=payload.language
+            )
+        except Exception as exc:
+            raise HTTPException(503, "Movie search is temporarily unavailable. Please try again later.") from exc
+        normalized = " ".join(payload.movie_name.casefold().split())
+        exact = [
+            item for item in search.get("results", [])
+            if normalized in {
+                " ".join(str(item.get("title") or "").casefold().split()),
+                " ".join(str(item.get("original_title") or "").casefold().split()),
+            }
+        ]
+        candidates = exact or search.get("results", [])[:5]
+        if len(candidates) != 1:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "Choose the matching TMDB movie so we can verify the correct title.",
+                    "candidates": candidates[:5],
+                },
+            )
+        movie_external_id = int(candidates[0]["id"])
+    limit(request, "movie-request-id", 8, 3600, identity=movie_external_id)
     duplicate = (
         db.query(MovieRequest)
         .filter(
-            MovieRequest.external_movie_id == payload.movie_external_id,
+            MovieRequest.external_movie_id == movie_external_id,
             func.lower(MovieRequest.email) == payload.email.lower(),
             MovieRequest.status.in_(ACTIVE_REQUEST_STATUSES),
         )
@@ -67,7 +150,7 @@ def request_movie(
             },
         )
     try:
-        snapshot = DeepSearchService(db).verify_movie(payload.movie_external_id)
+        snapshot = DeepSearchService(db).verify_movie(movie_external_id)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(
@@ -98,7 +181,7 @@ def request_movie(
     duplicate = (
         db.query(MovieRequest)
         .filter(
-            MovieRequest.external_movie_id == payload.movie_external_id,
+            MovieRequest.external_movie_id == movie_external_id,
             func.lower(MovieRequest.email) == payload.email.lower(),
             MovieRequest.status.in_(ACTIVE_REQUEST_STATUSES),
         )
@@ -119,14 +202,15 @@ def request_movie(
         except (TypeError, ValueError):
             release_date = None
     verified_title = snapshot["verified_title"].strip()
-    local = db.query(Movie).filter(Movie.tmdb_id == payload.movie_external_id).first()
+    local = db.query(Movie).filter(Movie.tmdb_id == movie_external_id).first()
     item = MovieRequest(
         request_id=f"REQ-{secrets.token_hex(5).upper()}",
-        movie_name=verified_title,
+        movie_name=payload.movie_name,
         email=str(payload.email),
-        external_movie_id=payload.movie_external_id,
+        external_movie_id=movie_external_id,
         release_year=release_date.year if release_date else None,
-        language=snapshot.get("original_language"),
+        language=payload.language or snapshot.get("original_language"),
+        whatsapp_phone=payload.whatsapp_phone or None,
         details=payload.details.strip() if payload.details else None,
         verified_title=verified_title,
         original_title=snapshot.get("original_title"),
@@ -152,7 +236,7 @@ def request_movie(
         duplicate = (
             db.query(MovieRequest)
             .filter(
-                MovieRequest.external_movie_id == payload.movie_external_id,
+                MovieRequest.external_movie_id == movie_external_id,
                 func.lower(MovieRequest.email) == payload.email.lower(),
                 MovieRequest.status.in_(ACTIVE_REQUEST_STATUSES),
             )
@@ -177,17 +261,25 @@ def request_movie(
 
     try:
         release_label = item.verified_release_date or item.release_year or "Unknown"
+        ott = best_canonical_ott(local) if local else None
+        ott_platform = ott.provider if ott else "Researching"
+        ott_date = ott.ott_release_date if ott and ott.ott_release_date else "Researching"
+        ott_confidence = f"{int(ott.confidence or 0)}%" if ott else "Researching"
         message = (
-            "NEW MOVIE REQUEST\n"
-            f"Request ID: {item.request_id}\nMovie Name: {item.movie_name}\n"
+            "🎬 NEW MOVIE REQUEST\n"
+            f"Request ID: {item.request_id}\nMovie Name: {item.verified_title or item.movie_name}\n"
+            f"Original Movie Name: {item.original_title or 'Not applicable'}\n"
             f"Year: {item.release_year or 'Unknown'}\n"
             f"Language: {item.verified_language_name or item.verified_original_language or item.language or 'Unknown'}\n"
-            f"TMDB ID: {item.external_movie_id}\nTMDB Release Date: {release_label}\n"
-            "OTT Platform: Researching\nOTT Release Date: Researching\n"
-            f"Requester Email: {item.email}\nCurrent Status: {item.status}\n"
+            f"TMDB ID: {item.external_movie_id}\nIMDb ID: {item.imdb_id or 'Pending'}\n"
+            f"TMDB/Theatrical Release Date: {release_label}\n"
+            f"OTT Platform: {ott_platform}\nOTT Release Date: {ott_date}\nOTT Confidence: {ott_confidence}\n"
+            f"Requester Email: {item.email}\nRequester WhatsApp/Phone: {item.whatsapp_phone or 'Not supplied'}\n"
+            f"Comments: {item.details or 'Not supplied'}\nRequest Time: {item.created_at.isoformat()}\n"
+            f"Current Status: {item.status}\nLocal Movie ID: {item.local_movie_id or 'Pending'}\n"
             f"Admin: {settings.SITE_URL.rstrip('/')}/admin/requests/{item.request_id}"
         )
-        for channel in ("telegram", "discord"):
+        for channel in ("telegram",):
             sent = NotificationService(db).notify(
                 message,
                 severity="info",
@@ -210,6 +302,9 @@ def request_movie(
         # Requester confirmation and the committed request are independent of
         # administrator-channel availability.
         db.rollback()
+    from app.services.request_discord import RequestDiscordService
+
+    discord_delivery = RequestDiscordService(db).schedule_submission(item)
     # A request is the highest research priority. The single unified task may
     # safely import the verified TMDB identity when missing, then runs the same
     # research services used by administrator and scheduled actions.
@@ -232,7 +327,64 @@ def request_movie(
         "confirmation_email_status": email_result["status"],
         "admin_notification_email_status": admin_email_result["status"],
         "local_movie_id": item.local_movie_id,
+        "discord_status": discord_delivery.status,
         "duplicate": False,
+    }
+
+
+@router.post("/contact-requests", status_code=201)
+def submit_contact_request(
+    payload: ContactSubmission, request: Request, db: Session = Depends(get_db)
+):
+    limit(request, "contact-request", 8, 3600)
+    contact_identity = payload.email or payload.whatsapp or payload.phone or "anonymous"
+    limit(request, "contact-request-identity", 12, 86400, identity=contact_identity)
+    movie = db.query(Movie).filter_by(tmdb_id=payload.tmdb_id).first() if payload.tmdb_id else None
+    item = ContactRequest(
+        request_id=f"WEB-{secrets.token_hex(5).upper()}",
+        request_type=payload.request_type,
+        name=payload.name or None,
+        whatsapp=payload.whatsapp or None,
+        phone=payload.phone or None,
+        email=payload.email,
+        comment=payload.comment,
+        movie_name=payload.movie_name or (movie.title if movie else None),
+        movie_url=str(payload.movie_url) if payload.movie_url else None,
+        tmdb_id=payload.tmdb_id,
+        issue_type=payload.issue_type or None,
+        expected_ott_platform=payload.expected_ott_platform or None,
+        expected_ott_release_date=payload.expected_ott_release_date,
+        evidence_url=str(payload.evidence_url) if payload.evidence_url else None,
+        local_movie_id=movie.id if movie else None,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    if payload.request_type == "INCORRECT_OTT" and movie:
+        evidence = OttResearchService(db).record_evidence(
+            movie.id,
+            platform=payload.expected_ott_platform,
+            release_date=payload.expected_ott_release_date,
+            source_url=str(payload.evidence_url) if payload.evidence_url else None,
+            source_name="User report",
+            source_type="user_report",
+            confidence=0,
+            summary=payload.comment,
+            inspected=False,
+            trusted=False,
+            verification_method="USER_REPORT",
+            allow_publication=False,
+        )
+        evidence.status = "NEEDS_REVIEW"
+        item.ott_evidence_id = evidence.id
+        db.commit()
+    outcomes = ContactRequestNotificationService(db).notify_submission(item)
+    return {
+        "request_id": item.request_id,
+        "status": item.status,
+        "type": item.request_type,
+        "discord_status": outcomes["discord"],
+        "receipt_email_status": outcomes["email"],
     }
 
 

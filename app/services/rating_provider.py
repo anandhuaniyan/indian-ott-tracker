@@ -264,6 +264,11 @@ class IMDbRatingRefreshService:
             "last_error": state.last_error if state else None,
             "last_request_at": latest.last_attempt_at.isoformat() if latest and latest.last_attempt_at else None,
             "last_rating_status": latest.status if latest else None,
+            "last_rating_updated": latest.last_updated_at.isoformat() if latest and latest.last_updated_at else None,
+            "requests_today": self.db.query(MovieRating).filter(
+                func.lower(MovieRating.source) == "imdb",
+                MovieRating.last_attempt_at >= datetime.combine(date.today(), datetime.min.time(), tzinfo=timezone.utc),
+            ).count(),
         }
 
     def refresh(self, batch_size: int = 25) -> dict:

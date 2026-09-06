@@ -55,6 +55,8 @@ celery_app.conf.update(
         "ottplay-source-sync": {"task": "sources.ottplay_sync", "schedule": 86400},
         "justwatch-source-refresh": {"task": "sources.justwatch_refresh", "schedule": 86400},
         "movie-request-maintenance": {"task": "operations.movie_requests", "schedule": 1800},
+        "request-discord-recovery": {"task": "notifications.request_discord_recovery", "schedule": 300},
+        "request-email-recovery": {"task": "notifications.request_email_recovery", "schedule": 300},
         "notifications": {"task": "operations.notifications", "schedule": 86400},
         "cleanup": {"task": "operations.cleanup", "schedule": 604800},
     },

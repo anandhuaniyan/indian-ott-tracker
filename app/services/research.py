@@ -24,7 +24,7 @@ from app.services.ott.intelligence import OTTIntelligenceService
 from app.services.ott.reconciliation import OTTReconciliationService
 from app.services.ott.web_research import WebOttResearchService
 from app.services.rating_provider import IMDbRatingRefreshService
-from app.services.release_status import ReleaseStatusService
+from app.services.release_status import ReleaseStatusService, site_date
 from app.services.tmdb.movie_service import TMDbMovieService
 
 
@@ -196,12 +196,30 @@ class ResearchPipelineService:
             MovieRating.movie_id == movie_id,
             func.lower(MovieRating.source) == "imdb",
         ).first()
+        candidate = self.db.query(OttEvidence).filter(
+            OttEvidence.movie_id == movie_id,
+            OttEvidence.source_url.is_not(None),
+            OttEvidence.rejected_at.is_(None),
+        ).order_by(
+            OttEvidence.confidence.desc(),
+            OttEvidence.platform_confidence.desc(),
+            OttEvidence.date_confidence.desc(),
+            OttEvidence.created_at.desc(),
+        ).first()
         return {
             "platform": availability.provider if availability else None,
             "release_date": availability.ott_release_date if availability else None,
             "rating": rating.rating if rating else None,
             "confidence": availability.confidence if availability else None,
             "verification_status": availability.verification_status if availability else None,
+            "candidate_platform": candidate.platform if candidate else None,
+            "candidate_release_date": candidate.release_date if candidate else None,
+            "candidate_confidence": max(
+                candidate.confidence or 0,
+                candidate.platform_confidence or 0,
+                candidate.date_confidence or 0,
+            ) if candidate else None,
+            "candidate_status": candidate.status if candidate else None,
         }
 
     def _save_error(self, run_id: str, step: str, exc: Exception) -> ResearchRun:
@@ -327,40 +345,82 @@ class ResearchPipelineService:
         run.after_imdb_rating = after["rating"]
         run.confidence = after["confidence"]
         run.database_changes = changes
-        run.details = {"scope": scope, "steps": steps}
+        run.details = {
+            "scope": scope,
+            "steps": steps,
+            "candidate": {
+                "platform": after["candidate_platform"],
+                "release_date": str(after["candidate_release_date"]) if after["candidate_release_date"] else None,
+                "confidence": after["candidate_confidence"],
+                "status": after["candidate_status"],
+                "production_record_changed": bool(changes),
+            },
+        }
         if reconciliation == "CONFLICTING":
             run.result = "CONFLICTING"
-        elif changes or run.evidence_created:
+        elif changes:
             run.result = "UPDATED"
+        elif run.evidence_created and (after["candidate_confidence"] or 0) < settings.OTT_CONFIRMATION_THRESHOLD:
+            run.result = "LOW_CONFIDENCE"
+        elif run.evidence_created:
+            run.result = "NEEDS_REVIEW"
         elif run.errors and all((value or {}).get("status") == "FAILED" for value in steps.values() if isinstance(value, dict)):
-            run.result = "FAILED"
+            run.result = "TECHNICAL_FAILURE"
         elif isinstance(steps.get("web"), dict) and steps["web"].get("configured") and not steps["web"].get("results"):
             run.result = "NOT_FOUND"
         else:
             run.result = "NO_CHANGE"
-        run.status = "FAILED" if run.result == "FAILED" else "COMPLETE"
+        run.status = "FAILED" if run.result in {"FAILED", "TECHNICAL_FAILURE"} else "COMPLETE"
         run.completed_at = datetime.now(timezone.utc)
         run.active_key = None
         self.db.commit()
 
-        if changes and run.request_id:
+        if (changes or run.evidence_created) and run.request_id:
             request = self.db.query(MovieRequest).filter_by(request_id=run.request_id).first()
             if request:
+                platform = after["platform"] or after["candidate_platform"]
+                ott_date = after["release_date"] or after["candidate_release_date"]
+                confidence = after["confidence"] if after["confidence"] is not None else after["candidate_confidence"]
+                verified = after["verification_status"] == "CONFIRMED"
+                confidence_label = (
+                    "VERIFIED" if verified else "HIGH CONFIDENCE" if (confidence or 0) >= 80
+                    else "MEDIUM CONFIDENCE" if (confidence or 0) >= 50 else "LOW CONFIDENCE"
+                )
                 message = (
-                    f"Research update for request {request.request_id}: {movie.title}. "
-                    f"OTT platform: {after['platform'] or 'not confirmed'}; "
-                    f"OTT date: {after['release_date'] or 'not confirmed'}; "
-                    f"IMDb rating: {after['rating'] if after['rating'] is not None else 'not available'}."
+                    "OTT UPDATE\n"
+                    f"Movie: {movie.title}\n"
+                    f"Platform: {platform or 'Unknown'} ({confidence_label})\n"
+                    f"OTT Release: {ott_date or 'Unknown'} ({confidence_label})\n"
+                    f"Confidence: {int(confidence or 0)}%\nTMDB: {movie.tmdb_id}\n"
+                    f"Request: {request.request_id}\n"
+                    + ("Verified information." if verified else "Candidate information — not yet fully verified.")
                 )
-                sent = NotificationService(self.db).notify(
-                    message, "info", f"research-update:{run.run_id}", cooldown_minutes=10 * 365 * 24 * 60,
-                    channels=("discord", "telegram"),
-                )
+                deliveries = {}
+                for channel in ("telegram",):
+                    sent = NotificationService(self.db).notify(
+                        message, "info", f"research-update:{run.run_id}:{channel}", cooldown_minutes=10 * 365 * 24 * 60,
+                        channels=(channel,),
+                    )
+                    deliveries[channel] = "SENT" if sent else "NOT_CONFIGURED_OR_FAILED"
+                if platform or ott_date:
+                    from app.services.request_discord import RequestDiscordService
+
+                    discord = RequestDiscordService(self.db).schedule_ott_update(
+                        request, run.run_id
+                    )
+                    deliveries["discord"] = discord.status
+                else:
+                    deliveries["discord"] = "SKIPPED_NO_MEANINGFUL_RESULT"
                 run = self.db.query(ResearchRun).filter_by(run_id=run_id).one()
-                run.notification_results = {"admin_chat": "SENT" if sent else "NOT_CONFIGURED_OR_FAILED"}
+                run.notification_results = deliveries
                 self.db.commit()
-                if after["platform"]:
-                    email_result = MovieRequestUpdateEmailService(self.db).send(request, "OTT_FOUND")
+                if after["platform"] and verified:
+                    email_event = (
+                        "AVAILABLE"
+                        if ott_date and ott_date <= site_date()
+                        else "OTT_FOUND"
+                    )
+                    email_result = MovieRequestUpdateEmailService(self.db).send(request, email_event)
                     run = self.db.query(ResearchRun).filter_by(run_id=run_id).one()
                     run.notification_results = {**(run.notification_results or {}), "requester_ott_email": email_result["status"]}
                     self.db.commit()

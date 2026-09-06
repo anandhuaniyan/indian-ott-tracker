@@ -52,7 +52,7 @@ const Rail = ({ title, items = [], more }) =>
     <section>
       <div className="section-title">
         <h2>{title}</h2>
-        {more && <Link to={more}>View all</Link>}
+        {more && <Link to={more}>View more</Link>}
       </div>
       <div className="rail">
         {items.map((movie) => (
@@ -61,6 +61,14 @@ const Rail = ({ title, items = [], more }) =>
       </div>
     </section>
   ) : null;
+const sectionListingUrl = (section, filters = {}) => {
+  const query = new URLSearchParams({
+    view_mode: "section_listing",
+    section,
+    ...filters,
+  });
+  return `/discover?${query}`;
+};
 const Art = ({ path, alt, className = "", size = "w500" }) => (
   <img
     className={className}
@@ -127,24 +135,24 @@ export function Home() {
       <Rail
         title="Popular"
         items={data.popular}
-        more="/discover?sort=popularity"
+        more={sectionListingUrl("popular", { sort: "popularity" })}
       />
-      <Rail title="Latest theatrical" items={data.latest_theatrical} />
-      <Rail title="Upcoming theatrical" items={data.upcoming_theatrical} />
-      <Rail title="Recently added" items={data.recently_added} />
+      <Rail title="Latest theatrical" items={data.latest_theatrical} more={sectionListingUrl("latest-theatrical", { sort: "latest" })} />
+      <Rail title="Upcoming theatrical" items={data.upcoming_theatrical} more={sectionListingUrl("upcoming-theatrical", { sort: "oldest" })} />
+      <Rail title="Recently added" items={data.recently_added} more={sectionListingUrl("recently-added", { sort: "recently-added" })} />
       <AdSlot slot={import.meta.env.VITE_ADSENSE_SLOT_ID} />
-      <Rail title="Upcoming OTT" items={data.upcoming_ott} more="/ott" />
+      <Rail title="Upcoming OTT" items={data.upcoming_ott} more={sectionListingUrl("upcoming-ott", { sort: "ott-release" })} />
       <Rail
         title="Recently released on OTT"
         items={data.recent_ott}
-        more="/ott"
+        more={sectionListingUrl("recent-ott", { sort: "ott-release" })}
       />
       {Object.entries(data.language_sections || {}).map(([code, section]) => (
         <Rail
           key={code}
           title={section.name}
           items={section.items}
-          more={`/languages/${code}`}
+          more={sectionListingUrl("language", { language: code, sort: "latest" })}
         />
       ))}
       <section>
@@ -194,37 +202,56 @@ const initialFilters = {
   sort: "latest",
 };
 
+const SECTION_TITLES = {
+  popular: "Popular movies",
+  "latest-theatrical": "Latest theatrical releases",
+  "upcoming-theatrical": "Upcoming theatrical releases",
+  "recently-added": "Recently added movies",
+  "upcoming-ott": "Upcoming OTT releases",
+  "recent-ott": "Recently released on OTT",
+};
+
+const FILTER_KEYS = Object.keys(initialFilters);
+
 export function Discover({ modeTabs = null }) {
   const location = useLocation();
+  const [urlParams, setUrlParams] = useSearchParams();
   const isSearch = location.pathname === "/search";
+  const section = urlParams.get("section") || "";
+  const isSectionListing = !isSearch && urlParams.get("view_mode") === "section_listing";
   const initial = useMemo(
-    () => ({
-      ...initialFilters,
-      ...Object.fromEntries(new URLSearchParams(location.search)),
-    }),
+    () => {
+      const values = { ...initialFilters };
+      const source = new URLSearchParams(location.search);
+      FILTER_KEYS.forEach((key) => {
+        if (source.has(key)) values[key] = source.get(key) || "";
+      });
+      return values;
+    },
     [location.search],
   );
   const [filters, setFilters] = useState(initial);
-  const [query, setQuery] = useState(
-    new URLSearchParams(
+  const page = Math.max(1, Number(urlParams.get("page")) || 1);
+  const query = useMemo(() => {
+    const apiQuery = new URLSearchParams(
       Object.entries(initial).filter(([, value]) => value),
-    ).toString(),
-  );
-  const [page, setPage] = useState(
-    Number(new URLSearchParams(location.search).get("page")) || 1,
-  );
+    );
+    if (section) apiQuery.set("section", section);
+    apiQuery.set("page", String(page));
+    return apiQuery.toString();
+  }, [initial, page, section]);
   const endpoint = isSearch
     ? `/api/v1/search?q=${encodeURIComponent(filters.q || initial.q || "")}&page=${page}`
-    : `/api/v1/discover?${query}&page=${page}`;
+    : `/api/v1/discover?${query}`;
   const [data, error] = useData(endpoint);
   const submit = (event) => {
     event.preventDefault();
-    setPage(1);
-    setQuery(
-      new URLSearchParams(
-        Object.entries(filters).filter(([, value]) => value),
-      ).toString(),
+    const next = new URLSearchParams(
+      Object.entries(filters).filter(([, value]) => value),
     );
+    if (isSectionListing) next.set("view_mode", "section_listing");
+    if (section) next.set("section", section);
+    setUrlParams(next);
   };
   const set = (event) =>
     setFilters((value) => ({
@@ -233,135 +260,67 @@ export function Discover({ modeTabs = null }) {
     }));
   const movies = isSearch ? data?.movies?.items || [] : data?.items || [];
   const total = isSearch ? data?.movies?.total || 0 : data?.total || 0;
+  const pageTitle = isSearch
+    ? "Search movies and people"
+    : section === "language"
+      ? `${languageName(initial.language)} movies`
+      : SECTION_TITLES[section] || "Discover movies";
+  const onPage = (nextPage) => {
+    const next = new URLSearchParams(urlParams);
+    if (nextPage > 1) next.set("page", String(nextPage));
+    else next.delete("page");
+    setUrlParams(next);
+  };
+  const filterForm = (
+    <form className="filters" onSubmit={submit} aria-label="Movie filters">
+      <label className="wide">
+        Search
+        <input
+          name="q"
+          value={filters.q}
+          onChange={set}
+          placeholder="Title, actor, director, writer or keyword"
+        />
+      </label>
+      {!isSearch && (
+        <>
+          <label>
+            Language
+            <select name="language" value={filters.language} onChange={set}>
+              <option value="">All</option>
+              {(data?.filters?.languages?.map((item) => [item.code, item.name]) || COMMON_LANGUAGE_OPTIONS).map(([code, name]) => (
+                <option key={code} value={code}>{name}</option>
+              ))}
+            </select>
+          </label>
+          <label>Genre<input name="genre" value={filters.genre} onChange={set} placeholder="e.g. drama" /></label>
+          <label>Year<input name="year" type="number" value={filters.year} onChange={set} /></label>
+          <label>Minimum IMDb rating<input name="rating" type="number" min="0" max="10" step="0.5" value={filters.rating} onChange={set} /></label>
+          <label>Certification<input name="certification" value={filters.certification} onChange={set} /></label>
+          <label>Release status<select name="release_status" value={filters.release_status} onChange={set}><option value="">All</option><option value="released">Released</option><option value="upcoming">Upcoming</option><option value="direct-to-ott">Direct-to-OTT</option></select></label>
+          <label>OTT platform<input name="platform" value={filters.platform} onChange={set} /></label>
+          {["actor", "director", "writer", "cinematographer", "producer", "editor", "composer"].map((name) => <label key={name}>{name}<input name={name} value={filters[name]} onChange={set} /></label>)}
+          <label>From<input name="date_from" type="date" value={filters.date_from} onChange={set} /></label>
+          <label>To<input name="date_to" type="date" value={filters.date_to} onChange={set} /></label>
+          <label>Sort<select name="sort" value={filters.sort} onChange={set}>{SORTS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        </>
+      )}
+      <button className="wide">Apply</button>
+    </form>
+  );
+  const pager = data ? (
+    <Pager
+      page={page}
+      pages={isSearch ? Math.max(Math.ceil(total / data.page_size), Math.ceil(data.people.total / data.page_size)) : data.pages}
+      onPage={onPage}
+    />
+  ) : null;
   return (
-    <main>
-      <Seo title={isSearch ? "Search" : "Discover movies"} />
-      <h1>{isSearch ? "Search movies and people" : "Discover movies"}</h1>
+    <main className={isSectionListing ? "section-listing" : undefined}>
+      <Seo title={pageTitle} />
+      <h1>{pageTitle}</h1>
       {isSearch && modeTabs}
-      <form className="filters" onSubmit={submit}>
-        <label className="wide">
-          Search
-          <input
-            name="q"
-            value={filters.q}
-            onChange={set}
-            placeholder="Title, actor, director, writer or keyword"
-          />
-        </label>
-        {!isSearch && (
-          <>
-            <label>
-              Language
-              <select name="language" value={filters.language} onChange={set}>
-                <option value="">All</option>
-                {(data?.filters?.languages?.map((item) => [item.code, item.name]) || COMMON_LANGUAGE_OPTIONS).map(([code, name]) => (
-                  <option key={code} value={code}>
-                    {name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Genre
-              <input
-                name="genre"
-                value={filters.genre}
-                onChange={set}
-                placeholder="e.g. drama"
-              />
-            </label>
-            <label>
-              Year
-              <input
-                name="year"
-                type="number"
-                value={filters.year}
-                onChange={set}
-              />
-            </label>
-            <label>
-              Minimum IMDb rating
-              <input
-                name="rating"
-                type="number"
-                min="0"
-                max="10"
-                step="0.5"
-                value={filters.rating}
-                onChange={set}
-              />
-            </label>
-            <label>
-              Certification
-              <input
-                name="certification"
-                value={filters.certification}
-                onChange={set}
-              />
-            </label>
-            <label>
-              Release status
-              <select
-                name="release_status"
-                value={filters.release_status}
-                onChange={set}
-              >
-                <option value="">All</option>
-                <option value="released">Released</option>
-                <option value="upcoming">Upcoming</option>
-                <option value="direct-to-ott">Direct-to-OTT</option>
-              </select>
-            </label>
-            <label>
-              OTT platform
-              <input name="platform" value={filters.platform} onChange={set} />
-            </label>
-            {[
-              "actor",
-              "director",
-              "writer",
-              "cinematographer",
-              "producer",
-              "editor",
-              "composer",
-            ].map((name) => (
-              <label key={name}>
-                {name}
-                <input name={name} value={filters[name]} onChange={set} />
-              </label>
-            ))}
-            <label>
-              From
-              <input
-                name="date_from"
-                type="date"
-                value={filters.date_from}
-                onChange={set}
-              />
-            </label>
-            <label>
-              To
-              <input
-                name="date_to"
-                type="date"
-                value={filters.date_to}
-                onChange={set}
-              />
-            </label>
-            <label>
-              Sort
-              <select name="sort" value={filters.sort} onChange={set}>
-                {SORTS.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </>
-        )}
-        <button className="wide">Apply</button>
-      </form>
+      {!isSectionListing && filterForm}
       {error && <p role="alert">{error}</p>}
       {!data ? (
         <Loading />
@@ -397,18 +356,8 @@ export function Discover({ modeTabs = null }) {
               </div>
             </>
           )}
-          <Pager
-            page={page}
-            pages={
-              isSearch
-                ? Math.max(
-                    Math.ceil(total / data.page_size),
-                    Math.ceil(data.people.total / data.page_size),
-                  )
-                : data.pages
-            }
-            onPage={setPage}
-          />
+          {pager}
+          {isSectionListing && filterForm}
         </>
       )}
     </main>
@@ -657,6 +606,10 @@ export function Movie() {
   if (error) return <Failure error={error} />;
   if (!data) return <Loading />;
   const movie = data.movie;
+  const ottCandidate = movie.ott_candidate;
+  const displayedOttPlatform = movie.ott_platform || ottCandidate?.platform;
+  const displayedOttDate = movie.ott_release_date || ottCandidate?.release_date;
+  const displayedConfidence = movie.ott_confidence_label || ottCandidate?.confidence_label;
   const images = (type) =>
     data.images.filter((item) => item.type.toLowerCase().includes(type));
   const logo = images("logo")[0];
@@ -765,24 +718,26 @@ export function Movie() {
             </span>
             <span data-testid="ott-platform">
               <small>OTT Platform</small>
-              <strong>{movie.ott_platform || "Information not found"}</strong>
+              <strong>{displayedOttPlatform || "Information not found"}</strong>
+              {displayedConfidence && <em className={`ott-confidence ${movie.ott_verified ? "verified" : "candidate"}`}>{displayedConfidence}</em>}
             </span>
             <span data-testid="ott-release">
               <small>OTT Release</small>
               <strong>
-                {formatDate(movie.ott_release_date) ||
-                  (movie.ott_platform ? "Not confirmed" : "Information not found")}
+                {formatDate(displayedOttDate) ||
+                  (displayedOttPlatform ? "Unknown" : "Information not found")}
               </strong>
+              {ottCandidate?.release_date && !movie.ott_release_date && <em className="ott-confidence candidate">{ottCandidate.confidence_label}</em>}
             </span>
             <span data-testid="ott-status">
               <small>OTT Availability</small>
               <strong>
-                {({
+                {ottCandidate?.state === "CONFLICTING" ? "Conflicting information" : ({
                   AVAILABLE_NOW: "Available now",
                   COMING_TO_OTT: "Coming to OTT",
                   PLATFORM_KNOWN_DATE_UNKNOWN: "Platform known — date unknown",
                   OTT_INFORMATION_NOT_FOUND: "OTT information not found",
-                })[movie.ott_status] || "OTT information not found"}
+                })[movie.ott_status] || (ottCandidate ? "Unverified candidate" : "OTT information not found")}
               </strong>
             </span>
             {movie.ott_research_status && (
@@ -864,6 +819,17 @@ export function Movie() {
             </div>
           </article>
         ))}
+        {ottCandidate && !movie.ott_verified && (
+          <article className="ott-row ott-candidate" title={ottCandidate.help}>
+            <div>
+              <strong>{ottCandidate.state === "CONFLICTING" ? "Conflicting information" : ottCandidate.platform || "Platform unknown"}</strong>
+              <p>{[formatDate(ottCandidate.release_date) || "OTT date unknown", `${ottCandidate.confidence}% confidence`, ottCandidate.confidence_label].join(" · ")}</p>
+              <p>{ottCandidate.help}</p>
+              {ottCandidate.summary && <small>{ottCandidate.summary}</small>}
+              {ottCandidate.source_url && <a href={ottCandidate.source_url} rel="nofollow noreferrer">View candidate source ({ottCandidate.source || "source"})</a>}
+            </div>
+          </article>
+        )}
       </Values>
       <Values title="Ratings">
         {data.ratings.map((item, index) => (
@@ -1441,8 +1407,11 @@ export function Calendar() {
 }
 
 export function Request() {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const [languages] = useData("/api/v1/languages");
+  const [tab, setTab] = useState(params.get("tab") === "contact" ? "contact" : "movie");
+  const [contactType, setContactType] = useState(params.get("type") || "WEBSITE_ISSUE");
+  const [movieId, setMovieId] = useState(params.get("movie_external_id") || "");
   const [result, setResult] = useState();
   const [submitting, setSubmitting] = useState(false);
   const submit = (event) => {
@@ -1450,50 +1419,75 @@ export function Request() {
     setSubmitting(true);
     setResult(undefined);
     const body = Object.fromEntries(new FormData(event.target));
-    body.movie_external_id = Number(body.movie_external_id);
+    Object.keys(body).forEach((key) => body[key] === "" && delete body[key]);
     if (body.release_year) body.release_year = Number(body.release_year);
-    post("/api/v1/movie-requests", body)
+    if (body.movie_external_id) body.movie_external_id = Number(body.movie_external_id);
+    if (body.tmdb_id) body.tmdb_id = Number(body.tmdb_id);
+    post(tab === "movie" ? "/api/v1/movie-requests" : "/api/v1/contact-requests", body)
       .then(setResult)
       .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
       .finally(() => setSubmitting(false));
   };
   const received = Boolean(result?.request_id);
+  const movieFields = ["INCORRECT_MOVIE", "INCORRECT_OTT"].includes(contactType);
+  const changeTab = (nextTab) => {
+    const next = new URLSearchParams(params);
+    if (nextTab === "contact") next.set("tab", "contact");
+    else next.delete("tab");
+    setParams(next);
+    setTab(nextTab);
+    setResult(undefined);
+  };
   return (
-    <main>
+    <main className="request-page">
       <Seo title="Request a movie" />
       <h1>Request a movie</h1>
-      <p>
-        Ask us to review any movie, including one that is already listed here.
-        Your email is used only to process this request.
-      </p>
+      <p>Ask us to review any movie, including one that is already listed here. Your email is used only to process this request.</p>
       <p><Link to="/search?mode=deep">Don&apos;t know the ID? Use Deep Search.</Link></p>
-      {!received && <form className="request" onSubmit={submit}>
+      <div className="request-tabs" role="tablist" aria-label="Request type">
+        <button type="button" role="tab" aria-selected={tab === "movie"} className={tab === "movie" ? "active" : ""} onClick={() => changeTab("movie")}>Request movie</button>
+        <button type="button" role="tab" aria-selected={tab === "contact"} className={tab === "contact" ? "active" : ""} onClick={() => changeTab("contact")}>Report issue / request access</button>
+      </div>
+      {!received && tab === "movie" && <form className="request" onSubmit={submit}>
         <label>Movie Name *<input name="movie_name" required maxLength="500" defaultValue={params.get("movie_name") || ""} /></label>
-        <label>Email *<input name="email" type="email" required maxLength="320" /></label>
-        <label>ID *<input name="movie_external_id" type="number" required min="1" max="2147483647" step="1" inputMode="numeric" defaultValue={params.get("movie_external_id") || ""} /></label>
+        <label>Email *<input name="email" type="email" required maxLength="320" autoComplete="email" /></label>
+        <label>TMDB ID (optional)<input name="movie_external_id" type="number" min="1" max="2147483647" step="1" inputMode="numeric" value={movieId} onChange={(event) => setMovieId(event.target.value)} /></label>
         <label>Year<input name="release_year" type="number" min="1888" max="2100" defaultValue={params.get("release_year") || ""} /></label>
         <label>Language<select name="language" defaultValue={params.get("language") || ""}><option value="">Not specified</option>{(languages || COMMON_LANGUAGE_OPTIONS.map(([code, name]) => ({ code, name }))).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
-        <label>Additional Details<textarea name="details" maxLength="2000" placeholder="Any details that help identify it" /></label>
+        <label>WhatsApp / Phone<input name="whatsapp_phone" type="tel" maxLength="50" autoComplete="tel" /></label>
+        <label>Comments<textarea name="details" maxLength="2000" placeholder="Any details that help identify it" /></label>
         <button disabled={submitting}>{submitting ? "Verifying movie…" : "Submit request"}</button>
       </form>}
+      {!received && tab === "contact" && <form className="request request-card" onSubmit={submit}>
+        <div className="request-intro"><h2>Report issue / request access</h2><p>Submissions go to private administrator review. Corrections and access requests are never applied automatically.</p></div>
+        <label>Request type *<select name="request_type" required value={contactType} onChange={(event) => setContactType(event.target.value)}>
+          <option value="WEBSITE_ISSUE">Report website issue</option><option value="INCORRECT_MOVIE">Report incorrect movie information</option><option value="INCORRECT_OTT">Report incorrect OTT information</option><option value="ACCESS_REQUEST">Request website access</option><option value="OTHER">Other</option>
+        </select></label>
+        <div className="request-field-grid">
+          <label>Name<input name="name" maxLength="200" autoComplete="name" /></label>
+          <label>WhatsApp Number (Preferred)<input name="whatsapp" type="tel" maxLength="50" autoComplete="tel" /></label>
+          <label>Phone Number<input name="phone" type="tel" maxLength="50" autoComplete="tel" /></label>
+          <label>Email Address<input name="email" type="email" maxLength="320" autoComplete="email" /></label>
+          {movieFields && <><label>Movie Name<input name="movie_name" maxLength="500" defaultValue={params.get("movie_name") || ""} /></label><label>TMDB ID<input name="tmdb_id" type="number" min="1" inputMode="numeric" defaultValue={params.get("tmdb_id") || ""} /></label><label className="wide">Movie URL<input name="movie_url" type="url" pattern="https?://.*" defaultValue={params.get("movie_url") || ""} /></label><label className="wide">Issue Type<input name="issue_type" maxLength="100" /></label></>}
+          {contactType === "INCORRECT_OTT" && <><label>Expected OTT Platform<input name="expected_ott_platform" maxLength="100" /></label><label>Expected OTT Release Date<input name="expected_ott_release_date" type="date" /></label><label className="wide">Evidence URL<input name="evidence_url" type="url" pattern="https?://.*" /></label></>}
+          <label className="wide">Comment / Description *<textarea name="comment" required minLength="5" maxLength="5000" /></label>
+        </div>
+        <p className="form-help">Provide at least one contact method: WhatsApp, phone, or email.</p>
+        <button disabled={submitting}>{submitting ? "Sending securely…" : "Send to administrator"}</button>
+      </form>}
+      {!received && tab === "movie" && result?.candidates?.length > 0 && <section className="request-candidates" aria-labelledby="movie-match-heading"><h2 id="movie-match-heading">Choose the correct movie</h2><p>We found more than one possible match.</p>{result.candidates.map((candidate) => <button type="button" key={candidate.id} onClick={() => { setMovieId(String(candidate.id)); setResult(undefined); }}><span>{candidate.poster_path && <Art path={candidate.poster_path} alt="" />}</span><strong>{candidate.title}</strong><small>{candidate.release_date?.slice(0, 4) || "Year unknown"} · {candidate.original_language_name || candidate.original_language || "Language unknown"} · TMDB {candidate.id}</small></button>)}</section>}
       {received && (
         <section className="request-success" role="status">
-          {result.poster_path && <Art className="request-poster" path={result.poster_path} alt={`${result.verified_title} poster`} />}
+          {tab === "movie" && result.poster_path && <Art className="request-poster" path={result.poster_path} alt={`${result.verified_title} poster`} />}
           <div>
-            <h2>Request received</h2>
-            <h3>{result.verified_title}</h3>
-            {result.original_title && result.original_title !== result.verified_title && <p>{result.original_title}</p>}
-            <p>We aim to review your request within 48 hours. We’ll email you when its status changes.</p>
-            {result.confirmation_email_status === "SENT" ? (
-              <p>Confirmation email sent.</p>
-            ) : (
-              <p>Your request was received, but we could not send the confirmation email.</p>
-            )}
+            <h2>{tab === "movie" ? "Request received" : "Submission received"}</h2>
+            {tab === "movie" && <><h3>{result.verified_title}</h3>{result.original_title && result.original_title !== result.verified_title && <p>{result.original_title}</p>}<p>We aim to review your request within 48 hours. We’ll email you when its status changes.</p>{result.confirmation_email_status === "SENT" ? <p>Confirmation email sent.</p> : <p>Your request was received, but we could not send the confirmation email.</p>}</>}
+            {tab === "contact" && <><p>An administrator can now review reference {result.request_id}. No access or correction is applied automatically.</p>{result.receipt_email_status === "SENT" ? <p>Confirmation email sent.</p> : result.receipt_email_status === "NOT_SUPPLIED" ? null : <p>Your submission was saved; email delivery is pending or not currently available.</p>}</>}
             <small>Request reference: {result.request_id}</small>
           </div>
         </section>
       )}
-      {result?.error && (
+      {result?.error && !result?.candidates?.length && (
         <div className="request-error" role="alert">
           <p>{result.error}</p>
           {result.local_movie_id && <Link className="button-link" to={`/movies/${result.local_movie_id}`}>View Movie</Link>}

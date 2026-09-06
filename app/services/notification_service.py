@@ -42,13 +42,13 @@ class NotificationService:
             ).raise_for_status()
             return True
         if not settings.DISCORD_WEBHOOK_URL: return False
-        httpx.post(settings.DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10).raise_for_status(); return True
+        httpx.post(settings.DISCORD_WEBHOOK_URL, json={"content": message[:1900]}, timeout=10).raise_for_status(); return True
     @staticmethod
     def discord_method():
         if settings.DISCORD_BOT_ENDPOINT:
-            return {"method": "EXISTING_BOT_ADAPTER", "configured": True}
+            return {"method": "EXISTING_BOT", "configured": True}
         if settings.DISCORD_WEBHOOK_URL:
-            return {"method": "WEBHOOK_FALLBACK", "configured": True}
+            return {"method": "WEBHOOK", "configured": True}
         return {"method": "NOT_CONFIGURED", "configured": False}
     def _telegram(self, message):
         if not (settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_CHAT_ID): return False

@@ -61,7 +61,7 @@ class RequestCommunication(TimestampMixin, Base):
     )
     event_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     channel: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
