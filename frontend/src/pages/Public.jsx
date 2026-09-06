@@ -1451,7 +1451,7 @@ export function Request() {
       {!received && tab === "movie" && <form className="request" onSubmit={submit}>
         <label>Movie Name *<input name="movie_name" required maxLength="500" defaultValue={params.get("movie_name") || ""} /></label>
         <label>Email *<input name="email" type="email" required maxLength="320" autoComplete="email" /></label>
-        <label>TMDB ID (optional)<input name="movie_external_id" type="number" min="1" max="2147483647" step="1" inputMode="numeric" value={movieId} onChange={(event) => setMovieId(event.target.value)} /></label>
+        <label>ID (optional)<input name="movie_external_id" type="number" min="1" max="2147483647" step="1" inputMode="numeric" value={movieId} onChange={(event) => setMovieId(event.target.value)} /></label>
         <label>Year<input name="release_year" type="number" min="1888" max="2100" defaultValue={params.get("release_year") || ""} /></label>
         <label>Language<select name="language" defaultValue={params.get("language") || ""}><option value="">Not specified</option>{(languages || COMMON_LANGUAGE_OPTIONS.map(([code, name]) => ({ code, name }))).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
         <label>WhatsApp / Phone<input name="whatsapp_phone" type="tel" maxLength="50" autoComplete="tel" /></label>
@@ -1468,14 +1468,14 @@ export function Request() {
           <label>WhatsApp Number (Preferred)<input name="whatsapp" type="tel" maxLength="50" autoComplete="tel" /></label>
           <label>Phone Number<input name="phone" type="tel" maxLength="50" autoComplete="tel" /></label>
           <label>Email Address<input name="email" type="email" maxLength="320" autoComplete="email" /></label>
-          {movieFields && <><label>Movie Name<input name="movie_name" maxLength="500" defaultValue={params.get("movie_name") || ""} /></label><label>TMDB ID<input name="tmdb_id" type="number" min="1" inputMode="numeric" defaultValue={params.get("tmdb_id") || ""} /></label><label className="wide">Movie URL<input name="movie_url" type="url" pattern="https?://.*" defaultValue={params.get("movie_url") || ""} /></label><label className="wide">Issue Type<input name="issue_type" maxLength="100" /></label></>}
+          {movieFields && <><label>Movie Name<input name="movie_name" maxLength="500" defaultValue={params.get("movie_name") || ""} /></label><label>ID<input name="tmdb_id" type="number" min="1" inputMode="numeric" defaultValue={params.get("tmdb_id") || ""} /></label><label className="wide">Movie URL<input name="movie_url" type="url" pattern="https?://.*" defaultValue={params.get("movie_url") || ""} /></label><label className="wide">Issue Type<input name="issue_type" maxLength="100" /></label></>}
           {contactType === "INCORRECT_OTT" && <><label>Expected OTT Platform<input name="expected_ott_platform" maxLength="100" /></label><label>Expected OTT Release Date<input name="expected_ott_release_date" type="date" /></label><label className="wide">Evidence URL<input name="evidence_url" type="url" pattern="https?://.*" /></label></>}
           <label className="wide">Comment / Description *<textarea name="comment" required minLength="5" maxLength="5000" /></label>
         </div>
         <p className="form-help">Provide at least one contact method: WhatsApp, phone, or email.</p>
         <button disabled={submitting}>{submitting ? "Sending securely…" : "Send to administrator"}</button>
       </form>}
-      {!received && tab === "movie" && result?.candidates?.length > 0 && <section className="request-candidates" aria-labelledby="movie-match-heading"><h2 id="movie-match-heading">Choose the correct movie</h2><p>We found more than one possible match.</p>{result.candidates.map((candidate) => <button type="button" key={candidate.id} onClick={() => { setMovieId(String(candidate.id)); setResult(undefined); }}><span>{candidate.poster_path && <Art path={candidate.poster_path} alt="" />}</span><strong>{candidate.title}</strong><small>{candidate.release_date?.slice(0, 4) || "Year unknown"} · {candidate.original_language_name || candidate.original_language || "Language unknown"} · TMDB {candidate.id}</small></button>)}</section>}
+      {!received && tab === "movie" && result?.candidates?.length > 0 && <section className="request-candidates" aria-labelledby="movie-match-heading"><h2 id="movie-match-heading">Choose the correct movie</h2><p>We found more than one possible match.</p>{result.candidates.map((candidate) => <button type="button" key={candidate.id} onClick={() => { setMovieId(String(candidate.id)); setResult(undefined); }}><span>{candidate.poster_path && <Art path={candidate.poster_path} alt="" />}</span><strong>{candidate.title}</strong><small>{candidate.release_date?.slice(0, 4) || "Year unknown"} · {candidate.original_language_name || candidate.original_language || "Language unknown"} · ID {candidate.id}</small></button>)}</section>}
       {received && (
         <section className="request-success" role="status">
           {tab === "movie" && result.poster_path && <Art className="request-poster" path={result.poster_path} alt={`${result.verified_title} poster`} />}
