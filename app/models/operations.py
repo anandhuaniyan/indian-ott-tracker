@@ -27,6 +27,7 @@ class MovieRequest(TimestampMixin, Base):
     external_movie_id: Mapped[int | None] = mapped_column(Integer, index=True)
     release_year: Mapped[int | None] = mapped_column(Integer)
     language: Mapped[str | None] = mapped_column(String(20))
+    whatsapp_phone: Mapped[str | None] = mapped_column(String(50))
     details: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
     verified_title: Mapped[str | None] = mapped_column(String(500))
@@ -100,6 +101,59 @@ class MovieRequest(TimestampMixin, Base):
     )
     sla_36_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sla_48_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ContactRequest(TimestampMixin, Base):
+    """Private website issue, correction, and access request inbox."""
+
+    __tablename__ = "contact_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, index=True)
+    request_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="NEW", nullable=False, index=True)
+    name: Mapped[str | None] = mapped_column(String(200))
+    whatsapp: Mapped[str | None] = mapped_column(String(50))
+    phone: Mapped[str | None] = mapped_column(String(50))
+    email: Mapped[str | None] = mapped_column(String(320))
+    comment: Mapped[str] = mapped_column(Text, nullable=False)
+    movie_name: Mapped[str | None] = mapped_column(String(500), index=True)
+    movie_url: Mapped[str | None] = mapped_column(String(1000))
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    issue_type: Mapped[str | None] = mapped_column(String(100))
+    expected_ott_platform: Mapped[str | None] = mapped_column(String(100))
+    expected_ott_release_date: Mapped[date | None] = mapped_column(Date)
+    evidence_url: Mapped[str | None] = mapped_column(String(1000))
+    local_movie_id: Mapped[int | None] = mapped_column(
+        ForeignKey("movies.id", ondelete="SET NULL"), index=True
+    )
+    ott_evidence_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ott_evidence.id", ondelete="SET NULL"), index=True
+    )
+    discord_status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    receipt_email_status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    outcome_email_status: Mapped[str | None] = mapped_column(String(30))
+    admin_notes: Mapped[str | None] = mapped_column(Text)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    access_approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RequestNotificationDelivery(TimestampMixin, Base):
+    """Secret-free, idempotent delivery history for private request notifications."""
+
+    __tablename__ = "request_notification_deliveries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    request_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    request_kind: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    notification_type: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(20), nullable=False, default="DISCORD", index=True)
+    dedupe_key: Mapped[str] = mapped_column(String(180), nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING", index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sanitized_error: Mapped[str | None] = mapped_column(Text)
 
 
 class MovieComment(TimestampMixin, Base):

@@ -32,7 +32,7 @@ from app.models.movie_metadata import (
     ProductionCountry,
 )
 from app.models.ott_availability import OttAvailability
-from app.models.operations import MovieComment, OperationState
+from app.models.operations import MovieComment, OperationState, OttEvidence
 from app.core.rate_limit import limit
 from app.services.release_status import (
     ReleaseStatusService,
@@ -180,6 +180,59 @@ def _canonical_ott_rows(movie: Movie) -> list[OttAvailability]:
         if score > current_score:
             selected[key] = row
     return sorted(selected.values(), key=lambda row: normalize_platform(row.provider))
+
+
+def _confidence_label(score: float | None, *, verified: bool = False) -> str:
+    if verified:
+        return "VERIFIED"
+    value = float(score or 0)
+    if value >= 80:
+        return "HIGH CONFIDENCE"
+    if value >= 50:
+        return "MEDIUM CONFIDENCE"
+    return "LOW CONFIDENCE"
+
+
+def _public_ott_candidate(db: Session, movie_id: int) -> dict | None:
+    """Expose useful non-canonical evidence without turning it into a fact."""
+    rows = (
+        db.query(OttEvidence)
+        .filter(
+            OttEvidence.movie_id == movie_id,
+            OttEvidence.source_url.is_not(None),
+            OttEvidence.rejected_at.is_(None),
+            OttEvidence.manually_verified.is_(False),
+            func.lower(func.coalesce(OttEvidence.verification_method, "")) != "user_report",
+            func.lower(func.coalesce(OttEvidence.source_type, "")) != "user_report",
+            or_(OttEvidence.platform.is_not(None), OttEvidence.release_date.is_not(None)),
+        )
+        .order_by(
+            OttEvidence.confidence.desc(),
+            OttEvidence.platform_confidence.desc(),
+            OttEvidence.date_confidence.desc(),
+            OttEvidence.created_at.desc(),
+        )
+        .limit(20)
+        .all()
+    )
+    if not rows:
+        return None
+    leader = rows[0]
+    score = max(leader.platform_confidence or 0, leader.date_confidence or 0, leader.confidence or 0)
+    conflicting = any(row.status == "CONFLICTING" for row in rows)
+    return {
+        "platform": normalize_platform(leader.platform) if leader.platform else None,
+        "release_date": leader.release_date,
+        "confidence": score,
+        "confidence_label": _confidence_label(score),
+        "state": "CONFLICTING" if conflicting else "CANDIDATE",
+        "source": leader.source_name or leader.source_type,
+        "source_url": leader.source_url,
+        "summary": leader.summary,
+        "published_date": leader.source_published_at,
+        "verification_method": leader.verification_method,
+        "help": "This information has not yet been fully verified.",
+    }
 
 
 def _card(movie: Movie) -> dict:
@@ -492,6 +545,34 @@ def _ordering(sort: str):
     }.get(sort, _primary_release_date_query().desc())
 
 
+def _section_listing(query, section: str | None):
+    """Keep homepage View More results within their originating data section."""
+    if not section or section in {"popular", "recently-added", "language"}:
+        return query
+    today = site_date()
+    primary_date = _primary_release_date_query()
+    if section == "latest-theatrical":
+        return query.filter(primary_date <= today)
+    if section == "upcoming-theatrical":
+        return query.filter(primary_date > today)
+    if section in {"upcoming-ott", "recent-ott"}:
+        date_filter = (
+            OttAvailability.ott_release_date > today
+            if section == "upcoming-ott"
+            else OttAvailability.ott_release_date <= today
+        )
+        return query.filter(
+            Movie.ott_availabilities.any(
+                and_(
+                    OttAvailability.verification_status == "CONFIRMED",
+                    OttAvailability.status.in_(("upcoming", "released")),
+                    date_filter,
+                )
+            )
+        )
+    return query
+
+
 def _page(query, sort: str, page: int, page_size: int):
     total = query.order_by(None).count()
     items = (
@@ -609,6 +690,10 @@ def discover(
     composer: str | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    section: str | None = Query(
+        None,
+        pattern="^(popular|latest-theatrical|upcoming-theatrical|recently-added|upcoming-ott|recent-ott|language)$",
+    ),
     sort: str = "latest",
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=1, le=100),
@@ -638,7 +723,9 @@ def discover(
         date_from=date_from,
         date_to=date_to,
     )
+    query = _section_listing(query, section)
     result = _page(query, sort, page, page_size)
+    result["section"] = section
     result["filters"] = {
         "genres": [
             {"slug": x.slug, "name": x.name}
@@ -1065,6 +1152,7 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
     ).classify_movie(movie, sync_evidence=False)
     ott_summary = best_canonical_ott(movie)
     confirmed_ott = confirmed_canonical_ott(movie)
+    ott_candidate = _public_ott_candidate(db, movie.id)
     ott_public_state = (
         "COMING_TO_OTT"
         if confirmed_ott and confirmed_ott.ott_release_date > site_date()
@@ -1129,6 +1217,13 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
                 confirmed_ott.ott_release_date if confirmed_ott else None
             ),
             "ott_status": ott_public_state,
+            "ott_confidence": ott_summary.confidence if ott_summary else None,
+            "ott_confidence_label": _confidence_label(
+                ott_summary.confidence if ott_summary else None,
+                verified=bool(confirmed_ott),
+            ) if ott_summary else None,
+            "ott_verified": bool(confirmed_ott),
+            "ott_candidate": ott_candidate,
             "ott_research_status": _public_operational_label(
                 research_status_label(latest_evidence, eligibility.code)
             ),

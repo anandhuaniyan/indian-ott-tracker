@@ -437,18 +437,21 @@ class MovieMetadataService:
                 name = normalize_platform(item.get("provider_name"))
                 if not name:
                     continue
-                availability = next(
-                    (
-                        row
-                        for row in self.db.query(OttAvailability)
-                        .filter_by(
-                            movie_id=movie.id, country="IN", watch_type=watch_type
-                        )
-                        .all()
-                        if normalize_platform(row.provider) == name
-                    ),
+                rows = (
+                    self.db.query(OttAvailability)
+                    .filter_by(movie_id=movie.id, country="IN", watch_type=watch_type)
+                    .all()
+                )
+                matches = [row for row in rows if normalize_platform(row.provider) == name]
+                # Historical data can contain both an alias and its normalized
+                # name. Prefer the exact row so renaming the alias cannot hit
+                # the database uniqueness constraint.
+                availability = next((row for row in matches if row.provider == name), None)
+                availability = availability or next(
+                    (row for row in matches if row.manually_verified or row.locked_by_admin),
                     None,
                 )
+                availability = availability or (matches[0] if matches else None)
                 if not availability:
                     availability = OttAvailability(
                         movie_id=movie.id,
@@ -457,7 +460,8 @@ class MovieMetadataService:
                         watch_type=watch_type,
                     )
                     self.db.add(availability)
-                availability.provider = name
+                if not (availability.manually_verified or availability.locked_by_admin):
+                    availability.provider = name
                 availability.provider_logo = (
                     item.get("logo_path") or availability.provider_logo
                 )

@@ -30,11 +30,13 @@ from app.models.movie_metadata import (
     Person,
 )
 from app.models.operations import (
+    ContactRequest,
     MovieComment,
     MovieRequest,
     OttEvidence,
 )
 from app.models.ott_availability import OttAvailability
+from app.models.research import RequestCommunication
 from app.services.operations import OttResearchService
 from app.services.release_status import ReleaseStatusService, site_date
 from app.services.movie_requests import (
@@ -222,6 +224,29 @@ def test_home_discover_search_and_browse(client):
     assert client.get("/api/v1/discover?release_status=upcoming").json()["total"] == 1
     search = client.get("/api/v1/search?q=Example").json()
     assert search["movies"]["total"] == 1 and search["people"]["total"] == 2
+
+
+def test_home_view_more_sections_keep_their_data_context(client, database):
+    database.add(
+        OttAvailability(
+            movie_id=2,
+            provider="Prime Video",
+            ott_release_date=date.today() + timedelta(days=10),
+            status="upcoming",
+            confidence=95,
+            verification_status="CONFIRMED",
+        )
+    )
+    database.commit()
+    latest = client.get("/api/v1/discover?section=latest-theatrical&sort=latest").json()
+    upcoming = client.get("/api/v1/discover?section=upcoming-theatrical&sort=oldest").json()
+    upcoming_ott = client.get("/api/v1/discover?section=upcoming-ott&sort=ott-release").json()
+    recent_ott = client.get("/api/v1/discover?section=recent-ott&sort=ott-release").json()
+    assert latest["section"] == "latest-theatrical" and [x["title"] for x in latest["items"]] == ["Example Film"]
+    assert upcoming["section"] == "upcoming-theatrical" and [x["title"] for x in upcoming["items"]] == ["Future Film"]
+    assert [x["title"] for x in upcoming_ott["items"]] == ["Future Film"]
+    assert [x["title"] for x in recent_ott["items"]] == ["Example Film"]
+    assert client.get("/api/v1/discover?section=not-a-section").status_code == 422
 
 
 def test_language_filter_uses_original_language_not_spoken_language(client, database):
@@ -490,8 +515,16 @@ def test_movie_request_external_id_validation_duplicates_and_local_match(
         "app.api.v1.operations.DeepSearchService.verify_movie",
         lambda _self, movie_id: verified_snapshot(movie_id),
     )
+    monkeypatch.setattr(
+        "app.api.v1.operations.DeepSearchService.search_movies",
+        lambda *_args, **_kwargs: {
+            "results": [{"id": 999, "title": "Missing Film", "original_title": "Missing Film"}]
+        },
+    )
     base = {"movie_name": "Missing Film", "email": "viewer@example.com"}
-    assert client.post("/api/v1/movie-requests", json=base).status_code == 422
+    name_only = client.post("/api/v1/movie-requests", json=base)
+    assert name_only.status_code == 201
+    assert name_only.json()["movie_external_id"] == 999
     assert (
         client.post(
             "/api/v1/movie-requests", json=base | {"movie_external_id": 0}
@@ -543,6 +576,128 @@ def test_invalid_date_range(client):
     )
 
 
+def test_contact_requests_are_private_review_items_and_user_ott_reports_are_untrusted(
+    client, database, monkeypatch
+):
+    monkeypatch.setattr("app.api.v1.operations.limit", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(settings, "DISCORD_BOT_ENDPOINT", "")
+    monkeypatch.setattr(settings, "DISCORD_WEBHOOK_URL", "")
+    monkeypatch.setattr(settings, "SMTP_HOST", "")
+    monkeypatch.setattr(settings, "SMTP_FROM", "")
+    payload = {
+        "request_type": "INCORRECT_OTT",
+        "name": "Private Viewer",
+        "whatsapp": "+65 8000 0000",
+        "phone": "+65 6000 0000",
+        "email": "private.viewer@example.test",
+        "comment": "The listed platform appears to be incorrect.",
+        "movie_name": "Example Film",
+        "tmdb_id": 101,
+        "expected_ott_platform": "Prime Video",
+        "expected_ott_release_date": "2026-09-18",
+        "evidence_url": "https://example.test/ott-evidence",
+    }
+    response = client.post("/api/v1/contact-requests", json=payload)
+    assert response.status_code == 201
+    assert response.json()["discord_status"] == "NOT_CONFIGURED"
+    item = database.query(ContactRequest).filter_by(request_id=response.json()["request_id"]).one()
+    assert item.status == "NEW"
+    assert item.whatsapp == payload["whatsapp"] and item.phone == payload["phone"]
+    evidence = database.get(OttEvidence, item.ott_evidence_id)
+    assert evidence.status == "NEEDS_REVIEW"
+    assert evidence.verification_method == "USER_REPORT"
+    assert evidence.manually_verified is False and evidence.trusted is False
+
+    public_payload = client.get("/api/v1/movies/1/detail").json()
+    serialized = str(public_payload)
+    assert "Private Viewer" not in serialized
+    assert "private.viewer@example.test" not in serialized
+    assert "+65 8000 0000" not in serialized
+    assert public_payload["movie"].get("ott_candidate") is None
+
+    salt = b"0123456789abcdef"
+    password = "contact-admin"
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 1000).hex()
+    monkeypatch.setattr(settings, "ADMIN_PASSWORD_HASH", f"pbkdf2_sha256$1000${salt.hex()}${digest}")
+    assert client.post("/api/v1/admin/login", json={"password": password}).status_code == 200
+    admin_item = client.get(f"/api/v1/admin/contact-requests/{item.request_id}").json()
+    assert admin_item["email"] == payload["email"]
+    assert admin_item["whatsapp"] == payload["whatsapp"]
+    assert admin_item["email_delivery_history"][0]["notification_type"] == "CONTACT_EMAIL_RECEIVED"
+    assert admin_item["email_delivery_history"][0]["status"] == "NOT_CONFIGURED"
+    retry = client.post(
+        f"/api/v1/admin/contact-requests/{item.request_id}/emails/RECEIVED/retry"
+    )
+    assert retry.status_code == 200 and retry.json()["status"] == "NOT_CONFIGURED"
+
+
+def test_low_confidence_ott_candidate_is_public_but_not_confirmed(client, database):
+    evidence = OttEvidence(
+        movie_id=1,
+        status="NEEDS_REVIEW",
+        platform="Prime Video",
+        release_date=date(2026, 9, 18),
+        source_url="https://example.test/research",
+        source_name="Independent report",
+        source_type="news",
+        source_published_at=date(2026, 9, 1),
+        confidence=43,
+        platform_confidence=43,
+        date_confidence=41,
+        summary="A plausible but unverified platform and date claim.",
+        verification_method="AUTOMATED_RESEARCH",
+        research_run_id="run-low-confidence",
+    )
+    database.add(evidence)
+    database.commit()
+    detail = client.get("/api/v1/movies/1/detail").json()["movie"]
+    candidate = detail["ott_candidate"]
+    assert candidate["platform"] == "Prime Video"
+    assert candidate["release_date"] == "2026-09-18"
+    assert candidate["confidence"] == 43
+    assert candidate["confidence_label"] == "LOW CONFIDENCE"
+    assert candidate["state"] == "CANDIDATE"
+    # The tentative claim is exposed separately and does not replace the
+    # fixture's existing verified canonical Netflix record.
+    assert detail["ott_verified"] is True
+    assert detail["ott_platform"] == "Netflix"
+    assert "not yet been fully verified" in candidate["help"]
+
+
+def test_system_health_marks_missing_automation_heartbeats_stale(database, monkeypatch):
+    from app.api.v1.admin import system_health
+    from app.workers.celery_app import celery_app
+
+    class RedisHealth:
+        def ping(self):
+            return True
+
+        def llen(self, _name):
+            return 0
+
+    class WorkerHealth:
+        def ping(self):
+            return {"worker@test": {"ok": "pong"}}
+
+    notices = []
+    monkeypatch.setattr("redis.from_url", lambda *_args, **_kwargs: RedisHealth())
+    monkeypatch.setattr(celery_app.control, "inspect", lambda **_kwargs: WorkerHealth())
+    monkeypatch.setattr(
+        "app.api.v1.admin.NotificationService.notify",
+        lambda _self, message, *_args, **_kwargs: notices.append(message) or False,
+    )
+    monkeypatch.setattr(settings, "IMDB_RATING_PROVIDER", "")
+    monkeypatch.setattr(settings, "IMDB_RATING_API_URL", "")
+    monkeypatch.setattr(settings, "IMDB_RATING_API_KEY", "")
+
+    result = system_health(database, None)
+    statuses = {item["name"]: item["status"] for item in result["automations"]}
+    assert statuses["MOVIE DISCOVERY"] == "STALE"
+    assert statuses["OTT RESEARCH"] == "STALE"
+    assert statuses["IMDb REFRESH"] == "NOT_CONFIGURED"
+    assert any("MOVIE DISCOVERY STALE" in message for message in notices)
+
+
 def test_request_verifies_and_persists_authoritative_snapshot(
     client, database, monkeypatch
 ):
@@ -569,7 +724,8 @@ def test_request_verifies_and_persists_authoritative_snapshot(
     assert response.json()["verified_title"] == "L2: Empuraan"
     assert response.json()["confirmation_email_status"] == "NOT_CONFIGURED"
     item = database.query(MovieRequest).filter_by(external_movie_id=997).one()
-    assert item.movie_name == item.verified_title == "L2: Empuraan"
+    assert item.movie_name == "Empuraan"
+    assert item.verified_title == "L2: Empuraan"
     assert item.original_title == "Verified Original"
     assert item.verified_release_date == date(2026, 1, 2)
     assert item.release_year == 2026
@@ -1116,6 +1272,7 @@ def test_confirmation_email_tracking_failure_retry_and_idempotency(
 ):
     monkeypatch.setattr(settings, "SMTP_HOST", "smtp.example.test")
     monkeypatch.setattr(settings, "SMTP_FROM", "requests@example.test")
+    monkeypatch.setattr(settings, "ADMIN_NOTIFICATION_EMAIL", "")
     item = MovieRequest(
         request_id="REQ-EMAIL",
         movie_name="Verified",
@@ -1142,6 +1299,13 @@ def test_confirmation_email_tracking_failure_retry_and_idempotency(
         minutes=6
     )
     database.commit()
+    queued = []
+    monkeypatch.setattr(
+        "app.workers.celery_app.celery_app.send_task",
+        lambda name, args=None, **_kwargs: queued.append((name, args)),
+    )
+    assert MovieRequestEmailService(database).recover() == ["REQ-EMAIL:confirmation"]
+    assert queued == [("notifications.movie_request_email", ["REQ-EMAIL", "confirmation"])]
     monkeypatch.setattr(
         MovieRequestEmailService,
         "_deliver",
@@ -1158,6 +1322,10 @@ def test_confirmation_email_tracking_failure_retry_and_idempotency(
         == "already_sent"
     )
     assert len(attempts) == 1
+    history = database.query(RequestCommunication).filter_by(
+        movie_request_id=item.id, event_type="CONFIRMATION", channel="email"
+    ).one()
+    assert history.status == "SENT" and history.attempt_count == 2 and history.sent_at
 
 
 def test_smtp_authentication_failure_is_recorded_without_credentials(

@@ -170,4 +170,4 @@ def test_discord_adapter_is_preferred_without_exposing_shared_secret(database, m
     assert calls[0][0] == "http://127.0.0.1:8765/movie-events"
     assert calls[0][1]["json"]["source"] == "indian-ott-tracker"
     assert "private-shared-secret" not in str(calls[0][1]["json"])
-    assert NotificationService.discord_method()["method"] == "EXISTING_BOT_ADAPTER"
+    assert NotificationService.discord_method()["method"] == "EXISTING_BOT"

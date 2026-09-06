@@ -258,8 +258,10 @@ class OTTReconciliationService:
                     canonical.verified_at = now
                 for row in chosen_rows:
                     row.status = "CONFIRMED"
-                state = "UPCOMING_CONFIRMED" if chosen_date > now.date() else "RELEASED_CONFIRMED"
-                canonical.status = "upcoming" if chosen_date > now.date() else "released"
+                from app.services.release_status import site_date
+                local_today = site_date(now)
+                state = "UPCOMING_CONFIRMED" if chosen_date > local_today else "RELEASED_CONFIRMED"
+                canonical.status = "upcoming" if chosen_date > local_today else "released"
                 canonical.release_state = state
                 confirmed_canonical.append(canonical)
                 reason = "OTT date selected from manual, official, or independent agreeing evidence"

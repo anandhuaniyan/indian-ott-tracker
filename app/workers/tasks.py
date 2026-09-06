@@ -832,6 +832,76 @@ def research_movie_request(request_id: str):
 
 
 @celery_app.task(
+    name="notifications.request_discord",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=5,
+)
+def request_discord(delivery_id: int):
+    from app.services.request_discord import RequestDiscordService
+
+    return _run(lambda db: RequestDiscordService(db).deliver(delivery_id))
+
+
+@celery_app.task(name="notifications.request_discord_recovery")
+def request_discord_recovery():
+    from app.services.request_discord import RequestDiscordService
+
+    queued = _run(lambda db: RequestDiscordService(db).recover())
+    return {"queued": len(queued), "delivery_ids": queued}
+
+
+@celery_app.task(
+    name="notifications.contact_request_email",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=5,
+)
+def contact_request_email(delivery_id: int):
+    from app.services.contact_requests import ContactRequestNotificationService
+
+    return _run(lambda db: ContactRequestNotificationService(db).deliver(delivery_id))
+
+
+@celery_app.task(
+    name="notifications.movie_request_email",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=5,
+)
+def movie_request_email(request_id: str, kind: str):
+    from app.services.movie_requests import MovieRequestEmailService, MovieRequestEmailDeliveryError
+    from app.models.operations import MovieRequest
+
+    def run(db):
+        item = db.query(MovieRequest).filter_by(request_id=request_id).first()
+        if not item:
+            return {"status": "MISSING", "request_id": request_id}
+        result = MovieRequestEmailService(db).send(item, kind, respect_cooldown=False)
+        if result["status"] == "FAILED":
+            raise MovieRequestEmailDeliveryError("Movie request email delivery failed")
+        return result
+
+    return _run(run)
+
+
+@celery_app.task(name="notifications.request_email_recovery")
+def request_email_recovery():
+    from app.services.contact_requests import ContactRequestNotificationService
+    from app.services.movie_requests import MovieRequestEmailService
+
+    def run(db):
+        contact = ContactRequestNotificationService(db).recover()
+        movie = MovieRequestEmailService(db).recover()
+        return {"contact_queued": contact, "movie_queued": movie}
+
+    return _run(run)
+
+
+@celery_app.task(
     name="operations.ott_intelligence_daily",
     autoretry_for=(Exception,),
     retry_backoff=True,

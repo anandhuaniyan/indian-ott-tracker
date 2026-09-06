@@ -11,6 +11,7 @@ from app.models.language import Language
 from app.models.movie import Movie
 from app.models.movie_metadata import MovieCredit, MovieReleaseDate, Person
 from app.models.ott_availability import OttAvailability
+from app.config.settings import settings
 
 
 @pytest.fixture(autouse=True)
@@ -24,6 +25,10 @@ def isolate_external_rate_limit_store(monkeypatch):
         "app.core.rate_limit.redis.from_url",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError()),
     )
+    # A developer's production .env correctly enables Secure cookies, while the
+    # in-process TestClient uses HTTP. Keep authentication tests isolated from
+    # that host-level deployment setting.
+    monkeypatch.setattr(settings, "ENVIRONMENT", "test")
 
 
 @pytest.fixture()

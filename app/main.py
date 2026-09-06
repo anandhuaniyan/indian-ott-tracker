@@ -107,7 +107,7 @@ def sitemap(db=Depends(get_db)):
     from app.models.genre import Genre
     from app.models.ott_availability import OttAvailability
     base = settings.SITE_URL.rstrip("/")
-    static = ["/", "/discover", "/search", "/ott", "/request-movie", "/about", "/contact", "/privacy", "/terms", "/cookies"]
+    static = ["/", "/discover", "/search", "/ott", "/request-movie", "/support", "/about", "/contact", "/privacy", "/terms", "/cookies"]
     static += [f"/calendar/{period}" for period in ("previous-week", "this-week", "next-week", "previous-month", "this-month", "next-month")]
     static += [f"/languages/{code}" for code in ("ml", "ta", "te", "hi", "kn")]
     static += [f"/genres/{row.slug}" for row in db.query(Genre.slug).order_by(Genre.slug)]

@@ -26,7 +26,7 @@ from app.models.ott_availability import OttAvailability
 from app.models.ott_platform import OttPlatform
 from app.models.tv_show import TVShow
 from app.models.tv_show_ott import TVShowOtt
-from app.models.operations import AdminAuditLog, BackfillRecord, DataQualityIssue, MovieComment, MovieRequest, NotificationLog, OperationState, OttEvidence, OttSourceRelease
+from app.models.operations import AdminAuditLog, BackfillRecord, ContactRequest, DataQualityIssue, MovieComment, MovieRequest, NotificationLog, OperationState, OttEvidence, OttSourceRelease, RequestNotificationDelivery
 from app.models.research import RequestCommunication, ResearchRun
 from app.models.ott_intelligence import (
     OttAvailabilityObservation,
@@ -67,7 +67,7 @@ __all__ = [
     "movie_languages",
     "tv_show_genres",
     "tv_show_languages",
-    "AdminAuditLog", "BackfillRecord", "MovieComment", "MovieRequest", "OttEvidence", "OttSourceRelease", "DataQualityIssue", "NotificationLog", "OperationState",
+    "AdminAuditLog", "BackfillRecord", "ContactRequest", "MovieComment", "MovieRequest", "OttEvidence", "OttSourceRelease", "DataQualityIssue", "NotificationLog", "OperationState", "RequestNotificationDelivery",
     "OttAvailabilityObservation", "OttReconciliationDecision", "OttProviderBudgetPeriod",
     "OttProviderHealth", "OttProviderCache", "OttGoldSetCase",
     "ResearchRun", "RequestCommunication",

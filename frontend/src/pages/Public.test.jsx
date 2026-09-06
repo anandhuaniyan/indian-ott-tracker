@@ -13,6 +13,7 @@ import Consent from "../components/Consent";
 import {
   Browse,
   Calendar,
+  Discover,
   Home,
   Movie,
   Ott,
@@ -69,8 +70,9 @@ it("renders Popular once and omits the duplicate Trending section", async () => 
   expect(popularHeading).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Trending" })).not.toBeInTheDocument();
   expect(
-    popularHeading.closest("section").querySelector('a[href="/discover?sort=popularity"]'),
+    popularHeading.closest("section").querySelector('a[href*="view_mode=section_listing"]'),
   ).toBeTruthy();
+  expect(screen.getAllByRole("link", { name: "View more" }).length).toBeGreaterThanOrEqual(7);
   expect(screen.getAllByText("Malayalam").length).toBeGreaterThanOrEqual(1);
   expect(screen.getByText("Netflix")).toBeInTheDocument();
 });
@@ -232,7 +234,7 @@ it("shows a clean no-trailer state and treats submitted comment HTML as text", a
   expect(post).toHaveBeenCalledWith("/api/v1/movies/1/comments", { display_name: "Viewer", comment: "Loved it" });
 });
 
-it("requires the external movie ID and preserves Deep Search prefills", async () => {
+it("restores the previous request template and accepts a Deep Search selection", async () => {
   get.mockResolvedValue([{ code: "ml", name: "Malayalam" }]);
   post.mockResolvedValue({ request_id: "REQ-1", status: "PENDING", verified_title: "Aadu", original_title: "ആട്", poster_path: "/aadu.jpg", confirmation_email_status: "SENT" });
   render(
@@ -241,11 +243,9 @@ it("requires the external movie ID and preserves Deep Search prefills", async ()
     </MemoryRouter>,
   );
   expect(screen.getByLabelText("Movie Name *")).toHaveValue("Aadu");
-  expect(screen.getByLabelText("ID *")).toHaveValue(326282);
+  expect(screen.getByLabelText("TMDB ID (optional)")).toHaveValue(326282);
   expect(screen.getByLabelText("Year")).toHaveValue(2015);
   expect(screen.getByLabelText("Language")).toHaveValue("ml");
-  expect(screen.getByText(/including one that is already listed here/i)).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: /use deep search/i })).toHaveAttribute("href", "/search?mode=deep");
   fireEvent.change(screen.getByLabelText("Email *"), { target: { value: "viewer@example.com" } });
   fireEvent.click(screen.getByRole("button", { name: "Submit request" }));
   await waitFor(() => expect(post).toHaveBeenCalledWith("/api/v1/movie-requests", expect.objectContaining({ movie_name: "Aadu", movie_external_id: 326282, release_year: 2015, language: "ml" })));
@@ -261,10 +261,43 @@ it("keeps a successful request when confirmation email delivery fails", async ()
   render(<MemoryRouter><Request /></MemoryRouter>);
   fireEvent.change(screen.getByLabelText("Movie Name *"), { target: { value: "Typo Film" } });
   fireEvent.change(screen.getByLabelText("Email *"), { target: { value: "viewer@example.com" } });
-  fireEvent.change(screen.getByLabelText("ID *"), { target: { value: "123" } });
   fireEvent.click(screen.getByRole("button", { name: "Submit request" }));
   expect(await screen.findByRole("heading", { name: "Verified Film" })).toBeInTheDocument();
-  expect(screen.getByText(/request was received, but we could not send/i)).toBeInTheDocument();
+  expect(screen.getByText(/request was received, but we could not send the confirmation email/i)).toBeInTheDocument();
+});
+
+it("restores issue and access as the second tab on the Request page", async () => {
+  get.mockResolvedValue([]);
+  post.mockResolvedValue({ request_id: "WEB-1", status: "NEW", type: "ACCESS_REQUEST", discord_status: "PENDING", receipt_email_status: "NOT_SUPPLIED" });
+  render(<MemoryRouter initialEntries={["/request-movie?tab=contact&type=ACCESS_REQUEST"]}><Routes><Route path="/request-movie" element={<Request/>}/></Routes></MemoryRouter>);
+  expect(screen.getByRole("tab", { name: "Request movie" })).toHaveAttribute("aria-selected", "false");
+  expect(screen.getByRole("tab", { name: "Report issue / request access" })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("heading", { name: "Report issue / request access" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Name")).not.toBeRequired();
+  fireEvent.change(screen.getByLabelText("WhatsApp Number (Preferred)"), { target: { value: "+65 8000 0000" } });
+  fireEvent.change(screen.getByLabelText("Comment / Description *"), { target: { value: "Please review access." } });
+  fireEvent.click(screen.getByRole("button", { name: "Send to administrator" }));
+  await waitFor(() => expect(post).toHaveBeenCalledWith("/api/v1/contact-requests", expect.objectContaining({ request_type: "ACCESS_REQUEST", whatsapp: "+65 8000 0000" })));
+  expect(await screen.findByRole("heading", { name: "Submission received" })).toBeInTheDocument();
+});
+
+it("orders homepage section listings as movies, pagination, then functional filters", async () => {
+  get.mockResolvedValue({
+    items: [card], total: 30, page: 1, page_size: 24, pages: 2,
+    filters: { languages: [{ code: "ml", name: "Malayalam" }], genres: [], platforms: [], roles: [] },
+    section: "popular",
+  });
+  render(<MemoryRouter initialEntries={["/discover?view_mode=section_listing&section=popular&sort=popularity"]}><Routes><Route path="/discover" element={<Discover/>}/></Routes></MemoryRouter>);
+  const title = await screen.findByRole("heading", { name: "Popular movies" });
+  const grid = document.querySelector(".section-listing .grid");
+  const pager = screen.getByRole("navigation", { name: "Pagination" });
+  const filters = screen.getByRole("form", { name: "Movie filters" });
+  expect(title.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(grid.compareDocumentPosition(pager) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(pager.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.change(screen.getByLabelText("Language"), { target: { value: "ml" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await waitFor(() => expect(get).toHaveBeenCalledWith(expect.stringMatching(/section=popular.*language=ml|language=ml.*section=popular/)));
 });
 
 it("supports person credit controls and separates normalized roles", async () => {

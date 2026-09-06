@@ -7,6 +7,7 @@ from email.message import EmailMessage
 from html import escape
 import smtplib
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config.settings import settings
@@ -30,6 +31,10 @@ def _aware(value: datetime | None) -> datetime | None:
 
 def _safe_error(exc: Exception) -> str:
     return sanitize_error(f"{type(exc).__name__}: {exc}", limit=1000)
+
+
+class MovieRequestEmailDeliveryError(RuntimeError):
+    """A sanitized transient error that Celery may retry safely."""
 
 
 class MovieRequestEmailService:
@@ -151,38 +156,112 @@ class MovieRequestEmailService:
         attempt_name = f"{kind}_email_last_attempt_at"
         attempt_count_name = f"{kind}_email_attempt_count"
         status = getattr(item, status_name)
+        event_type = kind.upper()
+        history = (
+            self.db.query(RequestCommunication)
+            .filter_by(movie_request_id=item.id, event_type=event_type, channel="email")
+            .first()
+        )
+        if not history:
+            history = RequestCommunication(
+                movie_request_id=item.id,
+                event_type=event_type,
+                channel="email",
+                status=status,
+                attempt_count=getattr(item, attempt_count_name) or 0,
+            )
+            self.db.add(history)
         if status == "SENT":
+            history.status = "SENT"
+            history.sent_at = getattr(item, sent_name)
+            history.last_error = None
+            self.db.commit()
             return {"kind": kind, "status": "SENT", "sent": False, "skipped": "already_sent"}
         now = datetime.now(timezone.utc)
         last_attempt = _aware(getattr(item, attempt_name))
         if respect_cooldown and last_attempt and last_attempt > now - self.RETRY_COOLDOWN:
+            self.db.commit()
             return {"kind": kind, "status": status, "sent": False, "skipped": "cooldown"}
         setattr(item, attempt_name, now)
         setattr(item, attempt_count_name, (getattr(item, attempt_count_name) or 0) + 1)
+        history.attempt_count = getattr(item, attempt_count_name)
+        history.last_attempt_at = now
         if not self.configured(kind):
             setattr(item, status_name, "NOT_CONFIGURED")
             setattr(item, error_name, "SMTP is not configured")
+            history.status = "NOT_CONFIGURED"
+            history.last_error = "SMTP is not configured"
             self.db.commit()
             return {"kind": kind, "status": "NOT_CONFIGURED", "sent": False}
         try:
             message = self._message(item, kind)
+            history.subject = str(message["Subject"])
             self._deliver(message)
         except Exception as exc:
             setattr(item, status_name, "FAILED")
             setattr(item, error_name, _safe_error(exc))
+            history.status = "FAILED"
+            history.last_error = getattr(item, error_name)
             self.db.commit()
             return {"kind": kind, "status": "FAILED", "sent": False}
         setattr(item, status_name, "SENT")
         setattr(item, sent_name, now)
         setattr(item, error_name, None)
+        history.status = "SENT"
+        history.sent_at = now
+        history.last_error = None
         self.db.commit()
         return {"kind": kind, "status": "SENT", "sent": True}
+
+    def recover(self, limit: int = 100) -> list[str]:
+        """Queue eligible unsent email events without duplicating delivered mail."""
+        if not settings.SMTP_HOST or not settings.SMTP_FROM:
+            return []
+        cutoff = datetime.now(timezone.utc) - self.RETRY_COOLDOWN
+        pending = ("PENDING", "FAILED", "NOT_CONFIGURED")
+        rows = (
+            self.db.query(MovieRequest)
+            .filter(
+                or_(
+                    MovieRequest.confirmation_email_status.in_(pending),
+                    MovieRequest.admin_notification_email_status.in_(pending),
+                    MovieRequest.completion_email_status.in_(pending),
+                    MovieRequest.rejection_email_status.in_(pending),
+                )
+            )
+            .order_by(MovieRequest.created_at.asc())
+            .limit(limit)
+            .all()
+        )
+        queued: list[str] = []
+        from app.workers.celery_app import celery_app
+
+        for item in rows:
+            eligible = ["confirmation"]
+            if settings.ADMIN_NOTIFICATION_EMAIL:
+                eligible.append("admin_notification")
+            if item.status == "ADDED" and item.local_movie_id:
+                eligible.append("completion")
+            if item.status == "REJECTED":
+                eligible.append("rejection")
+            for kind in eligible:
+                status = getattr(item, f"{kind}_email_status")
+                attempted = _aware(getattr(item, f"{kind}_email_last_attempt_at"))
+                if status not in pending or (attempted and attempted > cutoff):
+                    continue
+                celery_app.send_task(
+                    "notifications.movie_request_email",
+                    args=[item.request_id, kind],
+                    ignore_result=True,
+                )
+                queued.append(f"{item.request_id}:{kind}")
+        return queued
 
 
 class MovieRequestUpdateEmailService:
     """Idempotent requester updates beyond the fixed received/added/rejected fields."""
 
-    EVENTS = {"MATCHED", "OTT_FOUND", "NEEDS_INFORMATION"}
+    EVENTS = {"MATCHED", "OTT_FOUND", "AVAILABLE", "NEEDS_INFORMATION"}
 
     def __init__(self, db: Session):
         self.db = db
@@ -210,6 +289,7 @@ class MovieRequestUpdateEmailService:
         content = {
             "MATCHED": (f"Movie Request Matched — {title}", f"We matched your request for {title} to a verified movie record. Research is continuing.\n\n{movie_url}"),
             "OTT_FOUND": (f"OTT Availability Found — {title}", f"We found verified streaming information for {title}. View the current details here:\n\n{movie_url}"),
+            "AVAILABLE": (f"Now Available to Stream — {title}", f"Verified streaming availability is now active for {title}. View the current platform details here:\n\n{movie_url}"),
             "NEEDS_INFORMATION": (f"More Information Needed — {title}", f"We need more information to complete your request for {title}. Please reply to this email and include request reference {item.request_id}."),
         }[event_type]
         record.subject = content[0]
