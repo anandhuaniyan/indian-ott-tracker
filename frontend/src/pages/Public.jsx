@@ -1407,10 +1407,8 @@ export function Calendar() {
 }
 
 export function Request() {
-  const [params, setParams] = useSearchParams();
+  const [params] = useSearchParams();
   const [languages] = useData("/api/v1/languages");
-  const [tab, setTab] = useState(params.get("tab") === "contact" ? "contact" : "movie");
-  const [contactType, setContactType] = useState(params.get("type") || "WEBSITE_ISSUE");
   const [movieId, setMovieId] = useState(params.get("movie_external_id") || "");
   const [result, setResult] = useState();
   const [submitting, setSubmitting] = useState(false);
@@ -1422,33 +1420,19 @@ export function Request() {
     Object.keys(body).forEach((key) => body[key] === "" && delete body[key]);
     if (body.release_year) body.release_year = Number(body.release_year);
     if (body.movie_external_id) body.movie_external_id = Number(body.movie_external_id);
-    if (body.tmdb_id) body.tmdb_id = Number(body.tmdb_id);
-    post(tab === "movie" ? "/api/v1/movie-requests" : "/api/v1/contact-requests", body)
+    post("/api/v1/movie-requests", body)
       .then(setResult)
       .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
       .finally(() => setSubmitting(false));
   };
   const received = Boolean(result?.request_id);
-  const movieFields = ["INCORRECT_MOVIE", "INCORRECT_OTT"].includes(contactType);
-  const changeTab = (nextTab) => {
-    const next = new URLSearchParams(params);
-    if (nextTab === "contact") next.set("tab", "contact");
-    else next.delete("tab");
-    setParams(next);
-    setTab(nextTab);
-    setResult(undefined);
-  };
   return (
-    <main className="request-page">
+    <main>
       <Seo title="Request a movie" />
       <h1>Request a movie</h1>
       <p>Ask us to review any movie, including one that is already listed here. Your email is used only to process this request.</p>
       <p><Link to="/search?mode=deep">Don&apos;t know the ID? Use Deep Search.</Link></p>
-      <div className="request-tabs" role="tablist" aria-label="Request type">
-        <button type="button" role="tab" aria-selected={tab === "movie"} className={tab === "movie" ? "active" : ""} onClick={() => changeTab("movie")}>Request movie</button>
-        <button type="button" role="tab" aria-selected={tab === "contact"} className={tab === "contact" ? "active" : ""} onClick={() => changeTab("contact")}>Report issue / request access</button>
-      </div>
-      {!received && tab === "movie" && <form className="request" onSubmit={submit}>
+      {!received && <form className="request" onSubmit={submit}>
         <label>Movie Name *<input name="movie_name" required maxLength="500" defaultValue={params.get("movie_name") || ""} /></label>
         <label>Email *<input name="email" type="email" required maxLength="320" autoComplete="email" /></label>
         <label>ID (optional)<input name="movie_external_id" type="number" min="1" max="2147483647" step="1" inputMode="numeric" value={movieId} onChange={(event) => setMovieId(event.target.value)} /></label>
@@ -1458,8 +1442,55 @@ export function Request() {
         <label>Comments<textarea name="details" maxLength="2000" placeholder="Any details that help identify it" /></label>
         <button disabled={submitting}>{submitting ? "Verifying movie…" : "Submit request"}</button>
       </form>}
-      {!received && tab === "contact" && <form className="request request-card" onSubmit={submit}>
-        <div className="request-intro"><h2>Report issue / request access</h2><p>Submissions go to private administrator review. Corrections and access requests are never applied automatically.</p></div>
+      {!received && result?.candidates?.length > 0 && <section className="request-candidates" aria-labelledby="movie-match-heading"><h2 id="movie-match-heading">Choose the correct movie</h2><p>We found more than one possible match.</p>{result.candidates.map((candidate) => <button type="button" key={candidate.id} onClick={() => { setMovieId(String(candidate.id)); setResult(undefined); }}><span>{candidate.poster_path && <Art path={candidate.poster_path} alt="" />}</span><strong>{candidate.title}</strong><small>{candidate.release_date?.slice(0, 4) || "Year unknown"} · {candidate.original_language_name || candidate.original_language || "Language unknown"} · ID {candidate.id}</small></button>)}</section>}
+      {received && (
+        <section className="request-success" role="status">
+          {result.poster_path && <Art className="request-poster" path={result.poster_path} alt={`${result.verified_title} poster`} />}
+          <div>
+            <h2>Request received</h2>
+            <h3>{result.verified_title}</h3>
+            {result.original_title && result.original_title !== result.verified_title && <p>{result.original_title}</p>}
+            <p>We aim to review your request within 48 hours. We’ll email you when its status changes.</p>
+            {result.confirmation_email_status === "SENT" ? <p>Confirmation email sent.</p> : <p>Your request was received, but we could not send the confirmation email.</p>}
+            <small>Request reference: {result.request_id}</small>
+          </div>
+        </section>
+      )}
+      {result?.error && !result?.candidates?.length && (
+        <div className="request-error" role="alert">
+          <p>{result.error}</p>
+          {result.local_movie_id && <Link className="button-link" to={`/movies/${result.local_movie_id}`}>View Movie</Link>}
+        </div>
+      )}
+    </main>
+  );
+}
+
+export function Support() {
+  const [params] = useSearchParams();
+  const [contactType, setContactType] = useState(params.get("type") || "WEBSITE_ISSUE");
+  const [result, setResult] = useState();
+  const [submitting, setSubmitting] = useState(false);
+  const submit = (event) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setResult(undefined);
+    const body = Object.fromEntries(new FormData(event.target));
+    Object.keys(body).forEach((key) => body[key] === "" && delete body[key]);
+    if (body.tmdb_id) body.tmdb_id = Number(body.tmdb_id);
+    post("/api/v1/contact-requests", body)
+      .then(setResult)
+      .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
+      .finally(() => setSubmitting(false));
+  };
+  const received = Boolean(result?.request_id);
+  const movieFields = ["INCORRECT_MOVIE", "INCORRECT_OTT"].includes(contactType);
+  return (
+    <main className="support-page">
+      <Seo title="Report issue or request access" />
+      <h1>Report issue / request access</h1>
+      <p>Submissions go to private administrator review. Corrections and access requests are never applied automatically.</p>
+      {!received && <form className="request request-card" onSubmit={submit}>
         <label>Request type *<select name="request_type" required value={contactType} onChange={(event) => setContactType(event.target.value)}>
           <option value="WEBSITE_ISSUE">Report website issue</option><option value="INCORRECT_MOVIE">Report incorrect movie information</option><option value="INCORRECT_OTT">Report incorrect OTT information</option><option value="ACCESS_REQUEST">Request website access</option><option value="OTHER">Other</option>
         </select></label>
@@ -1475,24 +1506,8 @@ export function Request() {
         <p className="form-help">Provide at least one contact method: WhatsApp, phone, or email.</p>
         <button disabled={submitting}>{submitting ? "Sending securely…" : "Send to administrator"}</button>
       </form>}
-      {!received && tab === "movie" && result?.candidates?.length > 0 && <section className="request-candidates" aria-labelledby="movie-match-heading"><h2 id="movie-match-heading">Choose the correct movie</h2><p>We found more than one possible match.</p>{result.candidates.map((candidate) => <button type="button" key={candidate.id} onClick={() => { setMovieId(String(candidate.id)); setResult(undefined); }}><span>{candidate.poster_path && <Art path={candidate.poster_path} alt="" />}</span><strong>{candidate.title}</strong><small>{candidate.release_date?.slice(0, 4) || "Year unknown"} · {candidate.original_language_name || candidate.original_language || "Language unknown"} · ID {candidate.id}</small></button>)}</section>}
-      {received && (
-        <section className="request-success" role="status">
-          {tab === "movie" && result.poster_path && <Art className="request-poster" path={result.poster_path} alt={`${result.verified_title} poster`} />}
-          <div>
-            <h2>{tab === "movie" ? "Request received" : "Submission received"}</h2>
-            {tab === "movie" && <><h3>{result.verified_title}</h3>{result.original_title && result.original_title !== result.verified_title && <p>{result.original_title}</p>}<p>We aim to review your request within 48 hours. We’ll email you when its status changes.</p>{result.confirmation_email_status === "SENT" ? <p>Confirmation email sent.</p> : <p>Your request was received, but we could not send the confirmation email.</p>}</>}
-            {tab === "contact" && <><p>An administrator can now review reference {result.request_id}. No access or correction is applied automatically.</p>{result.receipt_email_status === "SENT" ? <p>Confirmation email sent.</p> : result.receipt_email_status === "NOT_SUPPLIED" ? null : <p>Your submission was saved; email delivery is pending or not currently available.</p>}</>}
-            <small>Request reference: {result.request_id}</small>
-          </div>
-        </section>
-      )}
-      {result?.error && !result?.candidates?.length && (
-        <div className="request-error" role="alert">
-          <p>{result.error}</p>
-          {result.local_movie_id && <Link className="button-link" to={`/movies/${result.local_movie_id}`}>View Movie</Link>}
-        </div>
-      )}
+      {received && <section className="request-success support-success" role="status"><div><h2>Submission received</h2><p>An administrator can now review reference {result.request_id}. No access or correction is applied automatically.</p>{result.receipt_email_status === "SENT" ? <p>Confirmation email sent.</p> : result.receipt_email_status === "NOT_SUPPLIED" ? null : <p>Your submission was saved; email delivery is pending or not currently available.</p>}<small>Request reference: {result.request_id}</small></div></section>}
+      {result?.error && <div className="request-error" role="alert"><p>{result.error}</p></div>}
     </main>
   );
 }
