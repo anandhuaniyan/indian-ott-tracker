@@ -1,5 +1,6 @@
 import React, { lazy, Suspense } from "react";
 import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import AmbientLight from "../components/AmbientLight";
 
 const page = name => lazy(() => import("../pages/Public").then(module => ({ default: module[name] })));
 const admin = name => lazy(() => import("../pages/Admin").then(module => ({ default: module[name] })));
@@ -10,7 +11,7 @@ const Login = admin("Login"), Dashboard = admin("Dashboard"), Requests = admin("
 const DeepMovie = deep("DeepMovie"), DeepPerson = deep("DeepPerson");
 
 const Missing = () => <main className="loading"><h1>Page not found</h1><Link to="/">Return home</Link></main>;
-const Shell = ({ children }) => <><header><div className="site-bar"><Link className="brand" to="/" aria-label="OTT Tracker home"><img src="/branding/ott-tracker-icon.svg?v=1" width="34" height="34" alt="" aria-hidden="true" /><span>OTT <span className="brand-accent">Tracker</span></span></Link><nav><Link to="/discover">Discover</Link><Link to="/search">Search</Link><Link to="/ott">OTT</Link><Link to="/calendar/this-week">Calendar</Link><Link to="/request-movie">Request a movie</Link></nav></div></header>{children}<footer><div className="site-bar"><nav><Link to="/about">About</Link><Link to="/request-movie?tab=issue">Report issue / access</Link><Link to="/contact">Contact</Link><Link to="/privacy">Privacy</Link><Link to="/terms">Terms</Link><Link to="/cookies">Cookies</Link><button className="link-button" onClick={() => window.dispatchEvent(new Event("open-cookie-preferences"))}>Cookie preferences</button></nav></div></footer></>;
+const Shell = ({ children }) => <><AmbientLight/><header><div className="site-bar"><Link className="brand" to="/" aria-label="OTT Tracker home"><img src="/branding/ott-tracker-icon.svg?v=1" width="34" height="34" alt="" aria-hidden="true" /><span>OTT <span className="brand-accent">Tracker</span></span></Link><nav><Link to="/discover">Discover</Link><Link to="/search">Search</Link><Link to="/ott">OTT</Link><Link to="/calendar/this-week">Calendar</Link><Link to="/request-movie">Request a movie</Link></nav></div></header>{children}<footer><div className="site-bar"><nav><Link to="/about">About</Link><Link to="/request-movie?tab=issue">Report issue / access</Link><Link to="/contact">Contact</Link><Link to="/privacy">Privacy</Link><Link to="/terms">Terms</Link><Link to="/cookies">Cookies</Link><button className="link-button" onClick={() => window.dispatchEvent(new Event("open-cookie-preferences"))}>Cookie preferences</button></nav></div></footer></>;
 const SupportEntry = () => {
   const location = useLocation();
   const type = new URLSearchParams(location.search).get("type");

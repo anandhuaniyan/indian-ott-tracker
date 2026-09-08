@@ -48,4 +48,11 @@ describe("fluid responsive layout", () => {
     expect(css).toMatch(/@media \(max-width: 640px\)[\s\S]*\.comment-form button,[\s\S]*width:\s*100%/);
     expect(nginx).toMatch(/frame-src[^;]*https:\/\/www\.youtube-nocookie\.com/);
   });
+
+  it("keeps ambient lighting desktop-only, non-interactive, and reduced-motion safe", () => {
+    expect(css).toMatch(/@media \(hover: hover\) and \(pointer: fine\) and \(min-width: 769px\)/);
+    expect(css).toMatch(/\.ambient-pointer-light\s*\{[\s\S]*pointer-events:\s*none/);
+    expect(css).toMatch(/\.ambient-pointer-light\s*\{[\s\S]*will-change:\s*transform, opacity/);
+    expect(css).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*\.ambient-pointer-light\s*\{\s*display:\s*none !important/);
+  });
 });
