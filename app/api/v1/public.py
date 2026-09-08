@@ -7,7 +7,7 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import and_, exists, func, or_, select
+from sqlalchemy import Integer, and_, case, cast, exists, func, or_, select
 from sqlalchemy.orm import Session, aliased, selectinload
 
 from app.database.connection import get_db
@@ -45,13 +45,25 @@ from app.services.release_status import (
 from app.services.roles import ROLE_ALIASES, normalize_role
 from app.services.languages import LANGUAGE_NAMES, language_name
 from app.services.ott_providers import normalize_platform
-from app.services.trailers import TrailerService, trailer_payload
+from app.services.trailers import TrailerService, trailer_payload, trailer_videos_payload
 
 router = APIRouter(prefix="/api/v1", tags=["Discovery"])
 PUBLIC_OTT_STATES = ("available", "confirmed", "announced", "upcoming", "released")
 CANONICAL_OTT_CALENDAR_STATES = ("upcoming", "released")
 THEATRICAL_RELEASE_TYPES = ("2", "3", "limited theatrical", "theatrical")
 COMMENT_STATUSES = {"PENDING", "APPROVED", "HIDDEN", "REJECTED"}
+
+# Local search relevance.
+#
+# Normal movie search is title-centric and deterministic: exact titles rank
+# above prefixes, prefixes above substrings, substrings above a trigram fuzzy
+# tier.  Trigrams are only consulted once the query is long enough to be
+# meaningful, and only matches at or above SEARCH_FUZZY_THRESHOLD survive.
+# The trigram layer exists purely for typo tolerance (vazha/vaaza -> Vaazha),
+# not to pad results: movies that merely share an actor, keyword, or a loose
+# alternative-title word are intentionally excluded from normal search.
+SEARCH_FUZZY_THRESHOLD = 0.40
+SEARCH_MIN_TRIGRAM_LENGTH = 3
 
 
 class CommentSubmission(BaseModel):
@@ -263,6 +275,8 @@ def _card(movie: Movie) -> dict:
         None,
     )
     confirmed_ott = confirmed_canonical_ott(movie)
+    platforms = sorted({normalize_platform(x.provider) for x in movie.ott_availabilities
+                        if x.status in PUBLIC_OTT_STATES and normalize_platform(x.provider)})
     return {
         "id": movie.id,
         "title": movie.title,
@@ -280,16 +294,55 @@ def _card(movie: Movie) -> dict:
         "language": movie.original_language,
         "language_name": language_name(movie.original_language, stored_language),
         "genres": [g.name for g in movie.genres],
-        "ott_platform": (
-            normalize_platform(confirmed_ott.provider) if confirmed_ott else None
-        ),
+        "ott_platform": ", ".join(platforms) or None,
+        "ott_platforms": platforms,
         "ott_release_date": confirmed_ott.ott_release_date if confirmed_ott else None,
         "ott_state": confirmed_ott.status.upper() if confirmed_ott else None,
     }
 
 
+def movie_identity(movie):
+    """Provider-independent identity; never merge conflicting primary IDs."""
+    if movie.tmdb_id:
+        return ("tmdb", movie.tmdb_id)
+    imdb = next((x.external_id.strip().lower() for x in movie.external_ids
+                 if x.provider.lower() == "imdb" and x.external_id), None)
+    if imdb:
+        return ("imdb", imdb)
+    title = "".join(c for c in movie.title.casefold() if c.isalnum())
+    year = movie.release_date.year if movie.release_date else None
+    if title and year and movie.original_language:
+        return ("title", title, year, movie.original_language.lower())
+    return ("local", movie.id)
+
+
 def cards(items) -> list[dict]:
-    return [_card(movie) for movie in items]
+    selected = {}
+    for movie in items:
+        selected.setdefault(movie_identity(movie), movie)
+    return [_card(movie) for movie in selected.values()]
+
+
+def _cast_payload(credits):
+    selected = {}
+    for credit in credits:
+        if credit.credit_type != "cast":
+            continue
+        person = credit.person
+        key = ("tmdb", person.tmdb_id) if person.tmdb_id else (
+            ("imdb", person.imdb_id) if person.imdb_id else ("local", person.id))
+        item = selected.setdefault(key, {
+            "person_id": person.id, "name": person.name,
+            "profile_path": person.profile_path, "character": "",
+            "order": credit.cast_order, "characters": [],
+        })
+        character = (credit.character or "").strip()
+        if character and character.casefold() not in {x.casefold() for x in item["characters"]}:
+            item["characters"].append(character)
+        item["character"] = " / ".join(item["characters"])
+        if credit.cast_order is not None:
+            item["order"] = min(item["order"], credit.cast_order) if item["order"] is not None else credit.cast_order
+    return sorted(selected.values(), key=lambda x: (x["order"] is None, x["order"] or 0, x["person_id"]))
 
 
 def _external_id_payload(item: ExternalId) -> dict:
@@ -753,6 +806,97 @@ def public_languages(db: Session = Depends(get_db)):
     ]
 
 
+def _fold_search_term(raw_value: str) -> str:
+    """Normalize a search term without touching non-ASCII scripts."""
+    return " ".join(raw_value.strip().split())
+
+
+def _escape_like(term: str) -> str:
+    """Escape LIKE wildcards so user input is matched literally."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _movie_relevance_case(term: str, fuzzy: bool):
+    """Deterministic relevance-tiers CASE for local movie search.
+
+    Order: exact title > exact original title > exact alternative title >
+    title prefix > original prefix > alternative prefix > title substring >
+    original substring > trigram fuzzy (title/original/alternative gated by
+    SEARCH_FUZZY_THRESHOLD).  First matched tier wins.  Alternative-title
+    matches that are neither exact nor prefix only count through the trigram
+    gate, so movies whose alternative titles merely share a word are excluded.
+    """
+    lower_term = term.lower()
+    title_l = func.lower(Movie.title)
+    orig_l = func.lower(func.coalesce(Movie.original_title, ""))
+    prefix = _escape_like(lower_term) + "%"
+    alt_exact = exists(
+        select(1).where(
+            and_(
+                AlternativeTitle.movie_id == Movie.id,
+                func.lower(AlternativeTitle.title) == lower_term,
+            )
+        )
+    )
+    alt_prefix = exists(
+        select(1).where(
+            and_(
+                AlternativeTitle.movie_id == Movie.id,
+                func.lower(AlternativeTitle.title).like(prefix, escape="\\"),
+            )
+        )
+    )
+    branches = [
+        (title_l == lower_term, 10000),
+        (orig_l == lower_term, 9500),
+        (alt_exact, 9000),
+        (title_l.like(prefix, escape="\\"), 8000),
+        (orig_l.like(prefix, escape="\\"), 7500),
+        (alt_prefix, 7000),
+    ]
+    if fuzzy:
+        title_sim = func.similarity(title_l, lower_term)
+        orig_sim = func.similarity(orig_l, lower_term)
+        alt_sim = (
+            select(
+                func.max(func.similarity(func.lower(AlternativeTitle.title), lower_term))
+            )
+            .where(AlternativeTitle.movie_id == Movie.id)
+            .correlate(Movie)
+            .scalar_subquery()
+        )
+        branches.extend(
+            [
+                (title_sim >= SEARCH_FUZZY_THRESHOLD, cast(title_sim * 4990, Integer)),
+                (
+                    orig_sim >= SEARCH_FUZZY_THRESHOLD,
+                    cast(orig_sim * 4990, Integer),
+                ),
+                (alt_sim >= SEARCH_FUZZY_THRESHOLD, cast(alt_sim * 4990, Integer)),
+            ]
+        )
+    return case(*branches, else_=0)
+
+
+def _person_relevance_case(term: str, fuzzy: bool):
+    """Deterministic relevance-tiers CASE for person search."""
+    lower_term = term.lower()
+    name_l = func.lower(Person.name)
+    prefix = _escape_like(lower_term) + "%"
+    branches = [
+        (name_l == lower_term, 10000),
+        (name_l.like(prefix, escape="\\"), 8000),
+    ]
+    if fuzzy:
+        name_sim = func.similarity(name_l, lower_term)
+        branches.extend(
+            [
+                (name_sim >= SEARCH_FUZZY_THRESHOLD, cast(name_sim * 4990, Integer)),
+            ]
+        )
+    return case(*branches, else_=0)
+
+
 @router.get("/search")
 def global_search(
     q: str = Query("", max_length=200),
@@ -760,25 +904,39 @@ def global_search(
     page_size: int = Query(20, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
-    if not q.strip():
-        return {
-            "movies": {"items": [], "total": 0},
-            "people": {"items": [], "total": 0},
-            "page": page,
-            "page_size": page_size,
-        }
-    movie_query = _apply_filters(_movie_query(db), q=q)
+    empty = {
+        "movies": {"items": [], "total": 0},
+        "people": {"items": [], "total": 0},
+        "page": page,
+        "page_size": page_size,
+    }
+    term = _fold_search_term(q)
+    if not term:
+        return empty
+    fuzzy = len(term) >= SEARCH_MIN_TRIGRAM_LENGTH
+
+    movie_score = _movie_relevance_case(term, fuzzy)
+    movie_query = _movie_query(db).filter(movie_score > 0)
     movie_total = movie_query.count()
     movies = (
-        movie_query.order_by(Movie.popularity.desc())
+        movie_query.order_by(
+            movie_score.desc(),
+            Movie.popularity.desc(),
+            Movie.id.desc(),
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
     )
-    people_query = db.query(Person).filter(Person.name.ilike(f"%{q.strip()}%"))
+
+    person_score = _person_relevance_case(term, fuzzy)
+    people_query = db.query(Person).filter(person_score > 0)
     people_total = people_query.count()
     people = (
-        people_query.order_by(Person.name)
+        people_query.order_by(
+            person_score.desc(),
+            Person.name.asc(),
+        )
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
@@ -1052,21 +1210,28 @@ def calendar(
         )
         .all()
     )
-    ott = [
-        _card(movie)
-        | {
+    # One movie per requested calendar range. The earliest matching release
+    # anchors its card; every platform retains its own release date below it.
+    grouped = {}
+    for movie, availability in ott_rows:
+        key = movie_identity(movie)
+        item = grouped.setdefault(key, _card(movie) | {
             "release_date": availability.ott_release_date,
             "ott_release_date": availability.ott_release_date,
-            "ott_platform": normalize_platform(availability.provider),
-            "ott_platform_slug": normalize_platform(availability.provider)
-            .lower()
-            .replace(" ", "-"),
+            "ott_platform_slug": normalize_platform(availability.provider).lower().replace(" ", "-"),
             "ott_platform_logo": availability.provider_logo,
             "verification_state": availability.status,
             "confidence": availability.confidence,
-        }
-        for movie, availability in ott_rows
-    ]
+            "ott_releases": [],
+        })
+        release = {"platform": normalize_platform(availability.provider),
+                   "release_date": availability.ott_release_date, "country": availability.country}
+        if release not in item["ott_releases"]:
+            item["ott_releases"].append(release)
+    ott = list(grouped.values())
+    for item in ott:
+        item["ott_platforms"] = sorted({x["platform"] for x in item["ott_releases"]})
+        item["ott_platform"] = ", ".join(item["ott_platforms"])
     return {
         "period": period,
         "today": today,
@@ -1152,6 +1317,8 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
     ).classify_movie(movie, sync_evidence=False)
     ott_summary = best_canonical_ott(movie)
     confirmed_ott = confirmed_canonical_ott(movie)
+    platforms = sorted({normalize_platform(x.provider) for x in movie.ott_availabilities
+                        if x.status in PUBLIC_OTT_STATES and normalize_platform(x.provider)})
     ott_candidate = _public_ott_candidate(db, movie.id)
     ott_public_state = (
         "COMING_TO_OTT"
@@ -1301,17 +1468,7 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
                 for x in _canonical_ott_rows(movie)
             ],
         },
-        "cast": [
-            {
-                "person_id": x.person_id,
-                "name": x.person.name,
-                "profile_path": x.person.profile_path,
-                "character": x.character,
-                "order": x.cast_order,
-            }
-            for x in credits
-            if x.credit_type == "cast"
-        ],
+        "cast": _cast_payload(credits),
         "crew": [
             {
                 "person_id": x.person_id,
@@ -1366,6 +1523,7 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
             next((item for item in movie.trailers if item.is_primary), None)
             or TrailerService(db).primary(movie.id)
         ),
+        "videos": trailer_videos_payload(movie),
     }
     payload["repair_queued"] = _queue_on_demand_repair(db, movie, credits)
     return payload

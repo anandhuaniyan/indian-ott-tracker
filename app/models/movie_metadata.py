@@ -168,8 +168,12 @@ class MovieTrailer(TimestampMixin, Base):
     name: Mapped[str | None] = mapped_column(String(500))
     official: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     language: Mapped[str | None] = mapped_column(String(10))
+    country: Mapped[str | None] = mapped_column(String(10))
+    size: Mapped[int | None] = mapped_column(Integer)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    is_unavailable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     movie: Mapped["Movie"] = relationship(back_populates="trailers")

@@ -39,6 +39,11 @@ celery_app.conf.update(
             "schedule": crontab(minute=30, hour=3, day_of_week="sun"),
         },
         "metadata-enrichment": {"task": "tmdb.metadata_enrichment", "schedule": 900},
+        "trailer-backfill": {
+            "task": "tmdb.trailer_backfill",
+            "schedule": 1800,
+            "kwargs": {"batch_size": 30, "continuous": False},
+        },
         "imdb-id-recovery": {"task": "ratings.imdb_id_backfill", "schedule": 18000},
         "imdb-rating-refresh": {"task": "ratings.imdb_refresh", "schedule": 21600},
         "data-health": {"task": "operations.data_health", "schedule": 900},

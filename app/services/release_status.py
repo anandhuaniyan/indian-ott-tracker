@@ -236,6 +236,8 @@ def research_eligibility(
     release_date = classification.theatrical_date or classification.digital_date
     if not release_date:
         return ResearchEligibility("METADATA_REPAIR", "NONE", now + timedelta(days=1))
+    if release_date.year < settings.OTT_RESEARCH_MIN_YEAR:
+        return ResearchEligibility("TOO_OLD", "VERY_LOW")
     age_days = (today - release_date).days
     if age_days < settings.OTT_RESEARCH_MIN_DAYS_AFTER_THEATRICAL_RELEASE:
         eligible_date = release_date + timedelta(

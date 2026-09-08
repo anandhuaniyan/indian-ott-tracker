@@ -38,6 +38,7 @@ from app.services.rating_provider import (
 from app.services.tmdb.client import TMDbRequestError
 from app.services.tmdb.movie_service import TMDbMovieService
 from app.services.trailers import TrailerService
+from app.services.youtube_trailer import YouTubeTrailerService
 
 
 METADATA = "tmdb.metadata_backfill"
@@ -281,12 +282,20 @@ class TrailerBackfillService(ResumableBackfill):
         has_trailer = exists().where(
             (MovieTrailer.movie_id == Movie.id) & (MovieTrailer.is_primary.is_(True))
         )
+        stale_trailer = exists().where(
+            (MovieTrailer.movie_id == Movie.id)
+            & or_(
+                MovieTrailer.last_checked_at.is_(None),
+                MovieTrailer.last_checked_at < _now() - timedelta(days=settings.TRAILER_REFRESH_DAYS),
+                MovieTrailer.is_unavailable.is_(True),
+            )
+        )
         requested = exists().where(
             (MovieRequest.external_movie_id == Movie.tmdb_id)
             & (MovieRequest.status.in_(["PENDING", "REVIEWING", "FOUND"]))
         )
         today = date.today()
-        movies = self.db.query(Movie).filter(
+        plain = lambda: self.db.query(Movie).filter(
             ~has_trailer,
             self._eligible("movie", Movie.id),
         ).order_by(
@@ -298,7 +307,26 @@ class TrailerBackfillService(ResumableBackfill):
             ),
             Movie.popularity.desc().nullslast(),
             Movie.id,
-        ).limit(batch_size).all()
+        ).limit(batch_size)
+        movies = plain().all()
+        if len(movies) < batch_size:
+            refresh = (
+                self.db.query(Movie)
+                .filter(has_trailer, stale_trailer)
+                .order_by(
+                    case(
+                        (requested, 0),
+                        (Movie.release_date >= today, 1),
+                        (Movie.release_date >= today - timedelta(days=730), 2),
+                        else_=3,
+                    ),
+                    Movie.popularity.desc().nullslast(),
+                    Movie.id,
+                )
+                .limit(batch_size - len(movies))
+                .all()
+            )
+            movies.extend(refresh)
         if not movies:
             return self._summary(state, 0, 0, 0, True)
         state.status = "RUNNING"
@@ -313,6 +341,14 @@ class TrailerBackfillService(ResumableBackfill):
             self._start("movie", movie_id)
             try:
                 payload = provider.get_movie_videos(movie.tmdb_id)
+                results = payload.get("results") or []
+                if not results and settings.YOUTUBE_API_KEY:
+                    youtube = YouTubeTrailerService()
+                    found = youtube.search(movie)
+                    if found:
+                        payload = {"results": found}
+                    else:
+                        self._health_check_stored(movie_id, youtube, service)
                 service.upsert(self.db.get(Movie, movie_id), payload, commit=True)
                 self._finish("movie", movie_id)
                 succeeded += 1
@@ -330,10 +366,12 @@ class TrailerBackfillService(ResumableBackfill):
             state = self.state()
             state.cursor = movie_id
             self.db.commit()
-        remaining = self.db.query(Movie.id).filter(
-            ~has_trailer,
-            self._eligible("movie", Movie.id),
-        ).first() is not None
+        remaining = (
+            self.db.query(Movie.id)
+            .filter(~has_trailer, self._eligible("movie", Movie.id))
+            .first()
+            is not None
+        )
         result = self._summary(state, succeeded + failed, succeeded, failed, not remaining)
         if stopped:
             state = self.state()
@@ -342,6 +380,16 @@ class TrailerBackfillService(ResumableBackfill):
             self.db.commit()
             result.update({"complete": False, "stopped": stopped})
         return result
+
+    @staticmethod
+    def _health_check_stored(movie_id: int, youtube: YouTubeTrailerService, service: TrailerService) -> None:
+        """Verify stored trailers still exist via the optional YouTube API."""
+        now = _now()
+        for stored in service.db.query(MovieTrailer).filter_by(movie_id=movie_id).all():
+            ok = youtube.health_check(stored.video_key)
+            if ok is False and not stored.is_unavailable:
+                stored.is_unavailable = True
+                stored.last_checked_at = now
 
 
 class IMDbIdRecoveryService(ResumableBackfill):

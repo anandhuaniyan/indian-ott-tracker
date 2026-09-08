@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     TMDB_API_KEY: str = ""
     TMDB_ACCESS_TOKEN: str = ""
+    YOUTUBE_API_KEY: str = ""
     IMDB_RATING_PROVIDER: str = ""
     IMDB_RATING_API_URL: str = ""
     IMDB_RATING_API_KEY: str = ""
@@ -18,6 +19,7 @@ class Settings(BaseSettings):
     PERSON_BACKFILL_BATCH_SIZE: int = 100
     IMAGE_BACKFILL_BATCH_SIZE: int = 100
     TRAILER_BACKFILL_BATCH_SIZE: int = 50
+    TRAILER_REFRESH_DAYS: int = 90
     IMDB_ID_BACKFILL_BATCH_SIZE: int = 25
     IMDB_BACKFILL_BATCH_SIZE: int = 50
     IMDB_BACKFILL_DELAY_SECONDS: float = 0.1
@@ -56,6 +58,7 @@ class Settings(BaseSettings):
     OTT_RESEARCH_HIGH_PRIORITY_DAYS: int = 90
     OTT_RESEARCH_MEDIUM_PRIORITY_DAYS: int = 180
     OTT_RESEARCH_AUTO_MAX_AGE_DAYS: int = 365
+    OTT_RESEARCH_MIN_YEAR: int = 2000
     OTT_DAILY_RESEARCH_MOVIE_LIMIT: int = 20
     OTTPLAY_ENABLED: bool = False
     OTTPLAY_ADAPTER_URL: str = ""

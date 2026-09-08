@@ -40,3 +40,8 @@ frontend/dist/
 /backups/
 .env.*
 !.env.example
+
+# Local work products and generated QA artifacts
+/tmp/
+/resume/
+/C*opencode*

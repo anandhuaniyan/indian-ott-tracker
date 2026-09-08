@@ -14,6 +14,33 @@ from app.models.ott_availability import OttAvailability
 from app.config.settings import settings
 
 
+def _trigram_set(text) -> set[str]:
+    """Build the pg_trgm-style '' + word + ' ' padded trigram set."""
+    normalized = "  " + "  ".join(str(text).strip().lower().split())
+    return {normalized[i : i + 3] for i in range(len(normalized) - 2)}
+
+
+def _trigram_similarity(left, right) -> float:
+    """Jaccard over 3-grams, matching Postgres pg_trgm.similarity semantics."""
+    a, b = _trigram_set(left), _trigram_set(right)
+    if not a or not b:
+        return 1.0 if a == b else 0.0
+    return len(a & b) / len(a | b)
+
+
+def register_sqlite_trigram_similarity(engine) -> None:
+    """Mirror Postgres pg_trgm similarity() as an SQLite function for tests."""
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _register(dbapi_connection, _connection_record):
+        dbapi_connection.create_function(
+            "similarity",
+            2,
+            lambda left, right: _trigram_similarity(left, right),
+        )
+
+
 @pytest.fixture(autouse=True)
 def isolate_external_rate_limit_store(monkeypatch):
     """Keep endpoint tests from consuming the live Redis rate-limit buckets.
@@ -34,6 +61,7 @@ def isolate_external_rate_limit_store(monkeypatch):
 @pytest.fixture()
 def database():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    register_sqlite_trigram_similarity(engine)
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
     genre = Genre(tmdb_id=18, name="Drama", slug="drama")
