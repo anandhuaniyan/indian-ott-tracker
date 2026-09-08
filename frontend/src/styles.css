@@ -23,9 +23,65 @@ body {
 }
 #root {
   display: flex;
+  position: relative;
+  isolation: isolate;
   min-height: 100vh;
   min-height: 100dvh;
   flex-direction: column;
+}
+.ambient-pointer-light {
+  display: none;
+  pointer-events: none;
+}
+@media (hover: hover) and (pointer: fine) and (min-width: 769px) {
+  .ambient-pointer-light {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: -1;
+    width: clamp(28rem, 52vw, 46rem);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: radial-gradient(
+      circle,
+      rgb(82 151 255 / 7.5%) 0,
+      rgb(117 83 255 / 5%) 30%,
+      rgb(41 210 232 / 2.5%) 50%,
+      transparent 72%
+    );
+    opacity: 0;
+    pointer-events: none;
+    transform: translate3d(-100vw, -100vh, 0);
+    transition: opacity 240ms ease;
+    contain: strict;
+    will-change: transform, opacity;
+  }
+  .ambient-pointer-light.is-visible {
+    opacity: 1;
+  }
+  .card img {
+    transition: box-shadow 180ms ease;
+  }
+  .deep-result-card {
+    transition: border-color 180ms ease, box-shadow 180ms ease;
+  }
+  .card:hover img,
+  .card:focus-visible img {
+    box-shadow:
+      0 0 0 1px rgb(116 169 255 / 30%),
+      0 12px 34px rgb(92 85 232 / 14%),
+      0 0 20px rgb(52 205 225 / 8%);
+  }
+  .calendar-movie-link:hover,
+  .calendar-movie-link:focus-visible,
+  .deep-result-card:hover,
+  .deep-result-card:focus-within {
+    border-color: rgb(116 169 255 / 42%);
+    box-shadow:
+      0 12px 34px rgb(13 17 35 / 34%),
+      0 0 22px rgb(92 85 232 / 10%);
+  }
 }
 img,
 svg,
@@ -1306,6 +1362,9 @@ th {
 @media (prefers-reduced-motion: reduce) {
   .skeleton { animation: none; }
   .calendar-movie-link { transition: none; }
+  .ambient-pointer-light { display: none !important; }
+  .card img,
+  .deep-result-card { transition: none; }
 }
 .request-success {
   display: grid;
