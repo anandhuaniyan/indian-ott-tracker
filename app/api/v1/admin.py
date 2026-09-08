@@ -333,7 +333,7 @@ def _health_summary(db: Session) -> dict:
     with_ott_date = select(OttAvailability.movie_id).where(
         OttAvailability.country == "IN", OttAvailability.ott_release_date.is_not(None)
     )
-    with_trailer = select(MovieTrailer.movie_id)
+    with_trailer = select(MovieTrailer.movie_id).where(MovieTrailer.is_primary.is_(True))
     with_imdb = select(ExternalId.movie_id).where(func.lower(ExternalId.provider) == "imdb")
     with_rating = select(MovieRating.movie_id).where(
         func.lower(MovieRating.source) == "imdb", MovieRating.rating.is_not(None)
@@ -379,9 +379,20 @@ def _health_summary(db: Session) -> dict:
             "needs_review": db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.verification_status == "NEEDS_REVIEW").scalar() or 0,
         },
         "trailers": {
-            "available": db.query(func.count(func.distinct(MovieTrailer.movie_id))).scalar() or 0,
+            "available": db.query(func.count(func.distinct(MovieTrailer.movie_id))).filter(MovieTrailer.is_primary.is_(True)).scalar() or 0,
+            "rows": db.query(MovieTrailer).count(),
+            "broken": db.query(MovieTrailer).filter(MovieTrailer.is_unavailable.is_(True)).count(),
             "missing": db.query(Movie).filter(~Movie.id.in_(with_trailer)).count(),
             "invalid": db.query(MovieTrailer).filter(func.length(MovieTrailer.video_key) != 11).count(),
+            "coverage": round((db.query(func.count(func.distinct(MovieTrailer.movie_id))).filter(MovieTrailer.is_primary.is_(True)).scalar() or 0) * 100.0 / total, 2) if total else 0.0,
+            "pending_refresh": db.query(MovieTrailer).filter(or_(MovieTrailer.last_checked_at.is_(None), MovieTrailer.last_checked_at < now - timedelta(days=settings.TRAILER_REFRESH_DAYS))).count(),
+            "missing_by_language": {
+                language: count
+                for language, count in db.query(Movie.original_language, func.count(Movie.id))
+                .filter(~Movie.id.in_(with_trailer))
+                .group_by(Movie.original_language)
+                .all()
+            },
         },
         "ratings": {
             "imdb_available": db.query(func.count(func.distinct(MovieRating.movie_id))).filter(func.lower(MovieRating.source) == "imdb", MovieRating.rating.is_not(None)).scalar() or 0,
@@ -674,7 +685,7 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
     with_rating = select(MovieRating.movie_id).where(
         func.lower(MovieRating.source) == "imdb", MovieRating.rating.is_not(None)
     )
-    with_trailer = select(MovieTrailer.movie_id)
+    with_trailer = select(MovieTrailer.movie_id).where(MovieTrailer.is_primary.is_(True))
     active_request = MovieRequest.status.in_(["PENDING", "REVIEWING", "FOUND"])
     emails = _email_health(db)
     site_zone = ZoneInfo(settings.SITE_TIMEZONE)

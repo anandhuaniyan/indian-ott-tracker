@@ -25,3 +25,8 @@ Thumbs.db
 # Frontend build artifacts
 frontend/node_modules/
 frontend/dist/
+
+# Local work products and generated QA artifacts
+/tmp/
+/resume/
+/C*opencode*

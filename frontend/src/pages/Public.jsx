@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useParams, useSearchParams } from "react-router-dom";
 import { get, imageUrl, post } from "../services/api";
 import { Card, Failure, Loading } from "../components/ui";
 import Seo, { breadcrumbJsonLd } from "../components/Seo";
 import AdSlot from "../components/AdSlot";
+import analytics from "../services/analytics";
 import { COMMON_LANGUAGE_OPTIONS, languageName } from "../services/languages";
 
 const SORTS = [
@@ -110,13 +111,12 @@ function Pager({ page, pages, onPage }) {
 }
 
 export function Home() {
-  const [data, error] = useData("/api/v1/home");
-  if (error) return <Failure error={error} />;
-  if (!data) return <Loading />;
+  const [data, error, retry] = useData("/api/v1/home");
   const website = {
     "@context": "https://schema.org",
     "@type": "WebSite",
-    name: "Indian OTT Tracker",
+    name: "OTT Tracker",
+    alternateName: "Indian OTT Tracker",
     url: import.meta.env.VITE_SITE_URL || location.origin,
     potentialAction: {
       "@type": "SearchAction",
@@ -126,57 +126,79 @@ export function Home() {
   };
   return (
     <main>
-      <Seo title="Indian OTT Tracker" jsonLd={website} />
+      <Seo title="OTT Tracker" jsonLd={website} />
       <div className="hero">
         <p>Indian cinema, all in one place</p>
-        <h1>Find your next movie night.</h1>
+        <h1>Indian Movies &amp; OTT Releases</h1>
+        <p>
+          Discover popular, upcoming and recently released Indian movies across
+          theatres and OTT platforms, with verified streaming availability.
+        </p>
         <Link to="/discover">Explore movies</Link>
       </div>
-      <Rail
-        title="Popular"
-        items={data.popular}
-        more={sectionListingUrl("popular", { sort: "popularity" })}
-      />
-      <Rail title="Latest theatrical" items={data.latest_theatrical} more={sectionListingUrl("latest-theatrical", { sort: "latest" })} />
-      <Rail title="Upcoming theatrical" items={data.upcoming_theatrical} more={sectionListingUrl("upcoming-theatrical", { sort: "oldest" })} />
-      <Rail title="Recently added" items={data.recently_added} more={sectionListingUrl("recently-added", { sort: "recently-added" })} />
-      <AdSlot slot={import.meta.env.VITE_ADSENSE_SLOT_ID} />
-      <Rail title="Upcoming OTT" items={data.upcoming_ott} more={sectionListingUrl("upcoming-ott", { sort: "ott-release" })} />
-      <Rail
-        title="Recently released on OTT"
-        items={data.recent_ott}
-        more={sectionListingUrl("recent-ott", { sort: "ott-release" })}
-      />
-      {Object.entries(data.language_sections || {}).map(([code, section]) => (
-        <Rail
-          key={code}
-          title={section.name}
-          items={section.items}
-          more={sectionListingUrl("language", { language: code, sort: "latest" })}
-        />
-      ))}
-      <section>
-        <h2>Browse genres</h2>
-        <div className="chips">
-          {data.genres.map((item) => (
-            <Link key={item.slug} to={`/genres/${item.slug}`}>
-              {item.name}
-            </Link>
-          ))}
+      {error && (
+        <div className="request-error" role="alert">
+          <h2>Some homepage sections could not be loaded</h2>
+          <p>
+            {error}. You can still browse{" "}
+            <Link to="/discover">all movies</Link>,{" "}
+            <Link to="/ott">OTT releases</Link> and the{" "}
+            <Link to="/calendar/this-week">release calendar</Link>.
+          </p>
+          <button type="button" onClick={retry}>Retry</button>
         </div>
-      </section>
-      <section>
-        <h2>OTT platforms</h2>
-        <div className="platforms">
-          {data.platforms.map((item) => (
-            <Link key={item.slug} to={`/ott/${item.slug}`}>
-              {item.logo && <Art path={item.logo} alt="" />}
-              <strong>{item.name}</strong>
-              <small>{item.movie_count} movies</small>
-            </Link>
+      )}
+      {!data ? (
+        !error && <p className="loading">Loading Indian cinema…</p>
+      ) : (
+        <>
+          <Rail
+            title="Popular"
+            items={data.popular}
+            more={sectionListingUrl("popular", { sort: "popularity" })}
+          />
+          <Rail title="Latest theatrical" items={data.latest_theatrical} more={sectionListingUrl("latest-theatrical", { sort: "latest" })} />
+          <Rail title="Upcoming theatrical" items={data.upcoming_theatrical} more={sectionListingUrl("upcoming-theatrical", { sort: "oldest" })} />
+          <Rail title="Recently added" items={data.recently_added} more={sectionListingUrl("recently-added", { sort: "recently-added" })} />
+          <AdSlot slot={import.meta.env.VITE_ADSENSE_SLOT_ID} />
+          <Rail title="Upcoming OTT" items={data.upcoming_ott} more={sectionListingUrl("upcoming-ott", { sort: "ott-release" })} />
+          <Rail
+            title="Recently released on OTT"
+            items={data.recent_ott}
+            more={sectionListingUrl("recent-ott", { sort: "ott-release" })}
+          />
+          {Object.entries(data.language_sections || {}).map(([code, section]) => (
+            <Rail
+              key={code}
+              title={section.name}
+              items={section.items}
+              more={sectionListingUrl("language", { language: code, sort: "latest" })}
+            />
           ))}
-        </div>
-      </section>
+          <section>
+            <h2>Browse genres</h2>
+            <div className="chips">
+              {data.genres.map((item) => (
+                <Link key={item.slug} to={`/genres/${item.slug}`}>
+                  {item.name}
+                </Link>
+              ))}
+            </div>
+          </section>
+          <section>
+            <h2>OTT platforms</h2>
+            <div className="platforms">
+              {data.platforms.map((item) => (
+                <Link key={item.slug} to={`/ott/${item.slug}`}>
+                  {item.logo && <Art path={item.logo} alt="" />}
+                  <strong>{item.name}</strong>
+                  <small>{item.movie_count} movies</small>
+                </Link>
+              ))}
+            </div>
+          </section>
+        </>
+      )}
     </main>
   );
 }
@@ -251,6 +273,17 @@ export function Discover({ modeTabs = null }) {
     );
     if (isSectionListing) next.set("view_mode", "section_listing");
     if (section) next.set("section", section);
+    if (isSearch) {
+      analytics.search(filters.q, {
+        language: filters.language,
+        genre: filters.genre,
+        platform: filters.platform,
+      });
+    } else {
+      Object.entries(filters)
+        .filter(([name, value]) => value && name !== "q")
+        .forEach(([name, value]) => analytics.filterUsed(name, value));
+    }
     setUrlParams(next);
   };
   const set = (event) =>
@@ -279,7 +312,7 @@ export function Discover({ modeTabs = null }) {
           name="q"
           value={filters.q}
           onChange={set}
-          placeholder="Title, actor, director, writer or keyword"
+          placeholder={isSearch ? "Movie title or person name" : "Title, actor, director, writer or keyword"}
         />
       </label>
       {!isSearch && (
@@ -357,6 +390,7 @@ export function Discover({ modeTabs = null }) {
             </>
           )}
           {pager}
+          {isSearch && <AdSlot slot={import.meta.env.VITE_ADSENSE_SLOT_ID} />}
           {isSectionListing && filterForm}
         </>
       )}
@@ -522,25 +556,100 @@ const relativeTime = (value) => {
   return `${days} ${days === 1 ? "day" : "days"} ago`;
 };
 
-const TrailerSection = ({ trailer, title }) => (
-  <section className="trailer-section" aria-labelledby="trailer-heading">
-    <h2 id="trailer-heading">Trailer</h2>
-    {trailer ? (
+const videoLabel = (item) => {
+  const raw = (item.video_type === "Behind The Scenes" ? "Behind the Scenes" : item.video_type) || "Trailer";
+  if (item.official) return `Official ${raw}`;
+  return raw;
+};
+
+const TrailersSection = ({ videos, title }) => {
+  const [activeKey, setActiveKey] = useState(videos?.[0]?.video_key);
+  const [playing, setPlaying] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  if (!videos || !videos.length) return null;
+  const visible = expanded ? videos : videos.slice(0, 3);
+  const active = videos.find((item) => item.video_key === activeKey) || videos[0];
+  const play = (key) => {
+    setActiveKey(key);
+    setPlaying(true);
+  };
+  return (
+    <section className="trailer-section" aria-labelledby="trailer-heading">
+      <h2 id="trailer-heading">Trailers &amp; Videos</h2>
       <div className="trailer-frame">
-        <iframe
-          src={trailer.embed_url}
-          title={trailer.name || `${title} official trailer`}
-          loading="lazy"
-          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-          allowFullScreen
-          referrerPolicy="strict-origin-when-cross-origin"
-        />
+        {playing ? (
+          <iframe
+            key={active.video_key}
+            src={`${active.embed_url}?autoplay=0`}
+            title={active.name || `${title} ${videoLabel(active)}`}
+            loading="lazy"
+            allow="encrypted-media; picture-in-picture; web-share"
+            allowFullScreen
+            referrerPolicy="strict-origin-when-cross-origin"
+          />
+        ) : (
+          <button
+            type="button"
+            className="trailer-poster"
+            onClick={() => play(active.video_key)}
+            aria-label={`Play ${active.name || `${title} ${videoLabel(active)}`}`}
+          >
+            <img
+              src={`https://i.ytimg.com/vi/${active.video_key}/hqdefault.jpg`}
+              alt=""
+              loading="lazy"
+              width={480}
+              height={360}
+            />
+            <span className="trailer-play">Play</span>
+          </button>
+        )}
       </div>
-    ) : (
-      <p className="empty">Trailer not available.</p>
-    )}
-  </section>
-);
+      <div className="trailer-list">
+        {visible.map((item) => {
+          const isActive = item.video_key === active.video_key && playing;
+          return (
+            <button
+              key={item.video_key}
+              type="button"
+              className={`trailer-card${isActive ? " active" : ""}`}
+              onClick={() => play(item.video_key)}
+              aria-pressed={isActive}
+            >
+              <span className="trailer-thumb">
+                <img
+                  src={`https://i.ytimg.com/vi/${item.video_key}/hqdefault.jpg`}
+                  alt={item.name || `${title} ${videoLabel(item)}`}
+                  loading="lazy"
+                  width={120}
+                  height={90}
+                />
+                <span className="trailer-play">&#9654;</span>
+              </span>
+              <span className="trailer-meta">
+                <span className="trailer-name">{item.name || `${title} ${videoLabel(item)}`}</span>
+                <small>
+                  {videoLabel(item)}
+                  {item.language ? ` · ${languageName(item.language)}` : ""}
+                </small>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      {videos.length > 3 && (
+        <button
+          type="button"
+          className="link-button"
+          onClick={() => setExpanded((current) => !current)}
+          aria-expanded={expanded}
+        >
+          {expanded ? "Show fewer videos" : `View all ${videos.length} videos`}
+        </button>
+      )}
+    </section>
+  );
+};
 
 const CommentsSection = ({ movieId }) => {
   const [data, setData] = useState();
@@ -603,13 +712,21 @@ const CommentsSection = ({ movieId }) => {
 export function Movie() {
   const { id } = useParams();
   const [data, error] = useData(`/api/v1/movies/${id}/detail`);
+  const trackedMovie = useRef();
+  useEffect(() => {
+    const movie = data?.movie;
+    if (movie?.id && movie.id !== trackedMovie.current) {
+      trackedMovie.current = movie.id;
+      analytics.movieView(movie);
+    }
+  }, [data]);
   if (error) return <Failure error={error} />;
   if (!data) return <Loading />;
   const movie = data.movie;
   const ottCandidate = movie.ott_candidate;
   const displayedOttPlatform = movie.ott_platform || ottCandidate?.platform;
   const displayedOttDate = movie.ott_release_date || ottCandidate?.release_date;
-  const displayedConfidence = movie.ott_confidence_label || ottCandidate?.confidence_label;
+
   const images = (type) =>
     data.images.filter((item) => item.type.toLowerCase().includes(type));
   const logo = images("logo")[0];
@@ -619,6 +736,18 @@ export function Movie() {
     name: movie.title,
     ...(movie.original_title && { alternateName: movie.original_title }),
     ...(movie.overview && { description: movie.overview }),
+    ...(data.trailer?.video_key && {
+      video: {
+        "@type": "VideoObject",
+        name: data.trailer.name || `${movie.title} Trailer`,
+        description: movie.overview || `Official trailer for ${movie.title}.`,
+        ...(data.trailer.published_at && {
+          uploadDate: new Date(data.trailer.published_at).toISOString().slice(0, 10),
+        }),
+        thumbnailUrl: `https://i.ytimg.com/vi/${data.trailer.video_key}/hqdefault.jpg`,
+        embedUrl: data.trailer.embed_url,
+      },
+    }),
     ...(movie.release_date && { dateCreated: movie.release_date }),
     ...(movie.poster_path && {
       image: imageUrl(movie.poster_path, "original"),
@@ -719,7 +848,6 @@ export function Movie() {
             <span data-testid="ott-platform">
               <small>OTT Platform</small>
               <strong>{displayedOttPlatform || "Information not found"}</strong>
-              {displayedConfidence && <em className={`ott-confidence ${movie.ott_verified ? "verified" : "candidate"}`}>{displayedConfidence}</em>}
             </span>
             <span data-testid="ott-release">
               <small>OTT Release</small>
@@ -727,7 +855,6 @@ export function Movie() {
                 {formatDate(displayedOttDate) ||
                   (displayedOttPlatform ? "Unknown" : "Information not found")}
               </strong>
-              {ottCandidate?.release_date && !movie.ott_release_date && <em className="ott-confidence candidate">{ottCandidate.confidence_label}</em>}
             </span>
             <span data-testid="ott-status">
               <small>OTT Availability</small>
@@ -799,23 +926,21 @@ export function Movie() {
                   item.release_date,
                   item.country,
                   item.release_date ? item.availability_state : "date not confirmed",
-                  item.release_date && item.date_confidence != null
-                    ? `${item.date_confidence}% date confidence`
-                    : item.platform_confidence != null && `${item.platform_confidence}% platform confidence`,
                 ]
                   .filter(Boolean)
                   .join(" · ")}
               </p>
-              {item.source_url && (
-                <a href={item.source_url} rel="nofollow noreferrer">
-                  {item.source === "official_platform"
-                    ? `Watch on ${item.provider}`
-                    : `View source (${item.source})`}
+              {item.source_url && item.source === "official_platform" && (
+                <a
+                  href={item.source_url}
+                  rel="nofollow noreferrer"
+                  onClick={() => analytics.ottPlatformClick(movie, item.provider)}
+                >
+                  {`Watch on ${item.provider}`}
                 </a>
               )}
               {item.original_premiere && <small>Original OTT premiere</small>}
-              {item.last_verified && <small>Last verified: {formatDate(item.last_verified)}</small>}
-              {item.attribution && <small>{item.attribution}</small>}
+
             </div>
           </article>
         ))}
@@ -823,10 +948,10 @@ export function Movie() {
           <article className="ott-row ott-candidate" title={ottCandidate.help}>
             <div>
               <strong>{ottCandidate.state === "CONFLICTING" ? "Conflicting information" : ottCandidate.platform || "Platform unknown"}</strong>
-              <p>{[formatDate(ottCandidate.release_date) || "OTT date unknown", `${ottCandidate.confidence}% confidence`, ottCandidate.confidence_label].join(" · ")}</p>
+              <p>{[formatDate(ottCandidate.release_date) || "OTT date unknown"].join(" · ")}</p>
               <p>{ottCandidate.help}</p>
               {ottCandidate.summary && <small>{ottCandidate.summary}</small>}
-              {ottCandidate.source_url && <a href={ottCandidate.source_url} rel="nofollow noreferrer">View candidate source ({ottCandidate.source || "source"})</a>}
+
             </div>
           </article>
         )}
@@ -839,6 +964,7 @@ export function Movie() {
           </p>
         ))}
       </Values>
+      <TrailersSection videos={data.videos} title={movie.title} />
       <Values title="Cast">
         <div className="people">
           {data.cast.map((item) => (
@@ -871,7 +997,6 @@ export function Movie() {
           ))}
         </div>
       </Values>
-      <TrailerSection trailer={data.trailer} title={movie.title} />
       {["poster", "backdrop", "logo"].map((type) =>
         images(type).length ? (
           <Values
@@ -947,6 +1072,13 @@ export function Person() {
   const [data, error] = useData(
     `/api/v1/people/${id}?sort=${sort}&credit_type=${creditType}&role=${encodeURIComponent(role)}`,
   );
+  const trackedPerson = useRef();
+  useEffect(() => {
+    if (data?.id && data.id !== trackedPerson.current) {
+      trackedPerson.current = data.id;
+      analytics.personView(data);
+    }
+  }, [data]);
   if (error) return <Failure error={error} />;
   if (!data) return <Loading />;
   const personLd = {
@@ -1131,7 +1263,9 @@ const CalendarMovie = ({ movie, type }) => {
             {isOtt ? "OTT" : "Theatrical"}
           </span>
           {isOtt && movie.ott_platform && (
-            <span className="calendar-platform">{movie.ott_platform}</span>
+            <span className="calendar-platform">{movie.ott_releases?.length
+              ? movie.ott_releases.map((release) => `${release.platform} (${formatDate(release.release_date)})`).join(" · ")
+              : movie.ott_platform}</span>
           )}
           {movie.rating != null && (
             <span className="calendar-rating">
@@ -1407,8 +1541,10 @@ export function Calendar() {
 }
 
 export function Request() {
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const [languages] = useData("/api/v1/languages");
+  const [tab, setTab] = useState(params.get("tab") === "issue" || params.get("tab") === "contact" ? "issue" : params.get("tab") === "access" ? "access" : "movie");
+  const [contactType, setContactType] = useState(params.get("type") || "WEBSITE_ISSUE");
   const [movieId, setMovieId] = useState(params.get("movie_external_id") || "");
   const [result, setResult] = useState();
   const [submitting, setSubmitting] = useState(false);
@@ -1420,19 +1556,45 @@ export function Request() {
     Object.keys(body).forEach((key) => body[key] === "" && delete body[key]);
     if (body.release_year) body.release_year = Number(body.release_year);
     if (body.movie_external_id) body.movie_external_id = Number(body.movie_external_id);
-    post("/api/v1/movie-requests", body)
-      .then(setResult)
-      .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
-      .finally(() => setSubmitting(false));
+    if (body.tmdb_id) body.tmdb_id = Number(body.tmdb_id);
+    if (tab === "movie") {
+      analytics.movieRequest("movie_request_started", body.movie_external_id);
+      post("/api/v1/movie-requests", body)
+        .then((value) => {
+          setResult(value);
+          if (value?.request_id) analytics.movieRequest("movie_request_submitted", body.movie_external_id);
+        })
+        .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
+        .finally(() => setSubmitting(false));
+    } else {
+      post("/api/v1/contact-requests", body)
+        .then(setResult)
+        .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
+        .finally(() => setSubmitting(false));
+    }
   };
   const received = Boolean(result?.request_id);
+  const movieFields = ["INCORRECT_MOVIE", "INCORRECT_OTT"].includes(contactType);
+  const changeTab = (nextTab) => {
+    const next = new URLSearchParams(params);
+    if (nextTab === "movie") next.delete("tab");
+    else next.set("tab", nextTab);
+    setParams(next);
+    setTab(nextTab);
+    setResult(undefined);
+  };
   return (
-    <main>
+    <main className="request-page">
       <Seo title="Request a movie" />
       <h1>Request a movie</h1>
-      <p>Ask us to review any movie, including one that is already listed here. Your email is used only to process this request.</p>
-      <p><Link to="/search?mode=deep">Don&apos;t know the ID? Use Deep Search.</Link></p>
-      {!received && <form className="request" onSubmit={submit}>
+      <p>Ask us to review any movie, including one that is already listed here, or report an issue and request access. Your contact details are used only to process this request and are never shown publicly.{tab === "movie" && <> Can't find the movie? You can also search for movie and OTT information using <Link className="request-deep-search-link" to="/deep-search">Deep Search</Link>.</>}</p>
+      {tab === "movie" && <Link className="request-deep-search-action" to="/deep-search">Try Deep Search</Link>}
+      <div className="request-tabs" role="tablist" aria-label="Request type">
+        <button type="button" role="tab" aria-selected={tab === "movie"} className={tab === "movie" ? "active" : ""} onClick={() => changeTab("movie")}>Request movie</button>
+        <button type="button" role="tab" aria-selected={tab === "issue"} className={tab === "issue" ? "active" : ""} onClick={() => changeTab("issue")}>Report issue</button>
+        <button type="button" role="tab" aria-selected={tab === "access"} className={tab === "access" ? "active" : ""} onClick={() => changeTab("access")}>Request access</button>
+      </div>
+      {!received && tab === "movie" && <form className="request" onSubmit={submit}>
         <label>Movie Name *<input name="movie_name" required maxLength="500" defaultValue={params.get("movie_name") || ""} /></label>
         <label>Email *<input name="email" type="email" required maxLength="320" autoComplete="email" /></label>
         <label>ID (optional)<input name="movie_external_id" type="number" min="1" max="2147483647" step="1" inputMode="numeric" value={movieId} onChange={(event) => setMovieId(event.target.value)} /></label>
@@ -1442,16 +1604,45 @@ export function Request() {
         <label>Comments<textarea name="details" maxLength="2000" placeholder="Any details that help identify it" /></label>
         <button disabled={submitting}>{submitting ? "Verifying movie…" : "Submit request"}</button>
       </form>}
-      {!received && result?.candidates?.length > 0 && <section className="request-candidates" aria-labelledby="movie-match-heading"><h2 id="movie-match-heading">Choose the correct movie</h2><p>We found more than one possible match.</p>{result.candidates.map((candidate) => <button type="button" key={candidate.id} onClick={() => { setMovieId(String(candidate.id)); setResult(undefined); }}><span>{candidate.poster_path && <Art path={candidate.poster_path} alt="" />}</span><strong>{candidate.title}</strong><small>{candidate.release_date?.slice(0, 4) || "Year unknown"} · {candidate.original_language_name || candidate.original_language || "Language unknown"} · ID {candidate.id}</small></button>)}</section>}
+      {!received && tab === "issue" && <form className="request request-card" onSubmit={submit}>
+        <div className="request-intro"><h2>Report an issue</h2><p>Report a website issue, incorrect movie information or incorrect OTT information. Submissions go to private administrator review and are never applied automatically.</p></div>
+        <label>Request type *<select name="request_type" required value={contactType} onChange={(event) => setContactType(event.target.value)}>
+          <option value="WEBSITE_ISSUE">Report website issue</option><option value="INCORRECT_MOVIE">Report incorrect movie information</option><option value="INCORRECT_OTT">Report incorrect OTT information</option><option value="OTHER">Other</option>
+        </select></label>
+        <div className="request-field-grid">
+          <label>Name<input name="name" maxLength="200" autoComplete="name" /></label>
+          <label>WhatsApp Number (Preferred)<input name="whatsapp" type="tel" maxLength="50" autoComplete="tel" /></label>
+          <label>Phone Number<input name="phone" type="tel" maxLength="50" autoComplete="tel" /></label>
+          <label>Email Address<input name="email" type="email" maxLength="320" autoComplete="email" /></label>
+          {movieFields && <><label>Movie Name<input name="movie_name" maxLength="500" defaultValue={params.get("movie_name") || ""} /></label><label>ID<input name="tmdb_id" type="number" min="1" inputMode="numeric" defaultValue={params.get("tmdb_id") || ""} /></label><label className="wide">Movie URL<input name="movie_url" type="url" pattern="https?://.*" defaultValue={params.get("movie_url") || ""} /></label><label className="wide">Issue Type<input name="issue_type" maxLength="100" /></label></>}
+          {contactType === "INCORRECT_OTT" && <><label>Expected OTT Platform<input name="expected_ott_platform" maxLength="100" /></label><label>Expected OTT Release Date<input name="expected_ott_release_date" type="date" /></label><label className="wide">Evidence URL<input name="evidence_url" type="url" pattern="https?://.*" /></label></>}
+          <label className="wide">Comment / Description *<textarea name="comment" required minLength="5" maxLength="5000" /></label>
+        </div>
+        <p className="form-help">Provide at least one contact method: WhatsApp, phone, or email.</p>
+        <button disabled={submitting}>{submitting ? "Sending securely…" : "Send to administrator"}</button>
+      </form>}
+      {!received && tab === "access" && <form className="request request-card" onSubmit={submit}>
+        <div className="request-intro"><h2>Request access</h2><p>Request elevated website access. Access is reviewed by an administrator and is never granted automatically.</p></div>
+        <input type="hidden" name="request_type" value="ACCESS_REQUEST" />
+        <div className="request-field-grid">
+          <label>Name<input name="name" maxLength="200" autoComplete="name" /></label>
+          <label>WhatsApp Number (Preferred)<input name="whatsapp" type="tel" maxLength="50" autoComplete="tel" /></label>
+          <label>Phone Number<input name="phone" type="tel" maxLength="50" autoComplete="tel" /></label>
+          <label>Email Address<input name="email" type="email" maxLength="320" autoComplete="email" /></label>
+          <label className="wide">Reason for access *<textarea name="comment" required minLength="5" maxLength="5000" placeholder="Tell us why you need access" /></label>
+        </div>
+        <p className="form-help">Provide at least one contact method: WhatsApp, phone, or email. We will respond if your request is approved.</p>
+        <button disabled={submitting}>{submitting ? "Sending securely…" : "Submit access request"}</button>
+      </form>}
+      {!received && tab === "movie" && result?.candidates?.length > 0 && <section className="request-candidates" aria-labelledby="movie-match-heading"><h2 id="movie-match-heading">Choose the correct movie</h2><p>We found more than one possible match.</p>{result.candidates.map((candidate) => <button type="button" key={candidate.id} onClick={() => { setMovieId(String(candidate.id)); setResult(undefined); }}><span>{candidate.poster_path && <Art path={candidate.poster_path} alt="" />}</span><strong>{candidate.title}</strong><small>{candidate.release_date?.slice(0, 4) || "Year unknown"} · {candidate.original_language_name || candidate.original_language || "Language unknown"} · ID {candidate.id}</small></button>)}</section>}
       {received && (
         <section className="request-success" role="status">
-          {result.poster_path && <Art className="request-poster" path={result.poster_path} alt={`${result.verified_title} poster`} />}
+          {tab === "movie" && result.poster_path && <Art className="request-poster" path={result.poster_path} alt={`${result.verified_title} poster`} />}
           <div>
-            <h2>Request received</h2>
-            <h3>{result.verified_title}</h3>
-            {result.original_title && result.original_title !== result.verified_title && <p>{result.original_title}</p>}
-            <p>We aim to review your request within 48 hours. We’ll email you when its status changes.</p>
-            {result.confirmation_email_status === "SENT" ? <p>Confirmation email sent.</p> : <p>Your request was received, but we could not send the confirmation email.</p>}
+            <h2>{tab === "movie" ? "Request received" : "Submission received"}</h2>
+            {tab === "movie" && <><h3>{result.verified_title}</h3>{result.original_title && result.original_title !== result.verified_title && <p>{result.original_title}</p>}<p>We aim to review your request within 48 hours. We’ll email you when its status changes.</p>{result.confirmation_email_status === "SENT" ? <p>Confirmation email sent.</p> : <p>Your request was received, but we could not send the confirmation email.</p>}</>}
+            {tab !== "movie" && <p>An administrator can now review reference {result.request_id}. No access or correction is applied automatically.</p>}
+            {tab !== "movie" && (result.receipt_email_status === "SENT" ? <p>Confirmation email sent.</p> : result.receipt_email_status === "NOT_SUPPLIED" ? null : <p>Your submission was saved; email delivery is pending or not currently available.</p>)}
             <small>Request reference: {result.request_id}</small>
           </div>
         </section>
@@ -1467,49 +1658,7 @@ export function Request() {
 }
 
 export function Support() {
-  const [params] = useSearchParams();
-  const [contactType, setContactType] = useState(params.get("type") || "WEBSITE_ISSUE");
-  const [result, setResult] = useState();
-  const [submitting, setSubmitting] = useState(false);
-  const submit = (event) => {
-    event.preventDefault();
-    setSubmitting(true);
-    setResult(undefined);
-    const body = Object.fromEntries(new FormData(event.target));
-    Object.keys(body).forEach((key) => body[key] === "" && delete body[key]);
-    if (body.tmdb_id) body.tmdb_id = Number(body.tmdb_id);
-    post("/api/v1/contact-requests", body)
-      .then(setResult)
-      .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
-      .finally(() => setSubmitting(false));
-  };
-  const received = Boolean(result?.request_id);
-  const movieFields = ["INCORRECT_MOVIE", "INCORRECT_OTT"].includes(contactType);
-  return (
-    <main className="support-page">
-      <Seo title="Report issue or request access" />
-      <h1>Report issue / request access</h1>
-      <p>Submissions go to private administrator review. Corrections and access requests are never applied automatically.</p>
-      {!received && <form className="request request-card" onSubmit={submit}>
-        <label>Request type *<select name="request_type" required value={contactType} onChange={(event) => setContactType(event.target.value)}>
-          <option value="WEBSITE_ISSUE">Report website issue</option><option value="INCORRECT_MOVIE">Report incorrect movie information</option><option value="INCORRECT_OTT">Report incorrect OTT information</option><option value="ACCESS_REQUEST">Request website access</option><option value="OTHER">Other</option>
-        </select></label>
-        <div className="request-field-grid">
-          <label>Name<input name="name" maxLength="200" autoComplete="name" /></label>
-          <label>WhatsApp Number (Preferred)<input name="whatsapp" type="tel" maxLength="50" autoComplete="tel" /></label>
-          <label>Phone Number<input name="phone" type="tel" maxLength="50" autoComplete="tel" /></label>
-          <label>Email Address<input name="email" type="email" maxLength="320" autoComplete="email" /></label>
-          {movieFields && <><label>Movie Name<input name="movie_name" maxLength="500" defaultValue={params.get("movie_name") || ""} /></label><label>ID<input name="tmdb_id" type="number" min="1" inputMode="numeric" defaultValue={params.get("tmdb_id") || ""} /></label><label className="wide">Movie URL<input name="movie_url" type="url" pattern="https?://.*" defaultValue={params.get("movie_url") || ""} /></label><label className="wide">Issue Type<input name="issue_type" maxLength="100" /></label></>}
-          {contactType === "INCORRECT_OTT" && <><label>Expected OTT Platform<input name="expected_ott_platform" maxLength="100" /></label><label>Expected OTT Release Date<input name="expected_ott_release_date" type="date" /></label><label className="wide">Evidence URL<input name="evidence_url" type="url" pattern="https?://.*" /></label></>}
-          <label className="wide">Comment / Description *<textarea name="comment" required minLength="5" maxLength="5000" /></label>
-        </div>
-        <p className="form-help">Provide at least one contact method: WhatsApp, phone, or email.</p>
-        <button disabled={submitting}>{submitting ? "Sending securely…" : "Send to administrator"}</button>
-      </form>}
-      {received && <section className="request-success support-success" role="status"><div><h2>Submission received</h2><p>An administrator can now review reference {result.request_id}. No access or correction is applied automatically.</p>{result.receipt_email_status === "SENT" ? <p>Confirmation email sent.</p> : result.receipt_email_status === "NOT_SUPPLIED" ? null : <p>Your submission was saved; email delivery is pending or not currently available.</p>}<small>Request reference: {result.request_id}</small></div></section>}
-      {result?.error && <div className="request-error" role="alert"><p>{result.error}</p></div>}
-    </main>
-  );
+  return <Request />;
 }
 
 export function Legal({ title, children }) {

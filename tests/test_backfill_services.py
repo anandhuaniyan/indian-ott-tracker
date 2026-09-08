@@ -7,6 +7,8 @@ from app.models.movie_metadata import ExternalId, MovieCredit, MovieRating, Movi
 from app.models.operations import BackfillRecord, OttEvidence
 from app.models.ott_availability import OttAvailability
 from app.services.backfill import IMDbBackfillService, MetadataBackfillService, OttQueueBackfillService, PersonBackfillService, SingleMovieRepairService, TrailerBackfillService
+from app.services.trailers import TrailerService
+from app.services.youtube_trailer import YouTubeTrailerService, accepted_title
 from app.config.settings import settings
 from app.services.movie_metadata_service import MovieMetadataService
 from app.services.ott_providers import GoogleProgrammableSearchProvider
@@ -159,3 +161,64 @@ def test_external_id_upsert_skips_shared_social_identity_without_failing(databas
     service._upsert_external_ids(database.get(Movie, 2), {"instagram_id": "shared-account"})
     database.commit()
     assert database.query(ExternalId).filter_by(provider="instagram", external_id="shared-account").count() == 1
+
+
+def test_trailer_backfill_uses_youtube_search_fallback_when_tmdb_empty(database, monkeypatch):
+    monkeypatch.setattr(settings, "TMDB_API_KEY", "configured")
+    monkeypatch.setattr(settings, "YOUTUBE_API_KEY", "configured")
+
+    def videos(_self, tmdb_id):
+        return {"results": []}
+
+    monkeypatch.setattr("app.services.backfill.TMDbMovieService.get_movie_videos", videos)
+    monkeypatch.setattr(
+        YouTubeTrailerService,
+        "search",
+        lambda self, movie: [
+            {
+                "site": "YouTube",
+                "key": f"Yt{movie.tmdb_id:09d}",
+                "type": "Trailer",
+                "name": f"{movie.title} Official Trailer",
+                "official": False,
+                "iso_639_1": "ml",
+            }
+        ],
+    )
+    result = TrailerBackfillService(database).run(batch_size=10)
+    assert result["succeeded"] == 2
+    assert database.query(MovieTrailer).filter_by(video_key="Yt000000101").count() == 1
+    assert database.query(MovieTrailer).filter_by(video_key="Yt000000102").count() == 1
+
+
+def test_trailer_backfill_health_check_marks_gone_primary_unavailable(database, monkeypatch):
+    movie = database.get(Movie, 1)
+    TrailerService(database).upsert(
+        movie,
+        {"results": [{"site": "YouTube", "key": "StaleKey123", "type": "Trailer", "name": "Official Trailer", "official": True, "iso_639_1": "ml"}]},
+        commit=True,
+    )
+    for item in database.query(MovieTrailer):
+        item.last_checked_at = datetime.now(timezone.utc) - timedelta(days=settings.TRAILER_REFRESH_DAYS + 10)
+    database.commit()
+
+    monkeypatch.setattr(settings, "TMDB_API_KEY", "configured")
+    monkeypatch.setattr(settings, "YOUTUBE_API_KEY", "configured")
+    monkeypatch.setattr("app.services.backfill.TMDbMovieService.get_movie_videos", lambda self, tmdb_id: {"results": []})
+    monkeypatch.setattr(YouTubeTrailerService, "search", lambda self, movie: [])
+    monkeypatch.setattr(YouTubeTrailerService, "health_check", lambda self, key: False)
+
+    result = TrailerBackfillService(database).run(batch_size=10)
+    assert result["processed"] >= 2
+    stored = database.query(MovieTrailer).filter_by(video_key="StaleKey123").one()
+    assert stored.is_unavailable is True
+    assert stored.is_primary is False
+
+
+def test_youtube_title_acceptance_is_strict(database):
+    movie = database.get(Movie, 1)
+    assert accepted_title("Example Film (2026) Official Malayalam Trailer", movie) is True
+    assert accepted_title("Example Film Teaser | New Clip", movie) is True
+    assert accepted_title("Example Film Movie Review", movie) is False
+    assert accepted_title("Cats Reaction Video", movie) is False
+    assert accepted_title("Another Film Official Trailer", movie) is False

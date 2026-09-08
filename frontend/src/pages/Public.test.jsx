@@ -20,7 +20,6 @@ import {
   OttPlatform,
   Person,
   Request,
-  Support,
 } from "./Public";
 
 const get = vi.fn();
@@ -173,6 +172,17 @@ it("renders stored movie metadata and galleries without fabricating empty fields
       name: "Official Trailer",
       embed_url: "https://www.youtube-nocookie.com/embed/OfficialML1",
     },
+    videos: [
+      {
+        provider: "YouTube",
+        video_key: "OfficialML1",
+        name: "Official Trailer",
+        video_type: "Trailer",
+        official: true,
+        language: "ml",
+        embed_url: "https://www.youtube-nocookie.com/embed/OfficialML1",
+      },
+    ],
   };
   get.mockImplementation((path) => Promise.resolve(path.includes("/comments") ? { items: [], total: 0, page: 1, pages: 0 } : detail));
   render(
@@ -211,21 +221,26 @@ it("renders stored movie metadata and galleries without fabricating empty fields
     "https://www.imdb.com/title/tt1234567/",
   );
   expect(screen.getByAltText("Actor profile")).toBeInTheDocument();
-  expect(screen.getByTitle("Official Trailer")).toHaveAttribute("src", "https://www.youtube-nocookie.com/embed/OfficialML1");
-  expect(screen.getByText(/date not confirmed.*75% platform confidence/i)).toBeInTheDocument();
-  expect(screen.getByText("Last verified: 31 August 2026")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Trailers & Videos" })).toBeInTheDocument();
+  const poster = screen.getByRole("button", { name: "Play Official Trailer" });
+  expect(poster).toBeInTheDocument();
+  fireEvent.click(poster);
+  expect(screen.getByTitle("Official Trailer")).toHaveAttribute("src", "https://www.youtube-nocookie.com/embed/OfficialML1?autoplay=0");
+  expect(screen.queryByText(/platform confidence|date confidence|View source|View candidate source/i)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Last verified:/)).not.toBeInTheDocument();
   expect(await screen.findByText("No comments yet. Be the first to comment.")).toBeInTheDocument();
 });
 
 it("shows a clean no-trailer state and treats submitted comment HTML as text", async () => {
   const detail = {
     movie: { ...card, display_id: 101, release_status: "Released", release_status_code: "THEATRICALLY_RELEASED", original_language: "ml", spoken_languages: [], production_countries: [], production_companies: [], ott: [], collection: null },
-    cast: [], crew: [], crew_by_role: {}, images: [], releases: [], ratings: [], keywords: [], alternative_titles: [], external_ids: [], trailer: null,
+    cast: [], crew: [], crew_by_role: {}, images: [], releases: [], ratings: [], keywords: [], alternative_titles: [], external_ids: [], trailer: null, videos: [],
   };
   get.mockImplementation((path) => Promise.resolve(path.includes("/comments") ? { items: [{ id: 1, display_name: "Anand", comment: "<script>alert(1)</script> Great movie", created_at: new Date().toISOString() }], total: 1, page: 1, pages: 1 } : detail));
   post.mockResolvedValue({ id: 2, status: "PENDING", message: "Your comment has been submitted for review." });
   render(<MemoryRouter initialEntries={["/movies/1"]}><Routes><Route path="/movies/:id" element={<Movie />} /></Routes></MemoryRouter>);
-  expect(await screen.findByText("Trailer not available.")).toBeInTheDocument();
+  expect(await screen.findByText("<script>alert(1)</script> Great movie")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Trailers & Videos" })).not.toBeInTheDocument();
   expect(await screen.findByText("<script>alert(1)</script> Great movie")).toBeInTheDocument();
   expect(document.querySelector(".comment script")).toBeNull();
   fireEvent.change(screen.getByLabelText("Display Name *"), { target: { value: "Viewer" } });
@@ -244,9 +259,15 @@ it("restores the previous request template and accepts a Deep Search selection",
     </MemoryRouter>,
   );
   expect(screen.getByLabelText("Movie Name *")).toHaveValue("Aadu");
-  expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
-  expect(document.querySelector("main")).not.toHaveClass("request-page");
-  expect(document.querySelector("form.request")).not.toHaveClass("request-card");
+  expect(screen.getByRole("tablist")).toBeInTheDocument();
+  expect(document.querySelector("main")).toHaveClass("request-page");
+  expect(screen.getByRole("tab", { name: "Request movie" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Report issue" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Request access" })).toBeInTheDocument();
+  expect(document.querySelector("main form.request")).not.toHaveClass("request-card");
+  expect(screen.getByText(/Ask us to review any movie, including one that is already listed here/)).toHaveTextContent("Your contact details are used only to process this request and are never shown publicly. Can't find the movie? You can also search for movie and OTT information using Deep Search.");
+  expect(screen.getByRole("link", { name: "Deep Search" })).toHaveAttribute("href", "/deep-search");
+  expect(screen.getByRole("link", { name: "Try Deep Search" })).toHaveAttribute("href", "/deep-search");
   expect(screen.getByLabelText("ID (optional)")).toHaveValue(326282);
   expect(screen.queryByText(/TMDB ID/i)).not.toBeInTheDocument();
   expect(screen.getByLabelText("Year")).toHaveValue(2015);
@@ -271,21 +292,37 @@ it("keeps a successful request when confirmation email delivery fails", async ()
   expect(screen.getByText(/request was received, but we could not send the confirmation email/i)).toBeInTheDocument();
 });
 
-it("keeps issue and access on the separate public support page", async () => {
+it("keeps issue and access on the single request page with tabs", async () => {
   get.mockResolvedValue([]);
   post.mockResolvedValue({ request_id: "WEB-1", status: "NEW", type: "ACCESS_REQUEST", discord_status: "PENDING", receipt_email_status: "NOT_SUPPLIED" });
-  render(<MemoryRouter initialEntries={["/support?type=ACCESS_REQUEST"]}><Routes><Route path="/support" element={<Support/>}/></Routes></MemoryRouter>);
-  expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "Report issue / request access" })).toBeInTheDocument();
+  render(<MemoryRouter initialEntries={["/request-movie?tab=issue&type=INCORRECT_MOVIE"]}><Routes><Route path="/request-movie" element={<Request/>}/></Routes></MemoryRouter>);
+  expect(screen.getByRole("tablist")).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Report issue" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Request access" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Report an issue" })).toBeInTheDocument();
   expect(screen.getByLabelText("Name")).not.toBeRequired();
   fireEvent.change(screen.getByRole("combobox", { name: /Request type/i }), { target: { value: "INCORRECT_MOVIE" } });
   expect(screen.getByLabelText("ID")).toBeInTheDocument();
   expect(screen.queryByText(/TMDB ID/i)).not.toBeInTheDocument();
-  fireEvent.change(screen.getByRole("combobox", { name: /Request type/i }), { target: { value: "ACCESS_REQUEST" } });
+  fireEvent.change(screen.getByRole("combobox", { name: /Request type/i }), { target: { value: "WEBSITE_ISSUE" } });
   fireEvent.change(screen.getByLabelText("WhatsApp Number (Preferred)"), { target: { value: "+65 8000 0000" } });
   fireEvent.change(screen.getByLabelText("Comment / Description *"), { target: { value: "Please review access." } });
   fireEvent.click(screen.getByRole("button", { name: "Send to administrator" }));
-  await waitFor(() => expect(post).toHaveBeenCalledWith("/api/v1/contact-requests", expect.objectContaining({ request_type: "ACCESS_REQUEST", whatsapp: "+65 8000 0000" })));
+  await waitFor(() => expect(post).toHaveBeenCalledWith("/api/v1/contact-requests", expect.objectContaining({ request_type: "WEBSITE_ISSUE", whatsapp: "+65 8000 0000" })));
+  expect(await screen.findByRole("heading", { name: "Submission received" })).toBeInTheDocument();
+});
+
+it("submits a request access submission", async () => {
+  get.mockResolvedValue([]);
+  post.mockResolvedValue({ request_id: "ACC-1", status: "NEW", type: "ACCESS_REQUEST", discord_status: "PENDING", receipt_email_status: "NOT_SUPPLIED" });
+  render(<MemoryRouter initialEntries={["/request-movie?tab=access"]}><Routes><Route path="/request-movie" element={<Request/>}/></Routes></MemoryRouter>);
+  expect(screen.getByRole("heading", { name: "Request access" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Reason for access *")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("WhatsApp Number (Preferred)"), { target: { value: "+65 8000 0000" } });
+  fireEvent.change(screen.getByLabelText("Email Address"), { target: { value: "viewer@example.com" } });
+  fireEvent.change(screen.getByLabelText("Reason for access *"), { target: { value: "Please review access." } });
+  fireEvent.click(screen.getByRole("button", { name: "Submit access request" }));
+  await waitFor(() => expect(post).toHaveBeenCalledWith("/api/v1/contact-requests", expect.objectContaining({ request_type: "ACCESS_REQUEST", whatsapp: "+65 8000 0000", email: "viewer@example.com" })));
   expect(await screen.findByRole("heading", { name: "Submission received" })).toBeInTheDocument();
 });
 

@@ -12,7 +12,7 @@ const meta = (selector, attributes, value) => {
 
 export default function Seo({ title, description = "Discover Indian movies and verified lawful OTT availability.", image, type = "website", jsonLd, noindex = false }) {
   useEffect(() => {
-    const full = title === "Indian OTT Tracker" ? title : `${title} | Indian OTT Tracker`;
+    const full = title === "OTT Tracker" ? "OTT Tracker – Indian Movies & OTT Releases" : `${title} | OTT Tracker`;
     const canonical = `${import.meta.env.VITE_SITE_URL || location.origin}${location.pathname}`;
     document.title = full;
     meta('meta[name="description"]', { name: "description" }, description);
@@ -20,6 +20,8 @@ export default function Seo({ title, description = "Discover Indian movies and v
     meta('meta[property="og:description"]', { property: "og:description" }, description);
     meta('meta[property="og:type"]', { property: "og:type" }, type);
     meta('meta[property="og:url"]', { property: "og:url" }, canonical);
+    meta('meta[property="og:site_name"]', { property: "og:site_name" }, "OTT Tracker");
+    meta('meta[property="og:locale"]', { property: "og:locale" }, "en_IN");
     meta('meta[name="twitter:card"]', { name: "twitter:card" }, image ? "summary_large_image" : "summary");
     meta('meta[name="twitter:title"]', { name: "twitter:title" }, full);
     meta('meta[name="twitter:description"]', { name: "twitter:description" }, description);

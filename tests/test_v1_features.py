@@ -38,6 +38,7 @@ from app.models.operations import (
 from app.models.ott_availability import OttAvailability
 from app.models.research import RequestCommunication
 from app.services.operations import OttResearchService
+from conftest import register_sqlite_trigram_similarity
 from app.services.release_status import ReleaseStatusService, site_date
 from app.services.movie_requests import (
     MovieRequestAutomationService,
@@ -69,6 +70,7 @@ def database():
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
+    register_sqlite_trigram_similarity(engine)
     Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
     today = site_date()
@@ -1054,6 +1056,98 @@ def test_missing_or_invalid_trailer_produces_clean_empty_state(client, database)
     assert client.get("/api/v1/movies/1/detail").json()["trailer"] is None
 
 
+def test_trailer_videos_payload_ranks_official_original_before_regional_and_drops_junk(client, database):
+    movie = database.get(Movie, 1)
+    TrailerService(database).upsert(
+        movie,
+        {
+            "results": [
+                {
+                    "site": "YouTube",
+                    "key": "EnTrailer02",
+                    "type": "Trailer",
+                    "name": "Official Trailer",
+                    "official": True,
+                    "iso_639_1": "en",
+                },
+                {
+                    "site": "YouTube",
+                    "key": "TeaserKey01",
+                    "type": "Teaser",
+                    "name": "Official Teaser",
+                    "official": True,
+                    "iso_639_1": "hi",
+                },
+                {
+                    "site": "YouTube",
+                    "key": "MlTrailer01",
+                    "type": "Trailer",
+                    "name": "Official Malayalam Trailer",
+                    "official": True,
+                    "iso_639_1": "ml",
+                    "iso_3166_1": "IN",
+                    "size": 720,
+                },
+                {
+                    "site": "YouTube",
+                    "key": "ReactVideo1",
+                    "type": "Clip",
+                    "name": "Reaction",
+                    "official": False,
+                    "iso_639_1": "ml",
+                },
+            ]
+        },
+        commit=True,
+    )
+    detail = client.get("/api/v1/movies/1/detail").json()
+    keys = [item["video_key"] for item in detail["videos"]]
+    assert keys[0] == "MlTrailer01"
+    assert keys.index("EnTrailer02") < keys.index("TeaserKey01")
+    assert "ReactVideo1" not in keys
+    assert detail["trailer"]["video_key"] == "MlTrailer01"
+    assert detail["videos"][0]["country"] == "IN"
+    assert detail["videos"][0]["size"] == 720
+
+
+def test_trailer_unavailable_demotion_and_recovery(client, database):
+    movie = database.get(Movie, 1)
+    TrailerService(database).upsert(
+        movie,
+        {"results": [{"site": "YouTube", "key": "GoneKey1123", "type": "Trailer", "name": "Official Trailer", "official": True, "iso_639_1": "ml"}]},
+        commit=True,
+    )
+    assert database.query(MovieTrailer).filter_by(video_key="GoneKey1123", is_primary=True).one()
+
+    TrailerService(database).upsert(
+        database.get(Movie, 1),
+        {"results": [{"site": "YouTube", "key": "NewKey88888", "type": "Trailer", "name": "Official Trailer", "official": True, "iso_639_1": "ml"}]},
+        commit=True,
+    )
+    stored = database.query(MovieTrailer).filter_by(video_key="GoneKey1123").one()
+    assert stored.is_unavailable is True
+    assert database.query(MovieTrailer).filter_by(video_key="NewKey88888", is_primary=True).one()
+
+    TrailerService(database).upsert(
+        database.get(Movie, 1),
+        {"results": [{"site": "YouTube", "key": "GoneKey1123", "type": "Trailer", "name": "Official Trailer", "official": True, "iso_639_1": "ml"}]},
+        commit=True,
+    )
+    recovered = database.query(MovieTrailer).filter_by(video_key="GoneKey1123").one()
+    assert recovered.is_unavailable is False and recovered.last_checked_at is not None
+
+
+def test_trailer_empty_results_never_marks_stored_videos_unavailable(client, database):
+    movie = database.get(Movie, 1)
+    TrailerService(database).upsert(
+        movie,
+        {"results": [{"site": "YouTube", "key": "KeepKey9999", "type": "Trailer", "name": "Official Trailer", "official": True, "iso_639_1": "ml"}]},
+        commit=True,
+    )
+    TrailerService(database).upsert(database.get(Movie, 1), {"results": []}, commit=True)
+    assert database.query(MovieTrailer).filter_by(video_key="KeepKey9999", is_unavailable=False).one()
+
+
 def test_comment_validation_safety_pagination_and_moderation(
     client, database, monkeypatch
 ):
@@ -1496,3 +1590,19 @@ def test_rejection_email_and_sla_reminders_are_once_only(database, monkeypatch):
     assert rows[4].sla_36_notified_at is None and rows[5].sla_48_notified_at is None
     assert service.check_sla(now) == {"checked": 3, "warnings": 0, "escalations": 0}
     assert len(notices) == 4
+
+def test_calendar_groups_multiple_platform_dates_and_cast(client, database):
+    db = database
+    movie = db.query(Movie).first()
+    day = site_date()
+    db.add_all([
+        OttAvailability(movie_id=movie.id,provider='Lionsgate Play',country='IN',watch_type='subscription',ott_release_date=day,status='released',verification_status='CONFIRMED',confidence=100),
+        OttAvailability(movie_id=movie.id,provider='ManoramaMAX',country='IN',watch_type='subscription',ott_release_date=day,status='released',verification_status='CONFIRMED',confidence=100),
+    ])
+    db.commit()
+    payload=client.get('/api/v1/calendar/this-week').json()['ott']['items']
+    matches=[x for x in payload if x['id']==movie.id]
+    assert len(matches)==1
+    assert {'Lionsgate Play','ManoramaMAX'} <= set(matches[0]['ott_platforms'])
+    assert len(matches[0]['ott_releases']) >= 2
+    db.close()

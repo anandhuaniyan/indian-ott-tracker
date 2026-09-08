@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import logging
-from xml.sax.saxutils import escape
 
 from app.api.movies import router as movie_router
 from app.api.v1.public import router as public_router
@@ -12,6 +11,16 @@ from app.api.v1.admin import router as admin_router
 from app.api.v1.deep_search import router as deep_search_router
 from app.database.connection import get_db
 from app.config.settings import settings
+from app.seo import (
+    ads_txt,
+    robots_txt,
+    sitemapindex,
+    static_urls,
+    url_row,
+    urlset,
+    people_file_count,
+    SITEMAP_PEOPLE_PER_FILE,
+)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -48,7 +57,7 @@ async def security_headers(request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data: https://image.tmdb.org; style-src 'self'; script-src 'self' https://www.googletagmanager.com https://pagead2.googlesyndication.com; connect-src 'self' https://www.google-analytics.com; frame-src https://www.youtube-nocookie.com https://googleads.g.doubleclick.net; base-uri 'self'; form-action 'self'; object-src 'none'"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' https://i.ytimg.com data: blob: https://image.tmdb.org https://www.google-analytics.com https://pagead2.googlesyndication.com https://googleads.g.doubleclick.net; style-src 'self'; script-src 'self' https://www.googletagmanager.com https://pagead2.googlesyndication.com; connect-src 'self' https://www.google-analytics.com https://analytics.google.com https://googleads.g.doubleclick.net https://pagead2.googlesyndication.com; frame-src https://www.youtube-nocookie.com https://googleads.g.doubleclick.net; base-uri 'self'; form-action 'self'; object-src 'none'"
     if settings.ENVIRONMENT == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -92,27 +101,68 @@ app.include_router(operations_router)
 app.include_router(admin_router)
 app.include_router(deep_search_router)
 
-@app.get("/robots.txt", include_in_schema=False)
+@app.api_route("/robots.txt", methods=["GET", "HEAD"], include_in_schema=False)
 def robots():
-    return Response("User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /admin\nSitemap: " + settings.SITE_URL.rstrip("/") + "/sitemap.xml\n", media_type="text/plain")
+    return Response(
+        robots_txt(settings.SITE_URL),
+        media_type="text/plain",
+        headers={"Cache-Control": "no-cache"},
+    )
 
-@app.get("/ads.txt", include_in_schema=False)
+
+@app.api_route("/ads.txt", methods=["GET", "HEAD"], include_in_schema=False)
 def ads():
-    return Response(f"google.com, {settings.ADSENSE_PUBLISHER_ID}, DIRECT, f08c47fec0942fa0\n" if settings.ADSENSE_PUBLISHER_ID else "", media_type="text/plain")
+    return Response(ads_txt(settings.ADSENSE_PUBLISHER_ID), media_type="text/plain")
 
-@app.get("/sitemap.xml", include_in_schema=False)
-def sitemap(db=Depends(get_db)):
-    from app.models.movie import Movie
+
+@app.api_route("/sitemap.xml", methods=["GET", "HEAD"], include_in_schema=False)
+def sitemap_index(db=Depends(get_db)):
+    from sqlalchemy import func
     from app.models.movie_metadata import Person
-    from app.models.genre import Genre
-    from app.models.ott_availability import OttAvailability
+
     base = settings.SITE_URL.rstrip("/")
-    static = ["/", "/discover", "/search", "/ott", "/request-movie", "/support", "/about", "/contact", "/privacy", "/terms", "/cookies"]
-    static += [f"/calendar/{period}" for period in ("previous-week", "this-week", "next-week", "previous-month", "this-month", "next-month")]
-    static += [f"/languages/{code}" for code in ("ml", "ta", "te", "hi", "kn")]
-    static += [f"/genres/{row.slug}" for row in db.query(Genre.slug).order_by(Genre.slug)]
-    static += [f"/ott/{row[0].lower().replace(' ', '-')}" for row in db.query(OttAvailability.provider).distinct().order_by(OttAvailability.provider)]
-    rows = [f"<url><loc>{escape(base + path)}</loc></url>" for path in static]
-    rows += [f"<url><loc>{escape(base + '/movies/' + str(m.id))}</loc>{f'<lastmod>{m.updated_at.date().isoformat()}</lastmod>' if m.updated_at else ''}</url>" for m in db.query(Movie.id, Movie.updated_at).yield_per(1000)]
-    rows += [f"<url><loc>{escape(base + '/people/' + str(p.id))}</loc></url>" for p in db.query(Person.id).yield_per(1000)]
-    return Response("<?xml version=\"1.0\" encoding=\"UTF-8\"?><urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">" + "".join(rows) + "</urlset>", media_type="application/xml")
+    people = db.query(func.count(Person.id)).scalar() or 0
+    references = [f"{base}/sitemaps/static.xml", f"{base}/sitemaps/movies.xml"]
+    references += [
+        f"{base}/sitemaps/people-{index}.xml"
+        for index in range(1, people_file_count(people) + 1)
+    ]
+    body = "".join(
+        f"<sitemap><loc>{ref}</loc></sitemap>" for ref in references
+    )
+    return Response(sitemapindex(body), media_type="application/xml")
+
+
+@app.api_route("/sitemaps/static.xml", methods=["GET", "HEAD"], include_in_schema=False)
+def sitemap_static(db=Depends(get_db)):
+    rows = "".join(url_row(loc) for loc in static_urls(settings.SITE_URL, db))
+    return Response(urlset(rows), media_type="application/xml")
+
+
+@app.api_route("/sitemaps/movies.xml", methods=["GET", "HEAD"], include_in_schema=False)
+def sitemap_movies(db=Depends(get_db)):
+    from app.models.movie import Movie
+
+    base = settings.SITE_URL.rstrip("/")
+    rows = []
+    for movie_id, updated_at in db.query(Movie.id, Movie.updated_at).order_by(Movie.id).yield_per(2000):
+        lastmod = updated_at.date().isoformat() if updated_at else None
+        rows.append(url_row(f"{base}/movies/{movie_id}", lastmod))
+    return Response(urlset("".join(rows)), media_type="application/xml")
+
+
+@app.api_route("/sitemaps/people-{page}.xml", methods=["GET", "HEAD"], include_in_schema=False)
+def sitemap_people(page: int, db=Depends(get_db)):
+    from app.models.movie_metadata import Person
+
+    base = settings.SITE_URL.rstrip("/")
+    page = max(1, page)
+    rows = []
+    for (person_id,) in (
+        db.query(Person.id)
+        .order_by(Person.id)
+        .offset((page - 1) * SITEMAP_PEOPLE_PER_FILE)
+        .limit(SITEMAP_PEOPLE_PER_FILE)
+    ):
+        rows.append(url_row(f"{base}/people/{person_id}"))
+    return Response(urlset("".join(rows)), media_type="application/xml")
