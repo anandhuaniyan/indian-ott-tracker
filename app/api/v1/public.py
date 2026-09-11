@@ -12,7 +12,6 @@ from sqlalchemy.orm import Session, aliased, selectinload
 
 from app.database.connection import get_db
 from app.config.settings import settings
-from app.core.secrets import sanitize_error
 from app.models.genre import Genre
 from app.models.language import Language
 from app.models.movie import Movie
@@ -32,7 +31,7 @@ from app.models.movie_metadata import (
     ProductionCountry,
 )
 from app.models.ott_availability import OttAvailability
-from app.models.operations import MovieComment, OperationState, OttEvidence
+from app.models.operations import MovieComment, OttEvidence
 from app.core.rate_limit import limit
 from app.services.release_status import (
     ReleaseStatusService,
@@ -357,48 +356,8 @@ def _external_id_payload(item: ExternalId) -> dict:
 def _queue_on_demand_repair(
     db: Session, movie: Movie, credits: list[MovieCredit]
 ) -> bool:
-    """Deduplicate asynchronous repair for detail pages with critical gaps."""
-    missing = (
-        not any(item.credit_type == "cast" for item in credits)
-        or not any(item.credit_type == "crew" for item in credits)
-        or not movie.poster_path
-        or not movie.backdrop_path
-        or not any(item.provider.lower() == "imdb" for item in movie.external_ids)
-        or not any(item.source.lower() == "imdb" for item in movie.ratings)
-        or not movie.ott_availabilities
-    )
-    if not missing:
-        return False
-    now = datetime.now(timezone.utc)
-    name = f"on_demand_repair:{movie.id}"
-    state = db.query(OperationState).filter_by(name=name).first()
-    if (
-        state
-        and state.status != "FAILED"
-        and state.last_success_at
-        and state.last_success_at
-        >= now - timedelta(hours=settings.ON_DEMAND_REPAIR_COOLDOWN_HOURS)
-    ):
-        return False
-    if not state:
-        state = OperationState(name=name, total_count=1)
-        db.add(state)
-    state.status = "QUEUED"
-    state.last_success_at = now
-    state.last_error = None
-    db.commit()
-    try:
-        from app.workers.celery_app import celery_app
-
-        celery_app.send_task("repair.movie", args=[movie.id], ignore_result=True)
-        return True
-    except Exception as exc:
-        state = db.query(OperationState).filter_by(name=name).first()
-        state.status = "FAILED"
-        state.last_failure_at = now
-        state.last_error = sanitize_error(exc)
-        db.commit()
-        return False
+    """Compatibility no-op: public reads must never schedule repair work."""
+    return False
 
 
 def _ratings_payload(movie: Movie) -> list[dict]:
@@ -899,6 +858,7 @@ def _person_relevance_case(term: str, fuzzy: bool):
 
 @router.get("/search")
 def global_search(
+    request: Request,
     q: str = Query("", max_length=200),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=50),
@@ -913,6 +873,7 @@ def global_search(
     term = _fold_search_term(q)
     if not term:
         return empty
+    limit(request, "global-search", 120, 60)
     fuzzy = len(term) >= SEARCH_MIN_TRIGRAM_LENGTH
 
     movie_score = _movie_relevance_case(term, fuzzy)
@@ -1525,7 +1486,9 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
         ),
         "videos": trailer_videos_payload(movie),
     }
-    payload["repair_queued"] = _queue_on_demand_repair(db, movie, credits)
+    # Public GET endpoints are deliberately read-only. Maintenance and admin
+    # workflows own all repair scheduling.
+    payload["repair_queued"] = False
     return payload
 
 

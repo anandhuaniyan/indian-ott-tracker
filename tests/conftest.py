@@ -48,6 +48,11 @@ def isolate_external_rate_limit_store(monkeypatch):
     Dedicated rate-limit tests replace this stub with their own deterministic
     Redis fake, so the limiter itself remains covered.
     """
+    from app.core.rate_limit import _reset_local_fallback_for_tests
+    from app.core.session_auth import _reset_session_store_for_tests
+
+    _reset_local_fallback_for_tests()
+    _reset_session_store_for_tests()
     monkeypatch.setattr(
         "app.core.rate_limit.redis.from_url",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError()),
@@ -56,6 +61,9 @@ def isolate_external_rate_limit_store(monkeypatch):
     # in-process TestClient uses HTTP. Keep authentication tests isolated from
     # that host-level deployment setting.
     monkeypatch.setattr(settings, "ENVIRONMENT", "test")
+    yield
+    _reset_local_fallback_for_tests()
+    _reset_session_store_for_tests()
 
 
 @pytest.fixture()

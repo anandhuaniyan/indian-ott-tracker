@@ -16,6 +16,7 @@ from app.core.session_auth import (
     create_session,
     require_admin_session,
     require_same_origin,
+    revoke_session,
     verify_password,
 )
 from app.database.connection import get_db
@@ -638,7 +639,8 @@ def login(payload: Login, response: Response, request: Request):
 
 
 @router.post("/logout", dependencies=[Depends(require_same_origin)])
-def logout(response: Response):
+def logout(response: Response, request: Request):
+    revoke_session(request.cookies.get(COOKIE))
     response.delete_cookie(COOKIE, path="/")
     return {"authenticated": False}
 

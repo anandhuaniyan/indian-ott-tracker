@@ -4,6 +4,20 @@
 
 # Environment variables
 .env
+.env.*
+!.env.example
+
+# Database dumps, generated backups, and private runtime storage
+*.dump
+*.sql
+*.sql.gz
+*.bak
+*.backup
+*.sqlite
+*.sqlite3
+*.db
+/data/backups/
+/storage/
 
 # Python cache
 __pycache__/
@@ -29,4 +43,6 @@ frontend/dist/
 # Local work products and generated QA artifacts
 /tmp/
 /resume/
+/backups/
+/private_uploads/
 /C*opencode*
