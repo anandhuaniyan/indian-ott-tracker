@@ -60,14 +60,13 @@ async def security_headers(request, call_next):
     response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' https://i.ytimg.com data: blob: https://image.tmdb.org https://www.google-analytics.com https://pagead2.googlesyndication.com https://googleads.g.doubleclick.net; style-src 'self'; script-src 'self' https://www.googletagmanager.com https://pagead2.googlesyndication.com; connect-src 'self' https://www.google-analytics.com https://analytics.google.com https://googleads.g.doubleclick.net https://pagead2.googlesyndication.com; frame-src https://www.youtube-nocookie.com https://googleads.g.doubleclick.net; base-uri 'self'; form-action 'self'; object-src 'none'"
     if settings.ENVIRONMENT == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    if request.url.path.startswith(("/api/v1/admin", "/api/v1/integrations/pinterest")):
+        response.headers["Cache-Control"] = "no-store, private"
     return response
 
 media_root = Path(settings.MEDIA_ROOT)
 media_root.mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=media_root), name="media")
-storage_root = Path("storage")
-storage_root.mkdir(parents=True, exist_ok=True)
-app.mount("/storage", StaticFiles(directory=storage_root), name="storage")
 
 
 # Frontend access

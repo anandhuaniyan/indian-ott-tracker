@@ -6,9 +6,9 @@ services:
     restart: unless-stopped
 
     environment:
-      POSTGRES_USER: ott_user
-      POSTGRES_PASSWORD: ott_password
-      POSTGRES_DB: ott_tracker
+      POSTGRES_USER: ${POSTGRES_USER:-ott_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-ott_tracker}
 
     volumes:
       - ott_postgres_data:/var/lib/postgresql/data
@@ -19,7 +19,7 @@ services:
     networks:
       - indian_ott_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ott_user -d ott_tracker"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -32,8 +32,8 @@ services:
     profiles: ["tools"]
 
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@otttracker.com
-      PGADMIN_DEFAULT_PASSWORD: admin_password
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@otttracker.invalid}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-}
 
     ports:
       - "127.0.0.1:5050:80"
@@ -73,6 +73,11 @@ services:
     env_file:
       - .env
 
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp
+
     ports:
       - "127.0.0.1:8000:8000"
 
@@ -83,8 +88,8 @@ services:
         condition: service_healthy
 
     volumes:
-      - .:/app
       - ott_media_data:/app/media
+      - ott_private_uploads:/app/private_uploads
 
     networks:
       - indian_ott_network
@@ -108,7 +113,7 @@ services:
         VITE_GOOGLE_SITE_VERIFICATION: ${GOOGLE_SITE_VERIFICATION:-}
     restart: unless-stopped
     ports:
-      - "5173:80"
+      - "127.0.0.1:5173:80"
     depends_on:
       api:
         condition: service_healthy
@@ -118,7 +123,11 @@ services:
   worker:
     build: .
     env_file: .env
-    command: sh -c "mkdir -p /app/media && chmod -R a+rwX /app/media && exec celery -A app.workers.celery_app.celery_app worker --loglevel=INFO --uid=nobody --gid=nogroup"
+    command: celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp
     restart: unless-stopped
     depends_on:
       postgres:
@@ -127,6 +136,7 @@ services:
         condition: service_healthy
     volumes:
       - ott_media_data:/app/media
+      - ott_private_uploads:/app/private_uploads
     networks:
       - indian_ott_network
     healthcheck:
@@ -138,7 +148,11 @@ services:
   beat:
     build: .
     env_file: .env
-    command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO --uid=nobody --gid=nogroup --schedule=/tmp/celerybeat-schedule
+    command: celery -A app.workers.celery_app.celery_app beat --loglevel=INFO --schedule=/tmp/celerybeat-schedule
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp
     restart: unless-stopped
     depends_on:
       redis:
@@ -176,3 +190,4 @@ volumes:
 
   ott_postgres_data:
   ott_media_data:
+  ott_private_uploads:
