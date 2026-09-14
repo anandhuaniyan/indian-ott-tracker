@@ -25,3 +25,18 @@ Thumbs.db
 # Frontend build artifacts
 frontend/node_modules/
 frontend/dist/
+
+# Database backups and private runtime storage
+*.dump
+*.sql
+*.sql.gz
+*.bak
+*.backup
+*.sqlite
+*.sqlite3
+*.db
+/data/backups/
+/storage/
+/backups/
+.env.*
+!.env.example

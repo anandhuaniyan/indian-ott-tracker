@@ -15,3 +15,17 @@ logs
 *.log
 celerybeat-schedule*
 .env
+
+# Database backups and private runtime storage
+backups
+data/backups
+*.dump
+*.sql
+*.sql.gz
+*.bak
+*.backup
+*.sqlite
+*.sqlite3
+*.db
+.env.*
+!.env.example
