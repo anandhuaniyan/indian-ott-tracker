@@ -344,6 +344,37 @@ it("orders homepage section listings as movies, pagination, then functional filt
   await waitFor(() => expect(get).toHaveBeenCalledWith(expect.stringMatching(/section=popular.*language=ml|language=ml.*section=popular/)));
 });
 
+it("renders a genre dropdown and immediately applies or clears the genre filter", async () => {
+  get.mockResolvedValue({
+    items: [], total: 0, page: 1, page_size: 24, pages: 0,
+    filters: {
+      languages: [],
+      genres: [], platforms: [], roles: [],
+    },
+  });
+  render(<MemoryRouter initialEntries={["/discover"]}><Routes><Route path="/discover" element={<Discover/>}/></Routes></MemoryRouter>);
+
+  const genre = await screen.findByRole("combobox", { name: "Genre" });
+  expect(genre).toHaveValue("");
+  expect(screen.getByRole("option", { name: "All Genres" })).toBeInTheDocument();
+  expect(genre.querySelectorAll("option")).toHaveLength(19);
+
+  fireEvent.change(genre, { target: { value: "science-fiction" } });
+  await waitFor(() => expect(get).toHaveBeenCalledWith(expect.stringContaining("genre=science-fiction")));
+
+  fireEvent.change(genre, { target: { value: "" } });
+  await waitFor(() => expect(get.mock.calls.at(-1)[0]).not.toContain("genre="));
+
+  fireEvent.change(screen.getByRole("combobox", { name: "Sort" }), { target: { value: "popularity" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "Release status" }), { target: { value: "released" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await waitFor(() => {
+    const request = get.mock.calls.at(-1)[0];
+    expect(request).toContain("sort=popularity");
+    expect(request).toContain("release_status=released");
+  });
+});
+
 it("supports person credit controls and separates normalized roles", async () => {
   get.mockResolvedValue({
     id: 2,

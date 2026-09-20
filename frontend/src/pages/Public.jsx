@@ -18,6 +18,27 @@ const SORTS = [
   ["name-desc", "Name Z–A"],
 ];
 
+const GENRES = [
+  ["action", "Action"],
+  ["adventure", "Adventure"],
+  ["animation", "Animation"],
+  ["comedy", "Comedy"],
+  ["crime", "Crime"],
+  ["documentary", "Documentary"],
+  ["drama", "Drama"],
+  ["family", "Family"],
+  ["fantasy", "Fantasy"],
+  ["history", "History"],
+  ["horror", "Horror"],
+  ["music", "Music"],
+  ["mystery", "Mystery"],
+  ["romance", "Romance"],
+  ["science-fiction", "Science Fiction"],
+  ["thriller", "Thriller"],
+  ["war", "War"],
+  ["western", "Western"],
+];
+
 const formatDate = (value) => {
   if (!value) return null;
   const parsed = new Date(String(value).includes("T") ? value : `${value}T00:00:00Z`);
@@ -291,6 +312,15 @@ export function Discover({ modeTabs = null }) {
       ...value,
       [event.target.name]: event.target.value,
     }));
+  const selectGenre = (event) => {
+    const genre = event.target.value;
+    setFilters((current) => ({ ...current, genre }));
+    const next = new URLSearchParams(urlParams);
+    if (genre) next.set("genre", genre);
+    else next.delete("genre");
+    next.delete("page");
+    setUrlParams(next, { replace: true });
+  };
   const movies = isSearch ? data?.movies?.items || [] : data?.items || [];
   const total = isSearch ? data?.movies?.total || 0 : data?.total || 0;
   const pageTitle = isSearch
@@ -326,7 +356,15 @@ export function Discover({ modeTabs = null }) {
               ))}
             </select>
           </label>
-          <label>Genre<input name="genre" value={filters.genre} onChange={set} placeholder="e.g. drama" /></label>
+          <label>
+            Genre
+            <select name="genre" value={filters.genre} onChange={selectGenre}>
+              <option value="">All Genres</option>
+              {GENRES.map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </label>
           <label>Year<input name="year" type="number" value={filters.year} onChange={set} /></label>
           <label>Minimum IMDb rating<input name="rating" type="number" min="0" max="10" step="0.5" value={filters.rating} onChange={set} /></label>
           <label>Certification<input name="certification" value={filters.certification} onChange={set} /></label>
