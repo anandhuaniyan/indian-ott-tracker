@@ -7,7 +7,7 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import Integer, and_, case, cast, exists, func, or_, select
+from sqlalchemy import Integer, and_, case, cast, exists, func, or_, select, union_all, literal
 from sqlalchemy.orm import Session, aliased, selectinload
 
 from app.database.connection import get_db
@@ -15,6 +15,7 @@ from app.config.settings import settings
 from app.models.genre import Genre
 from app.models.language import Language
 from app.models.movie import Movie
+from app.models.community_rating import CommunityRating, User
 from app.models.movie_metadata import (
     AlternativeTitle,
     ExternalId,
@@ -32,7 +33,9 @@ from app.models.movie_metadata import (
 )
 from app.models.ott_availability import OttAvailability
 from app.models.operations import MovieComment, OttEvidence, OttSourceRelease
+from app.models.editorial import EditorialArticle, MovieCorrection
 from app.core.rate_limit import limit
+from app.core.user_auth import require_user, require_user_same_origin
 from app.services.release_status import (
     ReleaseStatusService,
     best_canonical_ott,
@@ -41,14 +44,64 @@ from app.services.release_status import (
     site_date,
 )
 from app.services.roles import ROLE_ALIASES, normalize_role
-from app.services.languages import LANGUAGE_NAMES, language_name
-from app.services.ott_providers import normalize_platform
+from app.services.languages import (
+    INDIAN_PRIMARY_LANGUAGE_CODES,
+    LANGUAGE_CONFIG,
+    INDIAN_LANGUAGE_CODES,
+    INTERNATIONAL_LANGUAGE_CODES,
+    SUPPORTED_PRIMARY_LANGUAGE_CODES,
+    language_filter_codes,
+    language_name,
+    normalize_language_code,
+)
+from app.services.ott_providers import PUBLIC_OTT_STATES, normalize_platform, platform_slug
 from app.services.trailers import TrailerService, trailer_payload, trailer_videos_payload
+from app.services.maintenance import public_maintenance_snapshot
+from app.services.content_quality import evaluate_movie_ads_quality
 
 router = APIRouter(prefix="/api/v1", tags=["Discovery"])
-PUBLIC_OTT_STATES = ("available", "confirmed", "announced", "upcoming", "released")
 THEATRICAL_RELEASE_TYPES = ("2", "3", "limited theatrical", "theatrical")
 COMMENT_STATUSES = {"PENDING", "APPROVED", "HIDDEN", "REJECTED"}
+CORRECTION_CATEGORIES = {"WRONG_OTT_PLATFORM", "WRONG_OTT_DATE", "BROKEN_STREAMING_LINK", "INCORRECT_POSTER", "INCORRECT_METADATA", "OTHER"}
+
+
+class CorrectionSubmission(BaseModel):
+    category: str
+    message: str = Field(min_length=10, max_length=3000)
+    email: str | None = Field(default=None, max_length=320)
+
+    @field_validator("category")
+    @classmethod
+    def valid_category(cls, value):
+        normalized = value.strip().upper()
+        if normalized not in CORRECTION_CATEGORIES:
+            raise ValueError("Unsupported correction category")
+        return normalized
+
+
+def _published_articles(db: Session):
+    return db.query(EditorialArticle).filter(
+        EditorialArticle.status == "PUBLISHED",
+        EditorialArticle.reviewed_at.is_not(None),
+        EditorialArticle.published_at.is_not(None),
+    )
+
+
+def _article_payload(article, *, include_body=False):
+    payload = {key: getattr(article, key) for key in (
+        "slug", "title", "summary", "content_type", "author_name", "reviewed_at",
+        "published_at", "updated_at", "seo_title", "seo_description", "hero_image",
+        "is_indexable", "ads_eligible",
+    )}
+    if include_body:
+        payload["body"] = article.body
+    return payload
+
+
+@router.get("/maintenance")
+def maintenance_status(db: Session = Depends(get_db)):
+    """Return public, read-only maintenance status and recent history."""
+    return public_maintenance_snapshot(db)
 
 # Local search relevance.
 #
@@ -85,6 +138,27 @@ class CommentSubmission(BaseModel):
         if "@" not in value or value.startswith("@") or value.endswith("@"):
             raise ValueError("A valid email address is required")
         return value
+
+
+class CommunityRatingSubmission(BaseModel):
+    rating: float = Field(ge=1, le=10)
+
+    @field_validator("rating")
+    @classmethod
+    def half_point_increment(cls, value: float) -> float:
+        if abs(value * 2 - round(value * 2)) > 1e-9:
+            raise ValueError("Rating must use 0.5 increments")
+        return value
+
+
+def _community_rating_summary(db: Session, movie_id: int) -> dict:
+    average, count = db.query(
+        func.avg(CommunityRating.rating), func.count(CommunityRating.id)
+    ).filter(CommunityRating.movie_id == movie_id).one()
+    return {
+        "average": round(float(average), 1) if average is not None else None,
+        "count": int(count or 0),
+    }
 
 
 def _is_metadata_provider(value: str | None) -> bool:
@@ -127,12 +201,16 @@ def _platform_catalog(db: Session, *, public_only: bool = False) -> list[dict]:
         OttAvailability.provider_logo,
         OttAvailability.movie_id,
     )
+    query = query.filter(func.upper(OttAvailability.country) == "IN")
     if public_only:
-        query = query.filter(OttAvailability.status.in_(PUBLIC_OTT_STATES))
+        query = query.join(Movie, Movie.id == OttAvailability.movie_id).filter(
+            OttAvailability.status.in_(PUBLIC_OTT_STATES),
+            Movie.safety_public_visibility == "FULL",
+        )
     grouped: dict[str, dict] = {}
     for provider, logo, movie_id in query.all():
         canonical = normalize_platform(provider)
-        if not canonical:
+        if not canonical or not platform_slug(canonical):
             continue
         item = grouped.setdefault(
             canonical, {"name": canonical, "logo": None, "movie_ids": set()}
@@ -142,7 +220,7 @@ def _platform_catalog(db: Session, *, public_only: bool = False) -> list[dict]:
     return sorted(
         (
             {
-                "slug": item["name"].lower().replace(" ", "-"),
+                "slug": platform_slug(item["name"]),
                 "name": item["name"],
                 "logo": item["logo"],
                 "movie_count": len(item["movie_ids"]),
@@ -157,6 +235,8 @@ def _canonical_ott_rows(movie: Movie) -> list[OttAvailability]:
     """Collapse stored aliases at the read boundary without deleting history."""
     selected: dict[tuple[str, str, str], OttAvailability] = {}
     for row in movie.ott_availabilities:
+        if (row.country or "").upper() != "IN":
+            continue
         provider = normalize_platform(row.provider)
         if not provider:
             continue
@@ -340,7 +420,9 @@ def _ratings_payload(movie: Movie) -> list[dict]:
 
 
 def _movie_query(db: Session):
-    return db.query(Movie).options(
+    return db.query(Movie).filter(
+        Movie.safety_public_visibility == "FULL"
+    ).options(
         selectinload(Movie.genres),
         selectinload(Movie.languages),
         selectinload(Movie.ratings),
@@ -374,6 +456,49 @@ def _credit_match(role: str, person_value: str):
     )
 
 
+def _apply_language_filter(query, value: str | None):
+    try:
+        codes = language_filter_codes(value)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if codes:
+        query = query.filter(Movie.original_language.in_(codes))
+    return query
+
+
+def _language_counts(query) -> dict[str, int]:
+    """Count distinct movies per global language tab within a query context."""
+    source = (
+        query.enable_eagerloads(False)
+        .order_by(None)
+        .with_entities(
+            Movie.id.label("movie_id"),
+            Movie.original_language.label("language"),
+        )
+        .distinct()
+        .subquery()
+    )
+    rows = (
+        query.session.query(source.c.language, func.count(source.c.movie_id))
+        .group_by(source.c.language)
+        .all()
+    )
+    raw = {code: int(count) for code, count in rows}
+    return {
+        "all": sum(raw.values()),
+        "indian": sum(raw.get(code, 0) for code in INDIAN_PRIMARY_LANGUAGE_CODES),
+        **{code: raw.get(code, 0) for code in SUPPORTED_PRIMARY_LANGUAGE_CODES},
+    }
+
+
+def _empty_language_counts() -> dict[str, int]:
+    return {
+        "all": 0,
+        "indian": 0,
+        **{code: 0 for code in SUPPORTED_PRIMARY_LANGUAGE_CODES},
+    }
+
+
 def _apply_filters(query, **values):
     q = values.get("q")
     if q:
@@ -403,13 +528,16 @@ def _apply_filters(query, **values):
                 keyword_match,
             )
         )
-    if values.get("language"):
-        # Public language filters and /languages/:code pages represent a movie's
-        # original language.  Spoken-language associations must not make a Hindi
-        # movie appear in the English browse results, for example.
-        query = query.filter(
-            Movie.original_language == values["language"].strip().lower()
-        )
+    # Public language filters and /languages/:code pages represent a movie's
+    # original language. Spoken-language associations must never affect them.
+    query = _apply_language_filter(query, values.get("language"))
+    language_region = (values.get("language_region") or "all").strip().lower()
+    if language_region == "indian":
+        query = query.filter(Movie.original_language.in_(INDIAN_LANGUAGE_CODES))
+    elif language_region == "international":
+        query = query.filter(Movie.original_language.in_(INTERNATIONAL_LANGUAGE_CODES))
+    elif language_region != "all":
+        raise HTTPException(422, "Unknown language region")
     if values.get("genre"):
         query = query.filter(Movie.genres.any(Genre.slug == values["genre"]))
     if values.get("year"):
@@ -439,7 +567,12 @@ def _apply_filters(query, **values):
     if values.get("platform"):
         _, aliases = _provider_aliases(query.session, values["platform"])
         query = query.filter(
-            Movie.ott_availabilities.any(OttAvailability.provider.in_(aliases))
+            Movie.ott_availabilities.any(
+                and_(
+                    OttAvailability.provider.in_(aliases),
+                    func.upper(OttAvailability.country) == "IN",
+                )
+            )
         )
     role_filters = {
         "actor": values.get("actor"),
@@ -476,6 +609,7 @@ def _ordering(sort: str):
         .where(
             OttAvailability.movie_id == Movie.id,
             OttAvailability.verification_status == "CONFIRMED",
+            func.upper(OttAvailability.country) == "IN",
         )
         .correlate(Movie)
         .scalar_subquery()
@@ -515,6 +649,7 @@ def _section_listing(query, section: str | None):
             Movie.ott_availabilities.any(
                 and_(
                     OttAvailability.verification_status == "CONFIRMED",
+                    func.upper(OttAvailability.country) == "IN",
                     OttAvailability.status.in_(("upcoming", "released")),
                     date_filter,
                 )
@@ -540,9 +675,58 @@ def _page(query, sort: str, page: int, page_size: int):
     }
 
 
+def _public_languages(db: Session) -> list[dict]:
+    """Return only non-empty public language pages in stable editorial order."""
+    enabled = tuple(item for item in LANGUAGE_CONFIG if item.enabled)
+    counts = dict(
+        db.query(Movie.original_language, func.count(Movie.id))
+        .filter(
+            Movie.original_language.in_(tuple(item.code for item in enabled)),
+            Movie.safety_public_visibility == "FULL",
+        )
+        .group_by(Movie.original_language)
+        .all()
+    )
+    items = []
+    for definition in enabled:
+        count = int(counts.get(definition.code) or 0)
+        if not count:
+            continue
+        items.append(
+            {
+                "code": definition.code,
+                "name": definition.display_name,
+                "slug": definition.slug,
+                "region": definition.group,
+                "group": definition.tier,
+                "enabled": definition.enabled,
+                "movie_count": count,
+            }
+        )
+    return items
+
+
+def _public_language_groups(db: Session) -> dict:
+    items = _public_languages(db)
+    return {
+        "indian": {
+            "primary": [item for item in items if item["region"] == "indian" and item["group"] == "primary"],
+            "more": [item for item in items if item["region"] == "indian" and item["group"] == "more"],
+        },
+        "international": {
+            "primary": [item for item in items if item["region"] == "international" and item["group"] == "primary"],
+            "more": [item for item in items if item["region"] == "international" and item["group"] == "more"],
+        },
+    }
+
+
 @router.get("/home")
-def home(db: Session = Depends(get_db)):
-    base = lambda: _movie_query(db)
+def home(language: str | None = None, db: Session = Depends(get_db)):
+    # One global selection controls every movie rail. Counts deliberately come
+    # from the unfiltered catalogue so users can see useful alternatives.
+    unfiltered = _movie_query(db)
+    language_counts = _language_counts(unfiltered)
+    base = lambda: _apply_language_filter(_movie_query(db), language)
     today = site_date()
     primary_date = _primary_release_date_query()
     ott_base = (
@@ -550,27 +734,18 @@ def home(db: Session = Depends(get_db)):
         .join(OttAvailability)
         .filter(
             OttAvailability.verification_status == "CONFIRMED",
+            func.upper(OttAvailability.country) == "IN",
             OttAvailability.status.in_(("upcoming", "released")),
         )
     )
-    language_sections = {}
-    for code, name in (
-        ("ml", "Malayalam"),
-        ("ta", "Tamil"),
-        ("te", "Telugu"),
-        ("hi", "Hindi"),
-        ("kn", "Kannada"),
-    ):
-        language_sections[code] = {
-            "name": name,
-            "items": cards(
-                base()
-                .filter(Movie.original_language == code)
-                .order_by(primary_date.desc())
-                .limit(12)
-                .all()
-            ),
-        }
+    verified_since = datetime.now(timezone.utc) - timedelta(days=7)
+    recent_verified_query = db.query(OttAvailability).join(Movie).filter(
+        Movie.safety_public_visibility == "FULL",
+        Movie.adult.is_(False),
+        OttAvailability.verification_status == "CONFIRMED",
+        OttAvailability.verified_at >= verified_since,
+    )
+    recently_verified = recent_verified_query.order_by(OttAvailability.verified_at.desc()).limit(6).all()
     return {
         "trending": cards(base().order_by(Movie.popularity.desc()).limit(12).all()),
         "popular": cards(
@@ -592,6 +767,13 @@ def home(db: Session = Depends(get_db)):
         "recently_added": cards(
             base().order_by(Movie.created_at.desc()).limit(12).all()
         ),
+        "highest_rated": cards(
+            base()
+            .filter(_imdb_rating_query().is_not(None))
+            .order_by(_imdb_rating_query().desc(), Movie.id.desc())
+            .limit(12)
+            .all()
+        ),
         "upcoming_ott": cards(
             ott_base()
             .filter(OttAvailability.ott_release_date > today)
@@ -606,23 +788,58 @@ def home(db: Session = Depends(get_db)):
             .limit(12)
             .all()
         ),
-        "language_sections": language_sections,
-        "languages": [
-            {"code": code, "name": value["name"]}
-            for code, value in language_sections.items()
-        ],
+        "language": normalize_language_code(language) or "all",
+        "language_counts": language_counts,
+        "language_groups": _public_language_groups(db),
+        "languages": _public_languages(db),
         "genres": [
             {"slug": item.slug, "name": item.name}
             for item in db.query(Genre).order_by(Genre.name).all()
         ],
         "platforms": _platform_catalog(db),
+        "verification_activity": {
+            "titles_updated": recent_verified_query.with_entities(func.count(func.distinct(OttAvailability.movie_id))).scalar() or 0,
+            "dates_confirmed": recent_verified_query.filter(OttAvailability.ott_release_date.is_not(None)).count(),
+            "titles": cards([row.movie for row in recently_verified]),
+            "period_days": 7,
+        },
+        "latest_updates": [_article_payload(row) for row in _published_articles(db).order_by(EditorialArticle.published_at.desc()).limit(3)],
     }
+
+
+@router.get("/updates")
+def updates(page: int = Query(1, ge=1), page_size: int = Query(12, ge=1, le=50), db: Session = Depends(get_db)):
+    query = _published_articles(db)
+    total = query.count()
+    rows = query.order_by(EditorialArticle.published_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return {"items": [_article_payload(row) for row in rows], "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/updates/{slug}")
+def update_article(slug: str, db: Session = Depends(get_db)):
+    article = _published_articles(db).filter(EditorialArticle.slug == slug).first()
+    if not article:
+        raise HTTPException(404, "Update not found")
+    return _article_payload(article, include_body=True)
+
+
+@router.post("/movies/{movie_id}/corrections", status_code=201)
+def submit_movie_correction(movie_id: int, payload: CorrectionSubmission, request: Request, db: Session = Depends(get_db)):
+    limit(request, "movie-correction", 5, 3600, identity=movie_id)
+    exists_movie = db.query(Movie.id).filter(Movie.id == movie_id, Movie.safety_public_visibility != "HIDDEN").first()
+    if not exists_movie:
+        raise HTTPException(404, "Movie not found")
+    item = MovieCorrection(movie_id=movie_id, category=payload.category, message=payload.message.strip(), email=(payload.email or "").strip() or None)
+    db.add(item)
+    db.commit()
+    return {"status": "received", "reference": item.id}
 
 
 @router.get("/discover")
 def discover(
     q: str | None = Query(None, max_length=200),
     language: str | None = None,
+    language_region: str = Query("all", pattern="^(indian|international|all)$"),
     genre: str | None = None,
     person: int | None = None,
     role: str | None = None,
@@ -642,7 +859,7 @@ def discover(
     date_to: date | None = None,
     section: str | None = Query(
         None,
-        pattern="^(popular|latest-theatrical|upcoming-theatrical|recently-added|upcoming-ott|recent-ott|language)$",
+        pattern="^(popular|latest-theatrical|upcoming-theatrical|recently-added|highest-rated|upcoming-ott|recent-ott|language)$",
     ),
     sort: str = "latest",
     page: int = Query(1, ge=1),
@@ -651,10 +868,9 @@ def discover(
 ):
     if date_from and date_to and date_from > date_to:
         raise HTTPException(422, "start date must be on or before end date")
-    query = _apply_filters(
+    context_query = _apply_filters(
         _movie_query(db),
         q=q,
-        language=language,
         genre=genre,
         person=person,
         role=role,
@@ -673,7 +889,13 @@ def discover(
         date_from=date_from,
         date_to=date_to,
     )
-    query = _section_listing(query, section)
+    context_query = _section_listing(context_query, section)
+    language_counts = _language_counts(context_query)
+    query = _apply_filters(
+        context_query,
+        language=language,
+        language_region=language_region,
+    )
     result = _page(query, sort, page, page_size)
     result["section"] = section
     result["filters"] = {
@@ -681,10 +903,9 @@ def discover(
             {"slug": x.slug, "name": x.name}
             for x in db.query(Genre).order_by(Genre.name)
         ],
-        "languages": [
-            {"code": x.iso_639_1, "name": x.english_name}
-            for x in db.query(Language).order_by(Language.english_name)
-        ],
+        "languages": _public_languages(db),
+        "language_groups": _public_language_groups(db),
+        "language_counts": language_counts,
         "platforms": [item["name"] for item in _platform_catalog(db)],
         "roles": list(ROLE_ALIASES),
     }
@@ -693,14 +914,8 @@ def discover(
 
 @router.get("/languages")
 def public_languages(db: Session = Depends(get_db)):
-    """Return stored language metadata with broad ISO fallbacks for public forms."""
-    values = {code: name for code, name in LANGUAGE_NAMES.items()}
-    for item in db.query(Language).all():
-        values[item.iso_639_1] = language_name(item.iso_639_1, item.english_name)
-    return [
-        {"code": code, "name": name}
-        for code, name in sorted(values.items(), key=lambda item: item[1])
-    ]
+    """Return existing public movie languages with stable region metadata."""
+    return _public_languages(db)
 
 
 def _fold_search_term(raw_value: str) -> str:
@@ -713,91 +928,199 @@ def _escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _movie_relevance_case(term: str, fuzzy: bool):
-    """Deterministic relevance-tiers CASE for local movie search.
+def _movie_search_subquery(term: str, fuzzy: bool):
+    """Build a UNION ALL subquery that returns one row per candidate movie:
+    (movie_id, relevance_score, match_tier, match_source).
 
-    Order: exact title > exact original title > exact alternative title >
-    title prefix > original prefix > alternative prefix > title substring >
-    original substring > trigram fuzzy (title/original/alternative gated by
-    SEARCH_FUZZY_THRESHOLD).  First matched tier wins.  Alternative-title
-    matches that are neither exact nor prefix only count through the trigram
-    gate, so movies whose alternative titles merely share a word are excluded.
+    match_source disambiguates the origin of the winning branch so the quality
+    gate can prefer canonical matches over alternative-title accidents.
+
+    Tier order (first match wins, highest score):
+      10000  exact title            (source: 'title')
+       9500  exact original title    (source: 'original')
+       9000  exact alternative title (source: 'alt')
+       8000  title prefix            (source: 'title')
+       7500  original title prefix   (source: 'original')
+       5000  trigram fuzzy           (source: 'title'/'original'/'alt')
+
+    Match-tier values:
+      'exact'  - exact title/orig/alt match (score >= 9000)
+      'prefix' - prefix match               (score >= 7500)
+      'fuzzy'  - trigram fuzzy match         (score < 7500)
     """
     lower_term = term.lower()
     title_l = func.lower(Movie.title)
     orig_l = func.lower(func.coalesce(Movie.original_title, ""))
     prefix = _escape_like(lower_term) + "%"
-    alt_exact = exists(
-        select(1).where(
-            and_(
-                AlternativeTitle.movie_id == Movie.id,
-                func.lower(AlternativeTitle.title) == lower_term,
-            )
-        )
-    )
-    alt_prefix = exists(
-        select(1).where(
-            and_(
-                AlternativeTitle.movie_id == Movie.id,
-                func.lower(AlternativeTitle.title).like(prefix, escape="\\"),
-            )
-        )
-    )
+
+    # Each branch returns (movie_id, score, tier, source)
     branches = [
-        (title_l == lower_term, 10000),
-        (orig_l == lower_term, 9500),
-        (alt_exact, 9000),
-        (title_l.like(prefix, escape="\\"), 8000),
-        (orig_l.like(prefix, escape="\\"), 7500),
-        (alt_prefix, 7000),
+        select(
+            Movie.id.label('movie_id'),
+            literal(10000).label('relevance_score'),
+            literal('exact').label('match_tier'),
+            literal('title').label('match_source'),
+        ).where(title_l == lower_term),
+        select(
+            Movie.id.label('movie_id'),
+            literal(9500).label('relevance_score'),
+            literal('exact').label('match_tier'),
+            literal('original').label('match_source'),
+        ).where(orig_l == lower_term),
+        select(
+            Movie.id.label('movie_id'),
+            literal(9000).label('relevance_score'),
+            literal('exact').label('match_tier'),
+            literal('alt').label('match_source'),
+        )
+        .join(AlternativeTitle, AlternativeTitle.movie_id == Movie.id)
+        .where(func.lower(AlternativeTitle.title) == lower_term),
+        select(
+            Movie.id.label('movie_id'),
+            literal(8000).label('relevance_score'),
+            literal('prefix').label('match_tier'),
+            literal('title').label('match_source'),
+        ).where(title_l.like(prefix, escape="\\")),
+        select(
+            Movie.id.label('movie_id'),
+            literal(7500).label('relevance_score'),
+            literal('prefix').label('match_tier'),
+            literal('original').label('match_source'),
+        ).where(orig_l.like(prefix, escape="\\")),
     ]
+
     if fuzzy:
         title_sim = func.similarity(title_l, lower_term)
         orig_sim = func.similarity(orig_l, lower_term)
-        alt_sim = (
+        # Piecewise scoring for canonical fuzzy (title/original):
+        #   High-similarity canonical fuzzy (>0.65) gets a boost in the 9100-9275
+        #   range so it outranks a weak alternative-title exact match (9000) when
+        #   no canonical exact/prefix match exists (e.g. query "avesham" should
+        #   rank Aavesham above Vedalam whose alt-title is "Avesham"). The boost
+        #   stays below original-exact (9500) so it can never hijack a clean
+        #   canonical exact match.
+        #   sim > 0.65  → 9100 + (sim - 0.65) * 500   (9100-9275)
+        #   0.4 <= sim <= 0.65 → sim * 4990            (1996-3244)
+        # Alt fuzzy always uses: sim * 4990
+        canonical_fuzzy_score = case(
+            (title_sim > 0.65, 9100 + (title_sim - 0.65) * 500),
+            else_=title_sim * 4990,
+        )
+        canonical_fuzzy_score_orig = case(
+            (orig_sim > 0.65, 9100 + (orig_sim - 0.65) * 500),
+            else_=orig_sim * 4990,
+        )
+        branches.append(
             select(
-                func.max(func.similarity(func.lower(AlternativeTitle.title), lower_term))
+                Movie.id.label('movie_id'),
+                cast(canonical_fuzzy_score, Integer).label('relevance_score'),
+                literal('fuzzy').label('match_tier'),
+                literal('title').label('match_source'),
             )
-            .where(AlternativeTitle.movie_id == Movie.id)
-            .correlate(Movie)
-            .scalar_subquery()
+            .where(title_sim >= SEARCH_FUZZY_THRESHOLD)
+            .where(title_l != lower_term)
+            .where(~title_l.like(prefix, escape="\\"))
         )
-        branches.extend(
-            [
-                (title_sim >= SEARCH_FUZZY_THRESHOLD, cast(title_sim * 4990, Integer)),
-                (
-                    orig_sim >= SEARCH_FUZZY_THRESHOLD,
-                    cast(orig_sim * 4990, Integer),
-                ),
-                (alt_sim >= SEARCH_FUZZY_THRESHOLD, cast(alt_sim * 4990, Integer)),
-            ]
+        branches.append(
+            select(
+                Movie.id.label('movie_id'),
+                cast(canonical_fuzzy_score_orig, Integer).label('relevance_score'),
+                literal('fuzzy').label('match_tier'),
+                literal('original').label('match_source'),
+            )
+            .where(orig_sim >= SEARCH_FUZZY_THRESHOLD)
+            .where(orig_l != lower_term)
+            .where(~orig_l.like(prefix, escape="\\"))
         )
-    return case(*branches, else_=0)
+        branches.append(
+            select(
+                Movie.id.label('movie_id'),
+                cast(func.max(func.similarity(func.lower(AlternativeTitle.title), lower_term)) * 4990, Integer).label('relevance_score'),
+                literal('fuzzy').label('match_tier'),
+                literal('alt').label('match_source'),
+            )
+            .join(AlternativeTitle, AlternativeTitle.movie_id == Movie.id)
+            .where(func.lower(AlternativeTitle.title).op("%")(lower_term))
+            .having(func.max(func.similarity(func.lower(AlternativeTitle.title), lower_term)) >= SEARCH_FUZZY_THRESHOLD)
+            .group_by(Movie.id)
+        )
+
+    union_sq = union_all(*branches).subquery()
+
+    # Deduplicate so each movie keeps the match_tier and match_source that
+    # belong to its *winning* score, not an aggregate of unrelated fields.
+    # We use ROW_NUMBER() partitioned by movie_id, ordered by score DESC then
+    # tier DESC, then keep only rn=1.  This pattern works in both PostgreSQL
+    # (DISTINCT ON) and SQLite (which does not support DISTINCT ON).
+    row_num = (
+        func.row_number()
+        .over(
+            partition_by=union_sq.c.movie_id,
+            order_by=[union_sq.c.relevance_score.desc(), union_sq.c.match_tier.desc()],
+        )
+        .label("rn")
+    )
+    ranked = (
+        select(
+            union_sq.c.movie_id,
+            union_sq.c.relevance_score,
+            union_sq.c.match_tier,
+            union_sq.c.match_source,
+            row_num,
+        )
+        .subquery()
+    )
+    dedup = (
+        select(
+            ranked.c.movie_id,
+            ranked.c.relevance_score,
+            ranked.c.match_tier,
+            ranked.c.match_source,
+        )
+        .where(ranked.c.rn == 1)
+        .subquery()
+    )
+    return dedup
 
 
-def _person_relevance_case(term: str, fuzzy: bool):
-    """Deterministic relevance-tiers CASE for person search."""
+def _person_search_subquery(term: str, fuzzy: bool):
+    """Build a UNION ALL subquery returning (person_id, relevance_score)."""
     lower_term = term.lower()
     name_l = func.lower(Person.name)
     prefix = _escape_like(lower_term) + "%"
+
     branches = [
-        (name_l == lower_term, 10000),
-        (name_l.like(prefix, escape="\\"), 8000),
+        select(Person.id.label('person_id'), literal(10000).label('relevance_score')).where(name_l == lower_term),
+        select(Person.id.label('person_id'), literal(8000).label('relevance_score')).where(name_l.like(prefix, escape="\\")),
     ]
     if fuzzy:
         name_sim = func.similarity(name_l, lower_term)
-        branches.extend(
-            [
-                (name_sim >= SEARCH_FUZZY_THRESHOLD, cast(name_sim * 4990, Integer)),
-            ]
+        branches.append(
+            select(
+                Person.id.label('person_id'),
+                cast(name_sim * 4990, Integer).label('relevance_score'),
+            )
+            .where(name_sim >= SEARCH_FUZZY_THRESHOLD)
         )
-    return case(*branches, else_=0)
+
+    union_sq = union_all(*branches).subquery()
+    dedup = (
+        select(
+            union_sq.c.person_id,
+            func.max(union_sq.c.relevance_score).label("relevance_score"),
+        )
+        .group_by(union_sq.c.person_id)
+        .subquery()
+    )
+    return dedup
 
 
 @router.get("/search")
 def global_search(
     request: Request,
     q: str = Query("", max_length=200),
+    language: str | None = None,
+    language_region: str = Query("all", pattern="^(indian|international|all)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=50),
     db: Session = Depends(get_db),
@@ -807,6 +1130,11 @@ def global_search(
         "people": {"items": [], "total": 0},
         "page": page,
         "page_size": page_size,
+        "filters": {
+            "languages": _public_languages(db),
+            "language_groups": _public_language_groups(db),
+            "language_counts": _empty_language_counts(),
+        },
     }
     term = _fold_search_term(q)
     if not term:
@@ -814,12 +1142,38 @@ def global_search(
     limit(request, "global-search", 120, 60)
     fuzzy = len(term) >= SEARCH_MIN_TRIGRAM_LENGTH
 
-    movie_score = _movie_relevance_case(term, fuzzy)
-    movie_query = _movie_query(db).filter(movie_score > 0)
+    movie_sq = _movie_search_subquery(term, fuzzy)
+    base_movie_query = _movie_query(db).join(
+        movie_sq, movie_sq.c.movie_id == Movie.id
+    )
+    if fuzzy:
+        # Comparative quality gate: suppress fuzzy-only candidates only when a
+        # genuinely strong (canonical-title exact/prefix) candidate exists.
+        # An alternative-title exact match alone does not justify suppressing a
+        # high-similarity canonical fuzzy match (e.g. query "avesham" should rank
+        # Aavesham above Vedalam whose alt-title happens to be "Avesham").
+        canonical_strong_count = (
+            db.query(func.count())
+            .select_from(movie_sq)
+            .filter(
+                movie_sq.c.match_tier.in_(['exact', 'prefix']),
+                movie_sq.c.match_source.in_(['title', 'original']),
+            )
+            .scalar()
+        )
+        if canonical_strong_count > 0:
+            base_movie_query = base_movie_query.filter(movie_sq.c.match_tier != 'fuzzy')
+    language_counts = _language_counts(base_movie_query)
+    movie_context_query = _apply_filters(
+        base_movie_query,
+        language=language,
+        language_region=language_region,
+    )
+    movie_query = movie_context_query.with_entities(Movie)
     movie_total = movie_query.count()
     movies = (
-        movie_query.order_by(
-            movie_score.desc(),
+        movie_context_query.order_by(
+            movie_sq.c.relevance_score.desc(),
             Movie.popularity.desc(),
             Movie.id.desc(),
         )
@@ -828,14 +1182,12 @@ def global_search(
         .all()
     )
 
-    person_score = _person_relevance_case(term, fuzzy)
-    people_query = db.query(Person).filter(person_score > 0)
-    people_total = people_query.count()
+    person_sq = _person_search_subquery(term, fuzzy)
+    people_total = db.query(func.count()).select_from(person_sq).scalar()
     people = (
-        people_query.order_by(
-            person_score.desc(),
-            Person.name.asc(),
-        )
+        db.query(Person)
+        .join(person_sq, person_sq.c.person_id == Person.id)
+        .order_by(person_sq.c.relevance_score.desc(), Person.name.asc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
@@ -856,14 +1208,24 @@ def global_search(
         },
         "page": page,
         "page_size": page_size,
+        "filters": {
+            "languages": _public_languages(db),
+            "language_groups": _public_language_groups(db),
+            "language_counts": language_counts,
+        },
     }
 
 
 @router.get("/ott")
-def ott_landing(db: Session = Depends(get_db)):
+def ott_landing(language: str | None = None, db: Session = Depends(get_db)):
     today = site_date()
-    valid = (OttAvailability.status.in_(PUBLIC_OTT_STATES),)
-    movie_query = _movie_query(db).join(OttAvailability).filter(*valid)
+    valid = (
+        OttAvailability.status.in_(PUBLIC_OTT_STATES),
+        func.upper(OttAvailability.country) == "IN",
+    )
+    movie_context_query = _movie_query(db).join(OttAvailability).filter(*valid)
+    language_counts = _language_counts(movie_context_query)
+    movie_query = _apply_language_filter(movie_context_query, language)
     confirmed_query = movie_query.filter(
         OttAvailability.verification_status == "CONFIRMED"
     )
@@ -884,6 +1246,9 @@ def ott_landing(db: Session = Depends(get_db)):
         "confirmed": cards(
             confirmed_query.order_by(OttAvailability.updated_at.desc()).limit(24).all()
         ),
+        "language": normalize_language_code(language) or "all",
+        "languages": _public_languages(db),
+        "language_counts": language_counts,
     }
 
 
@@ -891,14 +1256,22 @@ def ott_landing(db: Session = Depends(get_db)):
 def ott_platform(
     platform: str,
     sort: str = "ott-release",
+    language: str | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(24, ge=1, le=100),
     db: Session = Depends(get_db),
 ):
     canonical, aliases = _provider_aliases(db, platform)
-    query = _movie_query(db).filter(
-        Movie.ott_availabilities.any(OttAvailability.provider.in_(aliases))
+    context_query = _movie_query(db).filter(
+        Movie.ott_availabilities.any(
+            and_(
+                OttAvailability.provider.in_(aliases),
+                func.upper(OttAvailability.country) == "IN",
+            )
+        )
     )
+    language_counts = _language_counts(context_query)
+    query = _apply_language_filter(context_query, language)
     result = _page(query, sort, page, page_size)
     result.update(
         {
@@ -906,6 +1279,9 @@ def ott_platform(
             "upcoming": [],
             "recent": [],
             "available": result["items"],
+            "language": normalize_language_code(language) or "all",
+            "languages": _public_languages(db),
+            "language_counts": language_counts,
         }
     )
     today = site_date()
@@ -913,6 +1289,7 @@ def ott_platform(
         query.join(OttAvailability)
         .filter(
             OttAvailability.provider.in_(aliases),
+            func.upper(OttAvailability.country) == "IN",
             OttAvailability.verification_status == "CONFIRMED",
             OttAvailability.ott_release_date > today,
         )
@@ -924,6 +1301,7 @@ def ott_platform(
         query.join(OttAvailability)
         .filter(
             OttAvailability.provider.in_(aliases),
+            func.upper(OttAvailability.country) == "IN",
             OttAvailability.verification_status == "CONFIRMED",
             OttAvailability.ott_release_date <= today,
         )
@@ -942,6 +1320,8 @@ def person_detail(
     role: str | None = None,
     db: Session = Depends(get_db),
 ):
+    from app.seo import person_is_indexable
+
     person = db.get(Person, person_id)
     if not person:
         raise HTTPException(404, "Person not found")
@@ -949,6 +1329,7 @@ def person_detail(
         db.query(MovieCredit)
         .filter(MovieCredit.person_id == person_id)
         .join(Movie)
+        .filter(Movie.safety_public_visibility == "FULL")
         .options(
             selectinload(MovieCredit.movie).selectinload(Movie.genres),
             selectinload(MovieCredit.movie).selectinload(Movie.languages),
@@ -979,6 +1360,7 @@ def person_detail(
         "display_id": person.tmdb_id,
         "profile_path": person.profile_path,
         "department": person.known_for_department,
+        "seo_indexable": person_is_indexable(db, person_id),
         "biography": person.biography,
         "birthday": person.birthday,
         "place_of_birth": person.place_of_birth,
@@ -1013,6 +1395,7 @@ def person_detail(
 def calendar(
     period: str,
     month: str | None = Query(None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    language: str | None = None,
     db: Session = Depends(get_db),
 ):
     today = site_date()
@@ -1042,7 +1425,8 @@ def calendar(
         )
     else:
         start, end = ranges[period]
-    release_rows = (
+    normalized_language = normalize_language_code(language) or "all"
+    release_context_query = (
         db.query(MovieReleaseDate)
         .join(Movie)
         .options(
@@ -1054,14 +1438,18 @@ def calendar(
             selectinload(MovieReleaseDate.movie).selectinload(Movie.ott_availabilities),
         )
         .filter(
+            Movie.safety_public_visibility == "FULL",
             Movie.adult.is_(False),
             MovieReleaseDate.release_date >= start,
             MovieReleaseDate.release_date < end,
             func.lower(MovieReleaseDate.release_type).in_(THEATRICAL_RELEASE_TYPES),
         )
-        .order_by(MovieReleaseDate.release_date, MovieReleaseDate.country.desc())
-        .all()
     )
+    theatrical_language_counts = _language_counts(release_context_query)
+    release_query = _apply_language_filter(release_context_query, language)
+    release_rows = release_query.order_by(
+        MovieReleaseDate.release_date, MovieReleaseDate.country.desc()
+    ).all()
     candidate_movies = {}
     for item in release_rows:
         candidate_movies[item.movie_id] = item.movie
@@ -1090,7 +1478,7 @@ def calendar(
             }
         )
     theatrical.sort(key=lambda value: (value["release_date"], value["id"]))
-    availability_rows = (
+    ott_context_query = (
         db.query(Movie, OttAvailability)
         .options(
             selectinload(Movie.genres),
@@ -1100,16 +1488,24 @@ def calendar(
         )
         .join(OttAvailability)
         .filter(
+            Movie.safety_public_visibility == "FULL",
             Movie.adult.is_(False),
             OttAvailability.ott_release_date >= start,
             OttAvailability.ott_release_date < end,
+            # A stored OTT date is the calendar source of truth. Its workflow,
+            # verification, source, confidence, and enrichment state are not
+            # calendar eligibility criteria.
         )
-        .order_by(
+    )
+    ott_language_counts = _language_counts(ott_context_query)
+    ott_query = _apply_language_filter(ott_context_query, language)
+    availability_rows = (
+        ott_query.order_by(
             OttAvailability.ott_release_date, Movie.title, OttAvailability.provider
         )
         .all()
     )
-    evidence_rows = (
+    evidence_query = _apply_language_filter(
         db.query(Movie, OttEvidence)
         .join(OttEvidence)
         .options(
@@ -1119,14 +1515,15 @@ def calendar(
             selectinload(Movie.external_ids),
         )
         .filter(
+            Movie.safety_public_visibility == "FULL",
             Movie.adult.is_(False),
             OttEvidence.release_date >= start,
             OttEvidence.release_date < end,
             OttEvidence.rejected_at.is_(None),
-        )
-        .all()
+        ),
+        language,
     )
-    source_rows = (
+    source_query = _apply_language_filter(
         db.query(Movie, OttSourceRelease)
         .join(OttSourceRelease, OttSourceRelease.matched_movie_id == Movie.id)
         .options(
@@ -1136,13 +1533,14 @@ def calendar(
             selectinload(Movie.external_ids),
         )
         .filter(
+            Movie.safety_public_visibility == "FULL",
             Movie.adult.is_(False),
             OttSourceRelease.release_date >= start,
             OttSourceRelease.release_date < end,
-        )
-        .all()
+        ),
+        language,
     )
-    digital_rows = (
+    release_date_query = _apply_language_filter(
         db.query(Movie, MovieReleaseDate)
         .join(MovieReleaseDate)
         .options(
@@ -1152,12 +1550,13 @@ def calendar(
             selectinload(Movie.external_ids),
         )
         .filter(
+            Movie.safety_public_visibility == "FULL",
             Movie.adult.is_(False),
             MovieReleaseDate.release_date >= start,
             MovieReleaseDate.release_date < end,
             func.lower(MovieReleaseDate.release_type).in_(("4", "digital", "ott", "streaming")),
-        )
-        .all()
+        ),
+        language,
     )
     ott_rows = [
         (movie, row.provider, row.ott_release_date, row.country, row.provider_logo)
@@ -1165,25 +1564,26 @@ def calendar(
     ]
     ott_rows.extend(
         (movie, row.platform, row.release_date, row.country, None)
-        for movie, row in evidence_rows
+        for movie, row in evidence_query.all()
     )
     ott_rows.extend(
         (movie, row.platform, row.release_date, None, None)
-        for movie, row in source_rows
+        for movie, row in source_query.all()
     )
     ott_rows.extend(
         (movie, None, row.release_date, row.country, None)
-        for movie, row in digital_rows
+        for movie, row in release_date_query.all()
     )
-    # One card per movie and release date. Platform/date relationships are
-    # deduplicated while distinct dates remain separate calendar entries.
+    # One card per local movie and OTT release date. Multiple confirmed
+    # providers on the same date are combined without moving later releases
+    # into an earlier date group.
     grouped = {}
     for movie, provider, release_date, country, provider_logo in ott_rows:
-        key = (movie_identity(movie), release_date)
+        key = (movie.id, release_date)
         item = grouped.setdefault(key, _card(movie) | {
             "release_date": release_date,
             "ott_release_date": release_date,
-            "ott_platform_slug": normalize_platform(provider).lower().replace(" ", "-") if provider else None,
+            "ott_platform_slug": platform_slug(provider) if provider else None,
             "ott_platform_logo": provider_logo,
             "ott_releases": [],
         })
@@ -1206,12 +1606,24 @@ def calendar(
     for item in ott:
         item["ott_platforms"] = sorted({x["platform"] for x in item["ott_releases"]})
         item["ott_platform"] = ", ".join(item["ott_platforms"])
-    ott.sort(key=lambda value: (value["ott_release_date"], value["title"].casefold(), value["id"]))
+    ott.sort(
+        key=lambda value: (
+            value["ott_release_date"],
+            value["title"].casefold(),
+            value["id"],
+        )
+    )
     return {
         "period": period,
         "today": today,
         "start_date": start,
         "end_date": end - timedelta(days=1),
+        "language": normalized_language,
+        "languages": _public_languages(db),
+        "language_counts": {
+            "theatrical": theatrical_language_counts,
+            "ott": ott_language_counts,
+        },
         "theatrical": {"items": theatrical, "total": len(theatrical)},
         "ott": {"items": ott, "total": len(ott)},
     }
@@ -1230,6 +1642,7 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
             selectinload(Movie.trailers),
         )
         .filter(Movie.id == movie_id)
+        .filter(Movie.safety_public_visibility != "HIDDEN")
         .first()
     )
     if not movie:
@@ -1293,7 +1706,7 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
     ott_summary = best_canonical_ott(movie)
     confirmed_ott = confirmed_canonical_ott(movie)
     platforms = sorted({normalize_platform(x.provider) for x in movie.ott_availabilities
-                        if x.status in PUBLIC_OTT_STATES and normalize_platform(x.provider)})
+                          if x.status in PUBLIC_OTT_STATES and normalize_platform(x.provider)})
     grouped_crew = {}
     for credit in credits:
         normalized = normalize_role(credit.job or credit.department)
@@ -1442,6 +1855,7 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
         ],
         "release_groups": grouped_releases,
         "ratings": _ratings_payload(movie),
+        "community_rating": _community_rating_summary(db, movie_id),
         "keywords": [x.name for x in keywords],
         "alternative_titles": [
             {"title": x.title, "country": x.country, "type": x.title_type}
@@ -1461,12 +1875,86 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
         ),
         "videos": trailer_videos_payload(movie),
     }
+    primary_trailer = next((item for item in movie.trailers if item.is_primary and not item.is_unavailable), None)
+    quality = evaluate_movie_ads_quality(movie, credits=credits, releases=releases, trailer=primary_trailer)
+    timeline = []
+    labels = {"2": "Limited theatrical release", "3": "Theatrical release", "4": "Digital release", "theatrical": "Theatrical release", "digital": "Digital release", "ott": "OTT release", "streaming": "OTT release"}
+    for row in releases:
+        timeline.append({"date": row.release_date, "label": labels.get(row.release_type.lower(), f"{row.release_type} release"), "kind": "release"})
+    for row in _canonical_ott_rows(movie):
+        if row.ott_release_date:
+            timeline.append({"date": row.ott_release_date, "label": "OTT release", "kind": "ott"})
+    timeline.sort(key=lambda item: str(item["date"]))
+    payload["release_timeline"] = timeline
+    payload["ads"] = {"eligible": quality.eligible, "reason": quality.reason}
     # Public GET endpoints are deliberately read-only. Maintenance and admin
     # workflows own all repair scheduling.
     payload["repair_queued"] = False
     return payload
 
 
+@router.get("/movies/{movie_id}/community-rating")
+def community_rating(movie_id: int, db: Session = Depends(get_db)):
+    if not db.query(Movie.id).filter(
+        Movie.id == movie_id,
+        Movie.safety_public_visibility != "HIDDEN",
+    ).first():
+        raise HTTPException(404, "Movie not found")
+    return _community_rating_summary(db, movie_id)
+
+
+@router.get("/movies/{movie_id}/community-rating/mine")
+def my_community_rating(
+    movie_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    if not db.query(Movie.id).filter(
+        Movie.id == movie_id,
+        Movie.safety_public_visibility != "HIDDEN",
+    ).first():
+        raise HTTPException(404, "Movie not found")
+    rating = db.query(CommunityRating).filter_by(
+        user_id=user.id, movie_id=movie_id
+    ).first()
+    return {"rating": float(rating.rating) if rating else None}
+
+
+@router.put(
+    "/movies/{movie_id}/community-rating",
+    dependencies=[Depends(require_user_same_origin)],
+)
+def rate_movie(
+    movie_id: int,
+    payload: CommunityRatingSubmission,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_user),
+):
+    if not db.query(Movie.id).filter(
+        Movie.id == movie_id,
+        Movie.safety_public_visibility != "HIDDEN",
+    ).first():
+        raise HTTPException(404, "Movie not found")
+    rating = db.query(CommunityRating).filter_by(
+        user_id=user.id, movie_id=movie_id
+    ).first()
+    created = rating is None
+    if rating is None:
+        rating = CommunityRating(
+            user_id=user.id, movie_id=movie_id, rating=payload.rating
+        )
+        db.add(rating)
+    else:
+        rating.rating = payload.rating
+    db.commit()
+    return {
+        **_community_rating_summary(db, movie_id),
+        "user_rating": float(rating.rating),
+        "created": created,
+    }
+
+
+@router.get("/movies/{movie_id}/public-comments")
 @router.get("/movies/{movie_id}/comments")
 def movie_comments(
     movie_id: int,
@@ -1474,7 +1962,10 @@ def movie_comments(
     page_size: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
 ):
-    if not db.get(Movie, movie_id):
+    if not db.query(Movie.id).filter(
+        Movie.id == movie_id,
+        Movie.safety_public_visibility != "HIDDEN",
+    ).first():
         raise HTTPException(404, "Movie not found")
     query = db.query(MovieComment).filter_by(movie_id=movie_id, status="APPROVED")
     total = query.count()
@@ -1508,7 +1999,10 @@ def submit_movie_comment(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    if not db.get(Movie, movie_id):
+    if not db.query(Movie.id).filter(
+        Movie.id == movie_id,
+        Movie.safety_public_visibility != "HIDDEN",
+    ).first():
         raise HTTPException(404, "Movie not found")
     client_ip = request.client.host if request.client else "unknown"
     limit(request, "movie-comment", 5, 3600, identity=f"{client_ip}:{movie_id}")
