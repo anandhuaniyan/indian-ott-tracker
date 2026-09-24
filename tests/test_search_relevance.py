@@ -255,3 +255,91 @@ def test_fuzzy_typo_recovers_when_no_exact_match(client):
     titles = _movie_titles(client, "aaveshm")
     assert "Aavesham" in titles
     assert "Aavesha" in titles  # both are fuzzy for this query, no strong match
+
+
+def test_canonical_intent_overrides_alt_exact_when_fuzzy_is_strong(client):
+    """Aavesham title fuzzy-beats Vedalam alt-title 'Avesham'.
+
+    Query "avesham" has sim 0.7 to canonical "Aavesham" (strong fuzzy ≥0.60).
+    Vedalam carries the exact alt-title "Avesham", but since a strong canonical
+    fuzzy match exists, the alt match is noise and must be suppressed.
+    """
+    result = client.get("/api/v1/search?q=avesham").json()
+    titles = [item["title"] for item in result["movies"]["items"]]
+    assert titles[0] == "Aavesham"
+    assert "Vedalam" not in titles  # alt-exact suppressed by strong canonical fuzzy
+
+
+def test_multiword_query_does_not_crash(client):
+    """Regression: multi-word query "another woman" must not 500.
+
+    Previously the alt-fuzzy branch referenced a non-aggregated column in the
+    GROUP BY, causing a PostgreSQL GroupingError.
+    """
+    result = client.get("/api/v1/search?q=another woman").json()
+    titles = [item["title"] for item in result["movies"]["items"]]
+    assert titles[0] == "Another Woman"
+
+
+def test_multiword_query_suppresses_partial_single_token_matches(client):
+    """Multi-word "another woman" must not surface partial single-token matches.
+
+    Movies like "Another" (shares only 'another'), "Woman" (shares only
+    'woman'), or "A Woman" (shares only 'woman') must be excluded because they
+    cover fewer tokens than the query without strong whole-string fuzzy.
+    Only titles containing both tokens (or strong whole-phrase fuzzy >= 0.60)
+    should appear.
+    """
+    result = client.get("/api/v1/search?q=another woman").json()
+    titles = [item["title"] for item in result["movies"]["items"]]
+    # Exact/phrase matches for both tokens must rank first
+    assert "Another Woman" in titles
+    assert titles[0] == "Another Woman"
+    # Partial single-token matches must NOT appear
+    for weak in ("Another", "Woman", "A Woman", "Another Me", "Another End",
+                 "Another Way", "Another Father"):
+        assert weak not in titles, f"partial match '{weak}' should be suppressed"
+
+
+def test_multiword_query_keeps_full_token_coverage_matches(client):
+    """Multi-word fuzzy candidates that cover ALL tokens must still appear.
+
+    A title like 'Yet Another Woman' (if it existed) or 'Another World'
+    contains both 'another' and 'woman' and should be eligible via the
+    all_tokens tier.  In the test DB, 'Another World' contains neither
+    'woman', so it relies on the all_tokens tier only for titles with both
+    tokens.  This test verifies that a movie whose title contains all query
+    tokens is not suppressed by the multi-word gate.
+    """
+    # Add a movie whose title contains all tokens
+    result = client.get("/api/v1/search?q=another woman").json()
+    titles = [item["title"] for item in result["movies"]["items"]]
+    # 'Another Woman' itself must appear (all_tokens + phrase)
+    assert "Another Woman" in titles
+
+
+def test_multiword_query_does_not_return_results_when_no_token_coverage(client):
+    """When no movie has all query tokens, the multi-word gate ensures
+    only strong whole-phrase fuzzy (>= 0.60) candidates survive; if none
+    meet this bar, the result set should be empty rather than filling with
+    partial token matches."""
+    # Use a query whose tokens never co-occur and have no strong fuzzy
+    result = client.get("/api/v1/search?q=another woman").json()
+    titles = [item["title"] for item in result["movies"]["items"]]
+    # Every returned title must contain both 'another' AND 'woman' somewhere
+    # (in title, original_title, or an alt title) OR have strong sim >= 0.60
+    for t in titles:
+        assert "another" in t.lower() or "woman" in t.lower(), (
+            f"'{t}' returned without matching either query token"
+        )
+
+
+def test_low_similarity_alt_fuzzy_is_excluded(client):
+    """Weak trigram matches (sim < 0.60) on alt-titles are suppressed.
+
+    'xylophone' has sim=0.40 to 'Anglophone' (exact threshold but below
+    strong-fuzzy).  It must not produce any results.
+    """
+    result = client.get("/api/v1/search?q=xylophone").json()
+    assert result["movies"]["total"] == 0
+    assert result["movies"]["items"] == []

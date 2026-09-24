@@ -1147,6 +1147,24 @@ def _movie_search_subquery(term: str, fuzzy: bool):
             orig_token_count_expr = literal(1)
             alt_token_count_expr = literal(1)
 
+        # For multi-word queries, the canonical fuzzy branch must satisfy a
+        # token-coverage gate to avoid partial single-token matches.
+        # E.g. query "another woman" should not match title "Another" (sim 0.57
+        # via trigram but 0 of 2 tokens covered) or "Woman" (sim 0.43, 0/2).
+        # Allowed when: sim >= SEARCH_STRONG_FUZZY_THRESHOLD (whole-phrase fuzzy
+        # recovery) OR matched_tokens == token_count (all tokens present).
+        title_fuzzy_where_extra = literal(True)
+        orig_fuzzy_where_extra = literal(True)
+        if is_multiword:
+            title_fuzzy_where_extra = or_(
+                title_sim >= SEARCH_STRONG_FUZZY_THRESHOLD,
+                title_token_count_expr >= token_count,
+            )
+            orig_fuzzy_where_extra = or_(
+                orig_sim >= SEARCH_STRONG_FUZZY_THRESHOLD,
+                orig_token_count_expr >= token_count,
+            )
+
         branches.append(
             select(
                 Movie.id.label('movie_id'),
@@ -1160,6 +1178,7 @@ def _movie_search_subquery(term: str, fuzzy: bool):
             .where(title_sim >= SEARCH_FUZZY_THRESHOLD)
             .where(title_l != lower_term)
             .where(~title_l.like(prefix, escape="\\"))
+            .where(title_fuzzy_where_extra)
         )
         branches.append(
             select(
@@ -1174,6 +1193,7 @@ def _movie_search_subquery(term: str, fuzzy: bool):
             .where(orig_sim >= SEARCH_FUZZY_THRESHOLD)
             .where(orig_l != lower_term)
             .where(~orig_l.like(prefix, escape="\\"))
+            .where(orig_fuzzy_where_extra)
         )
         branches.append(
             select(
@@ -1182,14 +1202,14 @@ def _movie_search_subquery(term: str, fuzzy: bool):
                 literal('fuzzy').label('match_tier'),
                 literal('alt').label('match_source'),
                 literal(token_count).label('token_count'),
-                alt_token_count_expr.label('matched_tokens'),
-                literal(2).label('source_preference'),
-            )
-            .join(AlternativeTitle, AlternativeTitle.movie_id == Movie.id)
-            .where(func.lower(AlternativeTitle.title).op("%")(lower_term))
-            .having(func.max(func.similarity(func.lower(AlternativeTitle.title), lower_term)) >= SEARCH_FUZZY_THRESHOLD)
-            .group_by(Movie.id)
-        )
+                func.max(alt_token_count_expr).label('matched_tokens'),
+                 literal(2).label('source_preference'),
+             )
+             .join(AlternativeTitle, AlternativeTitle.movie_id == Movie.id)
+             .where(func.lower(AlternativeTitle.title).op("%")(lower_term))
+             .having(func.max(func.similarity(func.lower(AlternativeTitle.title), lower_term)) >= SEARCH_STRONG_FUZZY_THRESHOLD)
+              .group_by(Movie.id)
+          )
 
     union_sq = union_all(*branches).subquery()
 
@@ -1350,10 +1370,18 @@ def global_search(
                     movie_sq.c.match_tier != 'fuzzy'
                 )
 
-        # Tier B: Strong canonical fuzzy match suppresses weak alt-title-only
-        # exact matches (e.g. "avesham" → Aavesham fuzzy 9100 vs Vedalam
-        # alt-exact 9000).  When the best canonical fuzzy score is high, an
-        # alt-title exact match with a low relevance_score is noise.
+        # Tier B: Canonical intent override.
+        # When a strong canonical fuzzy match exists (sim >= STRONG threshold,
+        # score >= 7600) AND there is no canonical exact/prefix/phrase match,
+        # the query clearly intends the movie whose canonical title closely
+        # resembles the query.  Suppress alt-source matches from *different*
+        # movies — they are alias noise (e.g. "avesham" → Aavesham fuzzy 7700
+        # vs Vedalam alt-exact 9250).  Alt-title matches for the *same*
+        # canonical movie are preserved (legitimate alias).
+        #
+        # This tier does NOT fire when a canonical non-fuzzy match exists
+        # (e.g. "vaazha" → Vaazha exact 10000 + Alternate Veethi alt-exact 9250)
+        # because in that case the alt match is intentional.
         best_canonical_fuzzy = (
             db.query(func.max(movie_sq.c.relevance_score))
             .select_from(movie_sq)
@@ -1363,15 +1391,27 @@ def global_search(
             )
             .scalar()
         )
-        if best_canonical_fuzzy and best_canonical_fuzzy >= 7000:
-            # A strong canonical fuzzy match exists. Suppress alt-source
-            # exact matches whose score is lower — they represent weak
-            # alias noise, not intentional matches.
+        if canonical_strong_count == 0 and best_canonical_fuzzy and best_canonical_fuzzy >= 7599:
+            # Strong canonical fuzzy match exists (but no canonical non-fuzzy).
+            # Get the movie_id(s) that produced the best canonical fuzzy match.
+            canonical_fuzzy_movie_ids = (
+                db.query(movie_sq.c.movie_id)
+                .select_from(movie_sq)
+                .filter(
+                    movie_sq.c.match_tier == 'fuzzy',
+                    movie_sq.c.match_source.in_(['title', 'original']),
+                    movie_sq.c.relevance_score >= best_canonical_fuzzy - 149,
+                )
+                .distinct()
+                .all()
+            )
+            canonical_movie_ids = {row.movie_id for row in canonical_fuzzy_movie_ids}
+            # Suppress all alt-source matches for movies that did NOT
+            # produce the canonical fuzzy winner (exact, prefix, fuzzy alt alike).
             base_movie_query = base_movie_query.filter(
                 or_(
                     movie_sq.c.match_source != 'alt',
-                    movie_sq.c.match_tier != 'exact',
-                    movie_sq.c.relevance_score >= best_canonical_fuzzy,
+                    movie_sq.c.movie_id.in_(canonical_movie_ids),
                 )
             )
 
