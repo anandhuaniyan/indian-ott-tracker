@@ -114,6 +114,8 @@ def maintenance_status(db: Session = Depends(get_db)):
 # alternative-title word are intentionally excluded from normal search.
 SEARCH_FUZZY_THRESHOLD = 0.40
 SEARCH_MIN_TRIGRAM_LENGTH = 3
+SEARCH_STRONG_FUZZY_THRESHOLD = 0.60
+SEARCH_FUZZY_MAX_GAP = 0.15
 
 
 class CommentSubmission(BaseModel):
@@ -930,92 +932,230 @@ def _escape_like(term: str) -> str:
 
 def _movie_search_subquery(term: str, fuzzy: bool):
     """Build a UNION ALL subquery that returns one row per candidate movie:
-    (movie_id, relevance_score, match_tier, match_source).
+    (movie_id, relevance_score, match_tier, match_source, token_count,
+     matched_tokens, source_preference).
 
     match_source disambiguates the origin of the winning branch so the quality
     gate can prefer canonical matches over alternative-title accidents.
 
+    token_count / matched_tokens track how many query tokens are present in the
+    matched field — used for the multi-word quality gate.
+
+    source_preference orders canonical sources ahead of alternative titles:
+      title=0, original=1, alt=2.
+
     Tier order (first match wins, highest score):
       10000  exact title            (source: 'title')
        9500  exact original title    (source: 'original')
-       9000  exact alternative title (source: 'alt')
-       8000  title prefix            (source: 'title')
-       7500  original title prefix   (source: 'original')
-       5000  trigram fuzzy           (source: 'title'/'original'/'alt')
+       9250  exact alternative title (source: 'alt')
+       9000  title prefix            (source: 'title')
+       8750  original title prefix   (source: 'original')
+       8500  whole phrase            (source: 'title'/'original')
+       8000  all query tokens in same field (source: 'title'/'original'/'alt')
+       7000+ strong fuzzy (sim >= 0.60)     (source: 'title'/'original')
+       5000+ trigram fuzzy fallback          (source: 'title'/'original'/'alt')
 
     Match-tier values:
-      'exact'  - exact title/orig/alt match (score >= 9000)
-      'prefix' - prefix match               (score >= 7500)
-      'fuzzy'  - trigram fuzzy match         (score < 7500)
+      'exact'  - exact title/orig/alt match (score >= 9250)
+      'prefix' - prefix match               (score >= 8750)
+      'phrase' - full query phrase / substring of field (score = 8500)
+      'all_tokens' - all query tokens present in field (score = 8000)
+      'fuzzy'  - trigram fuzzy match         (score 5000+)
     """
     lower_term = term.lower()
     title_l = func.lower(Movie.title)
     orig_l = func.lower(func.coalesce(Movie.original_title, ""))
     prefix = _escape_like(lower_term) + "%"
 
-    # Each branch returns (movie_id, score, tier, source)
+    # Build query-token metadata for multi-word queries.
+    query_tokens = [t for t in lower_term.split() if t]
+    token_count = len(query_tokens)
+    is_multiword = token_count >= 2
+
+    # Each branch returns (movie_id, score, tier, source, token_count,
+    # matched_tokens, source_preference)
+    # token_count and matched_tokens are literal 0 for non-phrase branches;
+    # they are only meaningful for phrase / all_tokens / fuzzy branches where
+    # we can compute how many query tokens appear in the matched field.
     branches = [
         select(
             Movie.id.label('movie_id'),
             literal(10000).label('relevance_score'),
             literal('exact').label('match_tier'),
             literal('title').label('match_source'),
+            literal(token_count).label('token_count'),
+            literal(token_count).label('matched_tokens'),
+            literal(0).label('source_preference'),
         ).where(title_l == lower_term),
         select(
             Movie.id.label('movie_id'),
             literal(9500).label('relevance_score'),
             literal('exact').label('match_tier'),
             literal('original').label('match_source'),
+            literal(token_count).label('token_count'),
+            literal(token_count).label('matched_tokens'),
+            literal(1).label('source_preference'),
         ).where(orig_l == lower_term),
         select(
             Movie.id.label('movie_id'),
-            literal(9000).label('relevance_score'),
+            literal(9250).label('relevance_score'),
             literal('exact').label('match_tier'),
             literal('alt').label('match_source'),
+            literal(token_count).label('token_count'),
+            literal(token_count).label('matched_tokens'),
+            literal(2).label('source_preference'),
         )
         .join(AlternativeTitle, AlternativeTitle.movie_id == Movie.id)
         .where(func.lower(AlternativeTitle.title) == lower_term),
         select(
             Movie.id.label('movie_id'),
-            literal(8000).label('relevance_score'),
+            literal(9000).label('relevance_score'),
             literal('prefix').label('match_tier'),
             literal('title').label('match_source'),
+            literal(token_count).label('token_count'),
+            literal(token_count).label('matched_tokens'),
+            literal(0).label('source_preference'),
         ).where(title_l.like(prefix, escape="\\")),
         select(
             Movie.id.label('movie_id'),
-            literal(7500).label('relevance_score'),
+            literal(8750).label('relevance_score'),
             literal('prefix').label('match_tier'),
             literal('original').label('match_source'),
+            literal(token_count).label('token_count'),
+            literal(token_count).label('matched_tokens'),
+            literal(1).label('source_preference'),
         ).where(orig_l.like(prefix, escape="\\")),
     ]
+
+    if is_multiword and token_count >= 2:
+        # Phrase/contains: the full query appears as a substring of the field.
+        # token_count/matched_tokens = token_count (full coverage).
+        phrase_where = title_l.like(_escape_like(lower_term))
+        branches.append(
+            select(
+                Movie.id.label('movie_id'),
+                literal(8500).label('relevance_score'),
+                literal('phrase').label('match_tier'),
+                literal('title').label('match_source'),
+                literal(token_count).label('token_count'),
+                literal(token_count).label('matched_tokens'),
+                literal(0).label('source_preference'),
+            )
+            .where(phrase_where)
+            .where(title_l != lower_term)
+            .where(~title_l.like(prefix, escape="\\"))
+        )
+        phrase_where_orig = orig_l.like(_escape_like(lower_term))
+        branches.append(
+            select(
+                Movie.id.label('movie_id'),
+                literal(8500).label('relevance_score'),
+                literal('phrase').label('match_tier'),
+                literal('original').label('match_source'),
+                literal(token_count).label('token_count'),
+                literal(token_count).label('matched_tokens'),
+                literal(1).label('source_preference'),
+            )
+            .where(phrase_where_orig)
+            .where(orig_l != lower_term)
+            .where(~orig_l.like(prefix, escape="\\"))
+        )
+        # All-tokens-in-same-field: every query token appears in the field.
+        # We build a compound LIKE: title_l LIKE %token1% AND title_l LIKE %token2%
+        title_all_tokens_where = and_(
+            *[title_l.like(f"%{_escape_like(t)}%") for t in query_tokens]
+        )
+        branches.append(
+            select(
+                Movie.id.label('movie_id'),
+                literal(8000).label('relevance_score'),
+                literal('all_tokens').label('match_tier'),
+                literal('title').label('match_source'),
+                literal(token_count).label('token_count'),
+                literal(token_count).label('matched_tokens'),
+                literal(0).label('source_preference'),
+            )
+            .where(title_all_tokens_where)
+            .where(title_l != lower_term)
+            .where(~title_l.like(prefix, escape="\\"))
+            .where(~title_l.like(_escape_like(lower_term)))
+        )
+        orig_all_tokens_where = and_(
+            *[orig_l.like(f"%{_escape_like(t)}%") for t in query_tokens]
+        )
+        branches.append(
+            select(
+                Movie.id.label('movie_id'),
+                literal(8000).label('relevance_score'),
+                literal('all_tokens').label('match_tier'),
+                literal('original').label('match_source'),
+                literal(token_count).label('token_count'),
+                literal(token_count).label('matched_tokens'),
+                literal(1).label('source_preference'),
+            )
+            .where(orig_all_tokens_where)
+            .where(orig_l != lower_term)
+            .where(~orig_l.like(prefix, escape="\\"))
+            .where(~orig_l.like(_escape_like(lower_term)))
+        )
+        # All-tokens for alternative titles
+        alt_all_tokens_where = and_(
+            *[func.lower(AlternativeTitle.title).like(f"%{_escape_like(t)}%") for t in query_tokens]
+        )
+        branches.append(
+            select(
+                Movie.id.label('movie_id'),
+                literal(8000).label('relevance_score'),
+                literal('all_tokens').label('match_tier'),
+                literal('alt').label('match_source'),
+                literal(token_count).label('token_count'),
+                literal(token_count).label('matched_tokens'),
+                literal(2).label('source_preference'),
+            )
+            .join(AlternativeTitle, AlternativeTitle.movie_id == Movie.id)
+            .where(alt_all_tokens_where)
+            .where(func.lower(AlternativeTitle.title) != lower_term)
+        )
 
     if fuzzy:
         title_sim = func.similarity(title_l, lower_term)
         orig_sim = func.similarity(orig_l, lower_term)
         # Piecewise scoring for canonical fuzzy (title/original):
-        #   High-similarity canonical fuzzy (>0.65) gets a boost in the 9100-9275
-        #   range so it outranks a weak alternative-title exact match (9000) when
-        #   no canonical exact/prefix match exists (e.g. query "avesham" should
-        #   rank Aavesham above Vedalam whose alt-title is "Avesham"). The boost
-        #   stays below original-exact (9500) so it can never hijack a clean
-        #   canonical exact match.
-        #   sim > 0.65  → 9100 + (sim - 0.65) * 500   (9100-9275)
-        #   0.4 <= sim <= 0.65 → sim * 4990            (1996-3244)
-        # Alt fuzzy always uses: sim * 4990
+        #   Strong fuzzy (sim >= SEARCH_STRONG_FUZZY_THRESHOLD) → 7000 + sim*999
+        #     Range: 7599-7999, stays below all-token tier (8000).
+        #   Normal fuzzy (sim >= SEARCH_FUZZY_THRESHOLD but < STRONG) → 5000 + sim*1999
+        #     Range: 5799-6199.
+        #   Alt fuzzy always uses: sim * 4990 (stays lowest, max 4990).
         canonical_fuzzy_score = case(
-            (title_sim > 0.65, 9100 + (title_sim - 0.65) * 500),
-            else_=title_sim * 4990,
+            (title_sim >= SEARCH_STRONG_FUZZY_THRESHOLD, 7000 + title_sim * 999),
+            else_=5000 + title_sim * 1999,
         )
         canonical_fuzzy_score_orig = case(
-            (orig_sim > 0.65, 9100 + (orig_sim - 0.65) * 500),
-            else_=orig_sim * 4990,
+            (orig_sim >= SEARCH_STRONG_FUZZY_THRESHOLD, 7000 + orig_sim * 999),
+            else_=5000 + orig_sim * 1999,
         )
+        # For multi-word token coverage on fuzzy, compute how many tokens appear.
+        if is_multiword:
+            title_cases = [case((title_l.like(f"%{_escape_like(t)}%"), 1), else_=0) for t in query_tokens]
+            orig_cases = [case((orig_l.like(f"%{_escape_like(t)}%"), 1), else_=0) for t in query_tokens]
+            alt_cases = [case((func.lower(AlternativeTitle.title).like(f"%{_escape_like(t)}%"), 1), else_=0) for t in query_tokens]
+            title_token_count_expr = title_cases[0] + sum(title_cases[1:])
+            orig_token_count_expr = orig_cases[0] + sum(orig_cases[1:])
+            alt_token_count_expr = alt_cases[0] + sum(alt_cases[1:])
+        else:
+            title_token_count_expr = literal(1)
+            orig_token_count_expr = literal(1)
+            alt_token_count_expr = literal(1)
+
         branches.append(
             select(
                 Movie.id.label('movie_id'),
                 cast(canonical_fuzzy_score, Integer).label('relevance_score'),
                 literal('fuzzy').label('match_tier'),
                 literal('title').label('match_source'),
+                literal(token_count).label('token_count'),
+                title_token_count_expr.label('matched_tokens'),
+                literal(0).label('source_preference'),
             )
             .where(title_sim >= SEARCH_FUZZY_THRESHOLD)
             .where(title_l != lower_term)
@@ -1027,6 +1167,9 @@ def _movie_search_subquery(term: str, fuzzy: bool):
                 cast(canonical_fuzzy_score_orig, Integer).label('relevance_score'),
                 literal('fuzzy').label('match_tier'),
                 literal('original').label('match_source'),
+                literal(token_count).label('token_count'),
+                orig_token_count_expr.label('matched_tokens'),
+                literal(1).label('source_preference'),
             )
             .where(orig_sim >= SEARCH_FUZZY_THRESHOLD)
             .where(orig_l != lower_term)
@@ -1038,6 +1181,9 @@ def _movie_search_subquery(term: str, fuzzy: bool):
                 cast(func.max(func.similarity(func.lower(AlternativeTitle.title), lower_term)) * 4990, Integer).label('relevance_score'),
                 literal('fuzzy').label('match_tier'),
                 literal('alt').label('match_source'),
+                literal(token_count).label('token_count'),
+                alt_token_count_expr.label('matched_tokens'),
+                literal(2).label('source_preference'),
             )
             .join(AlternativeTitle, AlternativeTitle.movie_id == Movie.id)
             .where(func.lower(AlternativeTitle.title).op("%")(lower_term))
@@ -1050,13 +1196,16 @@ def _movie_search_subquery(term: str, fuzzy: bool):
     # Deduplicate so each movie keeps the match_tier and match_source that
     # belong to its *winning* score, not an aggregate of unrelated fields.
     # We use ROW_NUMBER() partitioned by movie_id, ordered by score DESC then
-    # tier DESC, then keep only rn=1.  This pattern works in both PostgreSQL
-    # (DISTINCT ON) and SQLite (which does not support DISTINCT ON).
+    # source_preference ASC (canonical preferred), then keep only rn=1.
     row_num = (
         func.row_number()
         .over(
             partition_by=union_sq.c.movie_id,
-            order_by=[union_sq.c.relevance_score.desc(), union_sq.c.match_tier.desc()],
+            order_by=[
+                union_sq.c.relevance_score.desc(),
+                union_sq.c.source_preference.asc(),
+                union_sq.c.match_tier.desc(),
+            ],
         )
         .label("rn")
     )
@@ -1066,6 +1215,9 @@ def _movie_search_subquery(term: str, fuzzy: bool):
             union_sq.c.relevance_score,
             union_sq.c.match_tier,
             union_sq.c.match_source,
+            union_sq.c.token_count,
+            union_sq.c.matched_tokens,
+            union_sq.c.source_preference,
             row_num,
         )
         .subquery()
@@ -1076,6 +1228,9 @@ def _movie_search_subquery(term: str, fuzzy: bool):
             ranked.c.relevance_score,
             ranked.c.match_tier,
             ranked.c.match_source,
+            ranked.c.token_count,
+            ranked.c.matched_tokens,
+            ranked.c.source_preference,
         )
         .where(ranked.c.rn == 1)
         .subquery()
@@ -1146,23 +1301,101 @@ def global_search(
     base_movie_query = _movie_query(db).join(
         movie_sq, movie_sq.c.movie_id == Movie.id
     )
+    query_tokens = [t for t in term.lower().split() if t]
+    is_multiword = len(query_tokens) >= 2
     if fuzzy:
-        # Comparative quality gate: suppress fuzzy-only candidates only when a
-        # genuinely strong (canonical-title exact/prefix) candidate exists.
-        # An alternative-title exact match alone does not justify suppressing a
-        # high-similarity canonical fuzzy match (e.g. query "avesham" should rank
-        # Aavesham above Vedalam whose alt-title happens to be "Avesham").
+        # ------------------------------------------------------------------
+        # Quality gate — multi-tier:
+        #
+        # Tier A  Strong non-fuzzy match (canonical exact/prefix/phrase/
+        #         all_tokens): suppresses fuzzy-only subset matches
+        #
+        # Tier B  Strong canonical fuzzy match (sim >= STRONG threshold):
+        #         suppresses weak alt-title-only exact matches when a much
+        #         stronger canonical fuzzy match exists.
+        #         (e.g. "avesham" → Aavesham fuzzy > Vedalam alt exact)
+        #
+        # Tier C  Fuzzy score-gap gate: when the best fuzzy match is strong
+        #         (>= STRONG threshold), suppress fuzzy candidates whose
+        #         similarity is more than SEARCH_FUZZY_MAX_GAP below the best.
+        # ------------------------------------------------------------------
+
+        # Tier A: Strong non-fuzzy canonical matches exist.
+        # If so, suppress *all* fuzzy candidates that match only a subset of
+        # query tokens (multi-word case) — these are partial matches like
+        # "Another" or "Woman" when "Another Woman" exists.
+        strong_tiers = ['exact', 'prefix', 'phrase', 'all_tokens']
         canonical_strong_count = (
             db.query(func.count())
             .select_from(movie_sq)
             .filter(
-                movie_sq.c.match_tier.in_(['exact', 'prefix']),
+                movie_sq.c.match_tier.in_(strong_tiers),
                 movie_sq.c.match_source.in_(['title', 'original']),
             )
             .scalar()
         )
         if canonical_strong_count > 0:
-            base_movie_query = base_movie_query.filter(movie_sq.c.match_tier != 'fuzzy')
+            if is_multiword:
+                # Suppress fuzzy candidates that don't cover ALL query tokens.
+                # A fuzzy match must have matched_tokens == token_count OR
+                # similarity high enough to be a full-phrase typo.
+                base_movie_query = base_movie_query.filter(
+                    or_(
+                        movie_sq.c.match_tier != 'fuzzy',
+                        movie_sq.c.matched_tokens >= movie_sq.c.token_count,
+                    )
+                )
+            else:
+                base_movie_query = base_movie_query.filter(
+                    movie_sq.c.match_tier != 'fuzzy'
+                )
+
+        # Tier B: Strong canonical fuzzy match suppresses weak alt-title-only
+        # exact matches (e.g. "avesham" → Aavesham fuzzy 9100 vs Vedalam
+        # alt-exact 9000).  When the best canonical fuzzy score is high, an
+        # alt-title exact match with a low relevance_score is noise.
+        best_canonical_fuzzy = (
+            db.query(func.max(movie_sq.c.relevance_score))
+            .select_from(movie_sq)
+            .filter(
+                movie_sq.c.match_tier == 'fuzzy',
+                movie_sq.c.match_source.in_(['title', 'original']),
+            )
+            .scalar()
+        )
+        if best_canonical_fuzzy and best_canonical_fuzzy >= 7000:
+            # A strong canonical fuzzy match exists. Suppress alt-source
+            # exact matches whose score is lower — they represent weak
+            # alias noise, not intentional matches.
+            base_movie_query = base_movie_query.filter(
+                or_(
+                    movie_sq.c.match_source != 'alt',
+                    movie_sq.c.match_tier != 'exact',
+                    movie_sq.c.relevance_score >= best_canonical_fuzzy,
+                )
+            )
+
+        # Tier C: Fuzzy score-gap gate. If the best fuzzy match is strong,
+        # suppress fuzzy candidates that are substantially worse.
+        best_fuzzy_score = (
+            db.query(func.max(movie_sq.c.relevance_score))
+            .select_from(movie_sq)
+            .filter(movie_sq.c.match_tier == 'fuzzy')
+            .scalar()
+        )
+        if canonical_strong_count > 0 and best_fuzzy_score and best_fuzzy_score >= 7599:
+            # Best fuzzy is strong (>=7599 corresponds to sim >= 0.60).
+            # Suppress fuzzy candidates below best - gap_threshold_score.
+            # Strong fuzzy: score = 7000 + sim * 999, so 0.15 sim gap ≈ 150 score.
+            # Since Tier C only fires when best is strong fuzzy (>=0.60),
+            # use strong fuzzy's multiplier (999) for gap conversion.
+            gap_score = int(SEARCH_FUZZY_MAX_GAP * 999)
+            base_movie_query = base_movie_query.filter(
+                or_(
+                    movie_sq.c.match_tier != 'fuzzy',
+                    movie_sq.c.relevance_score >= best_fuzzy_score - gap_score,
+                )
+            )
     language_counts = _language_counts(base_movie_query)
     movie_context_query = _apply_filters(
         base_movie_query,

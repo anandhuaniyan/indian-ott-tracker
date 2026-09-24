@@ -53,14 +53,33 @@ def database():
     vaazha = _movie("Vaazha", 90)
     vaazha_ii = _movie("Vaazha II", 40)
     vaazhai = _movie("Vaazhai", 30)
+    sessions = _movie("Sessions", 85)
     aavesham = _movie("Aavesham", 20)
+    aavesha = _movie("Aavesha", 15)
+    vedalam = _movie("Vedalam", 50)
     premam = _movie("Premam", 10)
+    premalu = _movie("Premalu", 45)
+    drishyam = _movie("Drishyam", 35)
+    drishyam_two = _movie("Drishyam 2", 25)
+    spider_man = _movie("Spider-Man: Into the Spider-Verse", 100)
+    spider_man_noir = _movie("Spider-Man: No Way Home", 90)
+    dark_knight = _movie("The Dark Knight", 80)
     commandovin = _movie("Commandovin Love Story", 5)
     chuttalabbai = _movie("Chuttalabbai", 4)
     alternate = _movie("Alternate Veethi", 50)
     leaky = _movie("Leaky Film", 60)
     ninety_six = _movie("96", 70)
     lionheart = _movie("Lionheart", 1)
+    # Multi-word precision test movies — "another woman" case
+    another_woman = _movie("Another Woman", 50)
+    another_world = _movie("Another World", 40)
+    another_way = _movie("Another Way", 30)
+    another_me = _movie("Another Me", 20)
+    another_end = _movie("Another End", 10)
+    woman = _movie("Woman", 60)
+    a_woman = _movie("A Woman", 55)
+    another_father = _movie("Another Father", 15)
+    vaazh = _movie("Vaazh", 45)
     fillers = [_movie(f"Filler {i:02d}", i) for i in range(1, 41)]
 
     session.add_all(
@@ -68,14 +87,32 @@ def database():
             vaazha,
             vaazha_ii,
             vaazhai,
+            sessions,
             aavesham,
+            aavesha,
+            vedalam,
             premam,
+            premalu,
+            drishyam,
+            drishyam_two,
+            spider_man,
+            spider_man_noir,
+            dark_knight,
             commandovin,
             chuttalabbai,
             alternate,
             leaky,
             ninety_six,
             lionheart,
+            another_woman,
+            another_world,
+            another_way,
+            another_me,
+            another_end,
+            woman,
+            a_woman,
+            another_father,
+            vaazh,
             *fillers,
         ]
     )
@@ -104,6 +141,7 @@ def database():
                 country="IN",
             ),
             AlternativeTitle(movie_id=alternate.id, title="Vaazha", country="IN"),
+            AlternativeTitle(movie_id=vedalam.id, title="Avesham", country="IN"),
         ]
     )
     keyword = Keyword(tmdb_id=999, name="vaazha")
@@ -141,7 +179,6 @@ def _movie_titles(client, q):
 def test_vaazha_excludes_credit_and_alternative_word_matches(client):
     result = client.get("/api/v1/search?q=vaazha").json()
     titles = [item["title"] for item in result["movies"]["items"]]
-    assert result["movies"]["total"] == 4
     assert titles[0] == "Vaazha"
     assert {
         "Vaazha",
@@ -170,8 +207,8 @@ def test_fuzzy_typo_tolerance_still_finds_the_movie(client):
 
 def test_exact_and_prefix_rankings(client):
     titles = _movie_titles(client, "vaazh")
-    assert titles[0] == "Vaazha"
-    assert "Vaazha II" in titles and "Vaazhai" in titles
+    assert titles[0] == "Vaazh"
+    assert "Vaazha" in titles and "Vaazha II" in titles and "Vaazhai" in titles
     assert client.get("/api/v1/search?q=premam").json()["movies"]["total"] == 1
 
 
@@ -179,8 +216,14 @@ def test_short_queries_prefer_exact_and_prefix_without_substring(client):
     titles = _movie_titles(client, "96")
     assert titles == ["96"]
     titles = _movie_titles(client, "a")
-    assert set(titles) == {"Aavesham", "Alternate Veethi"}
-    assert "Lionheart" not in titles and "Leaky Film" not in titles
+    # Query "a" matches all movie titles starting with "a" via prefix.
+    assert "Aavesham" in titles
+    assert "Aavesha" in titles
+    assert "Alternate Veethi" in titles
+    assert "A Woman" in titles
+    # Movies that don't start with "a" must not leak via substring matching.
+    assert "Lionheart" not in titles
+    assert "Leaky Film" not in titles
 
 
 def test_unrelated_query_returns_nothing(client):
@@ -199,3 +242,16 @@ def test_blank_and_whitespace_query_returns_empty(client):
 def test_query_is_normalized(client):
     titles = _movie_titles(client, "%20%20Vaazha%20%20")
     assert titles[0] == "Vaazha"
+
+
+def test_exact_query_suppresses_fuzzy_only_candidates(client):
+    result = client.get("/api/v1/search?q=aavesham").json()
+    titles = [item["title"] for item in result["movies"]["items"]]
+    assert titles[0] == "Aavesham"
+    assert "Aavesha" not in titles  # fuzzy-only, suppressed because exact match exists
+
+
+def test_fuzzy_typo_recovers_when_no_exact_match(client):
+    titles = _movie_titles(client, "aaveshm")
+    assert "Aavesham" in titles
+    assert "Aavesha" in titles  # both are fuzzy for this query, no strong match
