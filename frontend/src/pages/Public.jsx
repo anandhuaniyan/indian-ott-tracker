@@ -723,9 +723,8 @@ export function Movie() {
   if (error) return <Failure error={error} />;
   if (!data) return <Loading />;
   const movie = data.movie;
-  const ottCandidate = movie.ott_candidate;
-  const displayedOttPlatform = movie.ott_platform || ottCandidate?.platform;
-  const displayedOttDate = movie.ott_release_date || ottCandidate?.release_date;
+  const displayedOttPlatform = movie.ott_platform;
+  const displayedOttDate = movie.ott_release_date;
 
   const images = (type) =>
     data.images.filter((item) => item.type.toLowerCase().includes(type));
@@ -856,23 +855,6 @@ export function Movie() {
                   (displayedOttPlatform ? "Unknown" : "Information not found")}
               </strong>
             </span>
-            <span data-testid="ott-status">
-              <small>OTT Availability</small>
-              <strong>
-                {ottCandidate?.state === "CONFLICTING" ? "Conflicting information" : ({
-                  AVAILABLE_NOW: "Available now",
-                  COMING_TO_OTT: "Coming to OTT",
-                  PLATFORM_KNOWN_DATE_UNKNOWN: "Platform known — date unknown",
-                  OTT_INFORMATION_NOT_FOUND: "OTT information not found",
-                })[movie.ott_status] || (ottCandidate ? "Unverified candidate" : "OTT information not found")}
-              </strong>
-            </span>
-            {movie.ott_research_status && (
-              <span data-testid="ott-research-status">
-                <small>OTT Research</small>
-                <strong>{movie.ott_research_status}</strong>
-              </span>
-            )}
           </div>
           <div className="facts">
             <span>
@@ -925,7 +907,7 @@ export function Movie() {
                   item.watch_type,
                   item.release_date,
                   item.country,
-                  item.release_date ? item.availability_state : "date not confirmed",
+                  item.release_date ? null : "date not confirmed",
                 ]
                   .filter(Boolean)
                   .join(" · ")}
@@ -944,17 +926,6 @@ export function Movie() {
             </div>
           </article>
         ))}
-        {ottCandidate && !movie.ott_verified && (
-          <article className="ott-row ott-candidate" title={ottCandidate.help}>
-            <div>
-              <strong>{ottCandidate.state === "CONFLICTING" ? "Conflicting information" : ottCandidate.platform || "Platform unknown"}</strong>
-              <p>{[formatDate(ottCandidate.release_date) || "OTT date unknown"].join(" · ")}</p>
-              <p>{ottCandidate.help}</p>
-              {ottCandidate.summary && <small>{ottCandidate.summary}</small>}
-
-            </div>
-          </article>
-        )}
       </Values>
       <Values title="Ratings">
         {data.ratings.map((item, index) => (

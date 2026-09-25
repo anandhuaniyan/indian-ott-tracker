@@ -1574,6 +1574,53 @@ def update_request(
 
 
 @router.post(
+    "/requests/{request_id}/notify-requester",
+    dependencies=[Depends(require_same_origin)],
+)
+def notify_requester_movie_added(
+    request_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    """Send the movie-added email only after an administrator verifies it."""
+    limit(request, "movie-request-notify-requester", 6, 3600, identity=request_id)
+    item = (
+        db.query(MovieRequest)
+        .filter_by(request_id=request_id)
+        .with_for_update()
+        .first()
+    )
+    if not item:
+        raise HTTPException(404, "Request not found")
+    if not item.email:
+        raise HTTPException(409, "This request has no requester email")
+    movie = db.query(Movie).filter(Movie.tmdb_id == item.external_movie_id).first()
+    if item.status != "ADDED" or not movie or item.local_movie_id != movie.id:
+        raise HTTPException(409, "Requester notification requires an added local movie")
+    result = MovieRequestEmailService(db).send(
+        item, "completion", respect_cooldown=False
+    )
+    if result.get("status") in {"FAILED", "NOT_CONFIGURED"}:
+        raise HTTPException(
+            502 if result["status"] == "FAILED" else 503,
+            item.completion_email_last_error
+            or "Requester notification could not be sent",
+        )
+    _audit(
+        db,
+        "requester_added_notification_sent",
+        "movie_request",
+        request_id,
+        "Movie-added email sent"
+        if result.get("sent")
+        else "Already sent; duplicate suppressed",
+    )
+    db.commit()
+    return result | {"request": _request(item, db, rich=True)}
+
+
+@router.post(
     "/requests/{request_id}/emails/{kind}/retry",
     dependencies=[Depends(require_same_origin)],
 )
@@ -1584,15 +1631,11 @@ def retry_request_email(
     db: Session = Depends(get_db),
     _: None = Depends(require_admin_session),
 ):
-    if kind not in EMAIL_KINDS:
+    if kind not in EMAIL_KINDS or kind == "completion":
         raise HTTPException(422, "Unknown email type")
     item = db.query(MovieRequest).filter_by(request_id=request_id).first()
     if not item:
         raise HTTPException(404, "Request not found")
-    if kind == "completion":
-        movie = db.query(Movie).filter(Movie.tmdb_id == item.external_movie_id).first()
-        if item.status != "ADDED" or not movie or item.local_movie_id != movie.id:
-            raise HTTPException(409, "Completion email requires an added local movie")
     if kind == "rejection" and item.status != "REJECTED":
         raise HTTPException(409, "Rejection email requires a rejected request")
     limit(
@@ -3530,11 +3573,11 @@ def audit_log(
 
 @router.post("/email/retry-failed", dependencies=[Depends(require_same_origin)])
 def retry_failed_email(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
-    rows = db.query(MovieRequest).filter(or_(MovieRequest.confirmation_email_status == "FAILED", MovieRequest.admin_notification_email_status == "FAILED", MovieRequest.completion_email_status == "FAILED", MovieRequest.rejection_email_status == "FAILED")).order_by(MovieRequest.updated_at.asc()).limit(50).all()
+    rows = db.query(MovieRequest).filter(or_(MovieRequest.confirmation_email_status == "FAILED", MovieRequest.admin_notification_email_status == "FAILED", MovieRequest.rejection_email_status == "FAILED")).order_by(MovieRequest.updated_at.asc()).limit(50).all()
     attempted = sent = 0
     service = MovieRequestEmailService(db)
     for item in rows:
-        for kind in EMAIL_KINDS:
+        for kind in ("confirmation", "admin_notification", "rejection"):
             if getattr(item, f"{kind}_email_status") == "FAILED":
                 result = service.send(item, kind)
                 attempted += 1

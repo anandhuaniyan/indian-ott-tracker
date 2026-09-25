@@ -18,13 +18,12 @@ from app.models.ott_availability import OttAvailability
 from app.models.research import ResearchRun
 from app.services.backfill import DataHealthService
 from app.services.movie_metadata_service import MovieMetadataService
-from app.services.movie_requests import MovieRequestUpdateEmailService
 from app.services.notification_service import NotificationService
 from app.services.ott.intelligence import OTTIntelligenceService
 from app.services.ott.reconciliation import OTTReconciliationService
 from app.services.ott.web_research import WebOttResearchService
 from app.services.rating_provider import IMDbRatingRefreshService
-from app.services.release_status import ReleaseStatusService, site_date
+from app.services.release_status import ReleaseStatusService
 from app.services.tmdb.movie_service import TMDbMovieService
 
 
@@ -167,8 +166,6 @@ class ResearchPipelineService:
         if matched_now:
             item.status = "REVIEWING"
         self.db.commit()
-        if matched_now:
-            MovieRequestUpdateEmailService(self.db).send(item, "MATCHED")
         return item, movie, created
 
     def create_request_run(self, request_id: str, initiated_by: str = "movie-request") -> tuple[ResearchRun, bool]:
@@ -414,16 +411,6 @@ class ResearchPipelineService:
                 run = self.db.query(ResearchRun).filter_by(run_id=run_id).one()
                 run.notification_results = deliveries
                 self.db.commit()
-                if after["platform"] and verified:
-                    email_event = (
-                        "AVAILABLE"
-                        if ott_date and ott_date <= site_date()
-                        else "OTT_FOUND"
-                    )
-                    email_result = MovieRequestUpdateEmailService(self.db).send(request, email_event)
-                    run = self.db.query(ResearchRun).filter_by(run_id=run_id).one()
-                    run.notification_results = {**(run.notification_results or {}), "requester_ott_email": email_result["status"]}
-                    self.db.commit()
         return self.serialize(self.db.query(ResearchRun).filter_by(run_id=run_id).one())
 
     def execute_queue(self, parent_run_id: str) -> dict:

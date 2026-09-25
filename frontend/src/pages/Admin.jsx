@@ -370,6 +370,7 @@ export function Requests() {
     [query, setQuery] = useState(initial.toString());
   const [reasons, setReasons] = useState({});
   const [actionError, setActionError] = useState();
+  const [notifying, setNotifying] = useState(null);
   const [data, error, reload] = useAdmin(`/api/v1/admin/requests?${query}`, 15000);
   const action = (path, options) => {
     setActionError(undefined);
@@ -383,6 +384,14 @@ export function Requests() {
     `/api/v1/admin/requests/${id}/emails/${kind}/retry`,
     { method: "POST" },
   );
+  const notifyRequester = (id) => {
+    setNotifying(id);
+    setActionError(undefined);
+    return call(`/api/v1/admin/requests/${id}/notify-requester`, { method: "POST" })
+      .then(reload)
+      .catch((reason) => setActionError(reason.message))
+      .finally(() => setNotifying(null));
+  };
   const researchQueue = () => call("/api/v1/admin/research/preview")
     .then((preview) => {
       if (!window.confirm(`Eligible movies: ${preview.eligible_count}\nEstimated batch size: ${preview.batch_size}\n\nStart research?`)) return null;
@@ -503,7 +512,7 @@ export function Requests() {
                       <strong>{kind.replaceAll("_", " ")} email</strong>
                       <span>{delivery.status}</span>
                       <small>{delivery.sent_at ? new Date(delivery.sent_at).toLocaleString() : delivery.last_error || "Not sent"} · {delivery.attempt_count || 0} attempts</small>
-                      {delivery.status !== "SENT" && (kind === "confirmation" || kind === "admin_notification" || kind === "completion" && item.status === "ADDED" || kind === "rejection" && item.status === "REJECTED") && (
+                      {delivery.status !== "SENT" && (kind === "confirmation" || kind === "admin_notification" || kind === "rejection" && item.status === "REJECTED") && (
                         <button onClick={() => retry(item.request_id, kind)}>Retry {kind}</button>
                       )}
                     </div>
@@ -525,6 +534,12 @@ export function Requests() {
                     </>
                   )}
                   {item.local_movie_id && <Link className="button-link" to={`/movies/${item.local_movie_id}`}>View Movie</Link>}
+                  {item.status === "ADDED" && item.emails?.completion?.status !== "SENT" && (
+                    <button disabled={notifying === item.request_id} onClick={() => notifyRequester(item.request_id)}>
+                      {notifying === item.request_id ? "Notifying…" : "Notify Requester"}
+                    </button>
+                  )}
+                  {item.emails?.completion?.status === "SENT" && <span className="local-info">✓ Requester notified {when(item.emails.completion.sent_at)}</span>}
                 </div>
               </div>
             </article>
@@ -691,7 +706,7 @@ export function RequestDetail() {
         <h2>Request details</h2><p className="pre-wrap">{data.details || "No additional details supplied."}</p>
         <h3>Email status</h3>
         <div className="email-states">{Object.entries(data.emails || {}).map(([kind, delivery]) => {
-          const retryAllowed = kind === "confirmation" || kind === "admin_notification" || (kind === "completion" && data.status === "ADDED") || (kind === "rejection" && data.status === "REJECTED");
+          const retryAllowed = kind === "confirmation" || kind === "admin_notification" || (kind === "rejection" && data.status === "REJECTED");
           return <div key={kind}><strong>{kind.replaceAll("_", " ")}</strong><Status>{delivery.status}</Status><small>{delivery.sent_at ? when(delivery.sent_at) : delivery.last_error || "Not sent"}</small>{delivery.status !== "SENT" && retryAllowed && <button onClick={() => act(`/api/v1/admin/requests/${requestId}/emails/${kind}/retry`, { method: "POST" })}>Retry email</button>}</div>;
         })}</div>
       </section>
@@ -736,6 +751,8 @@ export function RequestDetail() {
           <button onClick={() => act(`/api/v1/admin/requests/${encodeURIComponent(requestId)}/notifications/telegram/retry`, { method: "POST" })}>Resend Telegram</button>
           <button onClick={() => act(`/api/v1/admin/requests/${encodeURIComponent(requestId)}/notifications/discord/retry`, { method: "POST" })}>Resend Discord</button>
           {localId && data.status !== "ADDED" && <button onClick={() => update("ADDED")}>Mark added</button>}
+          {data.status === "ADDED" && data.emails?.completion?.status !== "SENT" && <button onClick={() => act(`/api/v1/admin/requests/${encodeURIComponent(requestId)}/notify-requester`, { method: "POST" })}>Notify Requester</button>}
+          {data.emails?.completion?.status === "SENT" && <span className="local-info">✓ Requester notified {when(data.emails.completion.sent_at)}</span>}
           {!(["ADDED", "REJECTED"].includes(data.status)) && <button onClick={() => update("REJECTED")}>Reject</button>}
         </div>
       </section>

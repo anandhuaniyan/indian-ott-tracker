@@ -289,17 +289,19 @@ def test_public_ott_platform_aliases_are_canonical_and_deduplicated(client, data
     assert [item["provider"] for item in detail["ott"]] == ["Prime Video"]
 
 
-def test_public_movie_detail_neutralizes_provider_status(client, monkeypatch):
-    monkeypatch.setattr(
-        "app.api.v1.public.research_status_label",
-        lambda *_args: "Awaiting TMDB release information",
-    )
-
+def test_public_movie_detail_does_not_expose_internal_ott_status(client):
     detail = client.get("/api/v1/movies/1/detail").json()
-    assert (
-        detail["movie"]["ott_research_status"]
-        == "Awaiting external metadata release information"
-    )
+    for key in (
+        "ott_status", "ott_verified", "ott_candidate", "ott_research_status",
+        "ott_confidence", "ott_confidence_label",
+    ):
+        assert key not in detail["movie"]
+    for row in detail["movie"]["ott"]:
+        assert not {
+            "verification_state", "availability_state", "release_state",
+            "confidence", "platform_confidence", "date_confidence",
+            "last_checked", "last_verified",
+        }.intersection(row)
 
 
 def test_calendar_ott_movie_and_person(client, database):
@@ -330,7 +332,7 @@ def test_calendar_ott_movie_and_person(client, database):
     assert calendar["theatrical"]["items"][0]["certification"] == "U/A"
     assert calendar["ott"]["items"][0]["ott_platform"] == "Netflix"
     assert calendar["ott"]["items"][0]["rating"] == 8
-    assert all(item["ott_platform"] != "RumourTV" for item in calendar["ott"]["items"])
+    assert any(item["ott_platform"] == "RumourTV" for item in calendar["ott"]["items"])
     custom_month = client.get(f"/api/v1/calendar/this-month?month={site_date():%Y-%m}")
     assert custom_month.status_code == 200
     assert custom_month.json()["start_date"] == site_date().replace(day=1).isoformat()
@@ -362,6 +364,53 @@ def test_calendar_ott_movie_and_person(client, database):
     assert person["id"] == 1
     assert person["filmography"][0]["character"] == "Hero"
     assert person["filmography"][0]["normalized_role"] == "actor"
+
+
+def test_calendar_includes_research_date_without_canonical_enrichment(
+    client, database
+):
+    movie = Movie(
+        tmdb_id=31150,
+        title="Modha Rathiri Calendar Regression",
+        original_language="ta",
+    )
+    database.add(movie)
+    database.flush()
+    database.add(
+        OttEvidence(
+            movie_id=movie.id,
+            platform="Netflix",
+            release_date=date(2027, 6, 21),
+            country="IN",
+            status="POSSIBLE",
+            source_type="established_publication",
+            verification_method="CURATED_DATE_LIST",
+            confidence=25,
+        )
+    )
+    database.add(
+        OttEvidence(
+            movie_id=movie.id,
+            platform="Netflix",
+            release_date=date(2027, 6, 21),
+            country=None,
+            status="POSSIBLE",
+            source_type="another_publication",
+            verification_method="CURATED_DATE_LIST",
+            confidence=10,
+        )
+    )
+    database.commit()
+
+    payload = client.get("/api/v1/calendar/this-month?month=2027-06").json()
+    matches = [item for item in payload["ott"]["items"] if item["id"] == movie.id]
+
+    assert len(matches) == 1
+    assert matches[0]["ott_release_date"] == "2027-06-21"
+    assert matches[0]["ott_platforms"] == ["Netflix"]
+    assert matches[0]["ott_releases"] == [
+        {"platform": "Netflix", "release_date": "2027-06-21", "country": "IN"}
+    ]
 
 
 def test_calendar_today_uses_the_configured_site_date(client, monkeypatch):
@@ -633,7 +682,7 @@ def test_contact_requests_are_private_review_items_and_user_ott_reports_are_untr
     assert retry.status_code == 200 and retry.json()["status"] == "NOT_CONFIGURED"
 
 
-def test_low_confidence_ott_candidate_is_public_but_not_confirmed(client, database):
+def test_low_confidence_ott_candidate_is_not_exposed_publicly(client, database):
     evidence = OttEvidence(
         movie_id=1,
         status="NEEDS_REVIEW",
@@ -653,17 +702,10 @@ def test_low_confidence_ott_candidate_is_public_but_not_confirmed(client, databa
     database.add(evidence)
     database.commit()
     detail = client.get("/api/v1/movies/1/detail").json()["movie"]
-    candidate = detail["ott_candidate"]
-    assert candidate["platform"] == "Prime Video"
-    assert candidate["release_date"] == "2026-09-18"
-    assert candidate["confidence"] == 43
-    assert candidate["confidence_label"] == "LOW CONFIDENCE"
-    assert candidate["state"] == "CANDIDATE"
-    # The tentative claim is exposed separately and does not replace the
-    # fixture's existing verified canonical Netflix record.
-    assert detail["ott_verified"] is True
+    assert "ott_candidate" not in detail
+    assert "ott_verified" not in detail
+    assert "ott_research_status" not in detail
     assert detail["ott_platform"] == "Netflix"
-    assert "not yet been fully verified" in candidate["help"]
 
 
 def test_system_health_marks_missing_automation_heartbeats_stale(database, monkeypatch):
@@ -1345,9 +1387,10 @@ def test_admin_manual_ott_verification_provenance_and_public_upcoming(
     assert detail["evidence"][0]["source_published_at"] is None
 
     public = client.get("/api/v1/movies/2/detail").json()["movie"]
-    assert public["ott_status"] == "COMING_TO_OTT"
     assert public["ott_platform"] == "Prime Video"
     assert public["ott_release_date"] == release.isoformat()
+    assert "ott_status" not in public
+    assert "ott_research_status" not in public
     assert client.get("/api/v1/home").json()["upcoming_ott"][0]["id"] == 2
     calendar = client.get(f"/api/v1/calendar/this-month?month={release:%Y-%m}").json()
     assert any(
@@ -1460,7 +1503,7 @@ def test_smtp_authentication_failure_is_recorded_without_credentials(
     assert "[redacted]" in item.confirmation_email_last_error
 
 
-def test_reconciliation_marks_added_and_sends_completion_once(database, monkeypatch):
+def test_reconciliation_marks_added_without_sending_completion(database, monkeypatch):
     monkeypatch.setattr(settings, "SMTP_HOST", "smtp.example.test")
     monkeypatch.setattr(settings, "SMTP_FROM", "requests@example.test")
     monkeypatch.setattr(settings, "SITE_URL", "https://movies.example.test")
@@ -1484,14 +1527,65 @@ def test_reconciliation_marks_added_and_sends_completion_once(database, monkeypa
     service = MovieRequestAutomationService(database)
     assert service.reconcile()["completed"] == 1
     assert request.status == "ADDED" and request.local_movie_id == movie.id
-    assert (
-        request.completion_email_status == "SENT" and request.completion_email_sent_at
-    )
-    assert (
-        f"https://movies.example.test/movies/{movie.id}"
-        in messages[0].get_body(preferencelist=("plain",)).get_content()
-    )
+    assert request.completion_email_status == "PENDING"
+    assert request.completion_email_sent_at is None
     assert service.reconcile()["completed"] == 0
+    assert messages == []
+
+
+def test_admin_manually_notifies_requester_once_and_can_retry_failure(
+    client, database, monkeypatch
+):
+    salt = b"0123456789abcdef"
+    password = "notify admin"
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 1000).hex()
+    monkeypatch.setattr(
+        settings, "ADMIN_PASSWORD_HASH", f"pbkdf2_sha256$1000${salt.hex()}${digest}"
+    )
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp.example.test")
+    monkeypatch.setattr(settings, "SMTP_FROM", "requests@example.test")
+    movie = Movie(tmdb_id=992, title="Manual Notify", original_language="ml")
+    database.add(movie)
+    database.flush()
+    item = MovieRequest(
+        request_id="REQ-NOTIFY",
+        movie_name="Manual Notify",
+        verified_title="Manual Notify",
+        email="viewer@example.test",
+        external_movie_id=movie.tmdb_id,
+        local_movie_id=movie.id,
+        status="ADDED",
+    )
+    database.add(item)
+    database.commit()
+
+    endpoint = "/api/v1/admin/requests/REQ-NOTIFY/notify-requester"
+    assert client.post(endpoint).status_code == 401
+    assert client.post("/api/v1/admin/login", json={"password": password}).status_code == 200
+
+    monkeypatch.setattr(
+        MovieRequestEmailService,
+        "_deliver",
+        staticmethod(lambda _message: (_ for _ in ()).throw(RuntimeError("SMTP down"))),
+    )
+    assert client.post(endpoint).status_code == 502
+    database.refresh(item)
+    assert item.completion_email_sent_at is None
+    assert item.completion_email_status == "FAILED"
+
+    messages = []
+    monkeypatch.setattr(
+        MovieRequestEmailService,
+        "_deliver",
+        staticmethod(lambda message: messages.append(message)),
+    )
+    first = client.post(endpoint)
+    second = client.post(endpoint)
+    assert first.status_code == 200 and first.json()["sent"] is True
+    assert second.status_code == 200 and second.json()["sent"] is False
+    assert second.json()["skipped"] == "already_sent"
+    database.refresh(item)
+    assert item.completion_email_sent_at is not None
     assert len(messages) == 1
 
 

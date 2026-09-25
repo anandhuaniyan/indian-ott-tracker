@@ -877,6 +877,14 @@ def movie_request_email(request_id: str, kind: str):
     from app.models.operations import MovieRequest
 
     def run(db):
+        # Completion is deliberately manual-only. This also neutralizes any
+        # stale completion task left in the broker by an older deployment.
+        if kind == "completion":
+            return {
+                "status": "MANUAL_REQUIRED",
+                "request_id": request_id,
+                "kind": kind,
+            }
         item = db.query(MovieRequest).filter_by(request_id=request_id).first()
         if not item:
             return {"status": "MISSING", "request_id": request_id}

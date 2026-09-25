@@ -225,7 +225,6 @@ class MovieRequestEmailService:
                 or_(
                     MovieRequest.confirmation_email_status.in_(pending),
                     MovieRequest.admin_notification_email_status.in_(pending),
-                    MovieRequest.completion_email_status.in_(pending),
                     MovieRequest.rejection_email_status.in_(pending),
                 )
             )
@@ -240,8 +239,6 @@ class MovieRequestEmailService:
             eligible = ["confirmation"]
             if settings.ADMIN_NOTIFICATION_EMAIL:
                 eligible.append("admin_notification")
-            if item.status == "ADDED" and item.local_movie_id:
-                eligible.append("completion")
             if item.status == "REJECTED":
                 eligible.append("rejection")
             for kind in eligible:
@@ -328,7 +325,6 @@ class MovieRequestAutomationService:
         item.status = "ADDED"
         item.local_movie_id = movie.id
         self.db.commit()
-        self.email.send(item, "completion")
         return changed
 
     def reconcile_for_movie(self, movie: Movie) -> int:
