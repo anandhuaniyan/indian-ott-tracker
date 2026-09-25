@@ -9,6 +9,7 @@ from app.api.v1.public import router as public_router
 from app.api.v1.operations import router as operations_router
 from app.api.v1.admin import router as admin_router
 from app.api.v1.deep_search import router as deep_search_router
+from app.api.v1.render import router as render_router
 from app.database.connection import get_db
 from app.config.settings import settings
 from app.seo import (
@@ -99,6 +100,7 @@ app.include_router(public_router)
 app.include_router(operations_router)
 app.include_router(admin_router)
 app.include_router(deep_search_router)
+app.include_router(render_router)
 
 @app.api_route("/robots.txt", methods=["GET", "HEAD"], include_in_schema=False)
 def robots():
