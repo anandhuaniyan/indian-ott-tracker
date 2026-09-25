@@ -210,9 +210,8 @@ it("renders stored movie metadata and galleries without fabricating empty fields
   expect(screen.getByTestId("ott-release")).toHaveTextContent(
     /^OTT ReleaseInformation not found$/,
   );
-  expect(screen.getByTestId("ott-research-status")).toHaveTextContent(
-    /^OTT ResearchResearching$/,
-  );
+  expect(screen.queryByText("OTT Availability")).not.toBeInTheDocument();
+  expect(screen.queryByText("OTT Research")).not.toBeInTheDocument();
   expect(screen.getByTestId("movie-display-id")).toHaveTextContent(/^ID101$/);
   expect(screen.getByText("Malayalam")).toHaveAttribute("href", "/languages/ml");
   expect(screen.queryByText("TMDB ID")).not.toBeInTheDocument();

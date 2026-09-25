@@ -78,6 +78,34 @@ it("renders responsive request snapshots, SLA state and email actions", async ()
   expect(screen.getByRole("link", { name: "View Movie" })).toHaveAttribute("href", "/movies/6204");
 });
 
+it("shows the manual requester notification action for added movies", async () => {
+  const fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      items: [{
+        request_id: "REQ-ADDED", verified_title: "Added Movie", original_title: null,
+        movie_external_id: 555, email: "viewer@example.test", status: "ADDED",
+        created_at: "2026-09-22T00:00:00Z", age_seconds: 100, target_seconds: 0,
+        local_movie_id: 55, emails: {
+          confirmation: { status: "SENT", sent_at: "2026-09-22T00:01:00Z" },
+          completion: { status: "PENDING", sent_at: null, last_error: null },
+          rejection: { status: "PENDING", sent_at: null, last_error: null },
+        },
+      }],
+    }),
+  });
+  vi.stubGlobal("fetch", fetch);
+  render(<MemoryRouter><Requests /></MemoryRouter>);
+
+  const button = await screen.findByRole("button", { name: "Notify Requester" });
+  fireEvent.click(button);
+
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+    expect.stringContaining("/admin/requests/REQ-ADDED/notify-requester"),
+    expect.objectContaining({ method: "POST" }),
+  ));
+});
+
 it("shows real backfill coverage and queues a selected repair", async () => {
   const fetch = vi
     .fn()
