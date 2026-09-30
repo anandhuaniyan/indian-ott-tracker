@@ -1898,7 +1898,7 @@ def calendar(
             normalize_platform(provider) if provider else "Platform TBA"
         )
         if provider and normalized_provider.casefold() in {
-            "unknown", "tba", "digital", "vod",
+            "unknown", "platform tba", "tba", "digital", "vod",
         }:
             continue
         key = (movie.id, release_date)
