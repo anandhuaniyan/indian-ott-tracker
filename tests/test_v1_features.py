@@ -34,6 +34,7 @@ from app.models.operations import (
     MovieComment,
     MovieRequest,
     OttEvidence,
+    OttSourceRelease,
 )
 from app.models.ott_availability import OttAvailability
 from app.models.research import RequestCommunication
@@ -444,8 +445,14 @@ def test_calendar_includes_research_date_without_canonical_enrichment(
             country="IN",
             status="POSSIBLE",
             source_type="established_publication",
+            source_url="https://example.test/calendar/netflix",
+            inspected_at=datetime.now(timezone.utc),
+            availability_type="SUBSCRIPTION",
             verification_method="CURATED_DATE_LIST",
             confidence=25,
+            movie_match_confidence=90,
+            platform_confidence=90,
+            date_confidence=90,
         )
     )
     database.add(
@@ -453,11 +460,17 @@ def test_calendar_includes_research_date_without_canonical_enrichment(
             movie_id=movie.id,
             platform="Netflix",
             release_date=date(2027, 6, 21),
-            country=None,
+            country="IN",
             status="POSSIBLE",
             source_type="another_publication",
+            source_url="https://example.test/calendar/low-confidence",
+            inspected_at=datetime.now(timezone.utc),
+            availability_type="SUBSCRIPTION",
             verification_method="CURATED_DATE_LIST",
             confidence=10,
+            movie_match_confidence=10,
+            platform_confidence=10,
+            date_confidence=10,
         )
     )
     database.commit()
@@ -471,6 +484,48 @@ def test_calendar_includes_research_date_without_canonical_enrichment(
     assert matches[0]["ott_releases"] == [
         {"platform": "Netflix", "release_date": "2027-06-21", "country": "IN"}
     ]
+
+
+def test_calendar_includes_matched_source_and_india_digital_release_rows(
+    client, database
+):
+    movie = Movie(
+        tmdb_id=31151,
+        title="Multi Source Calendar",
+        original_language="ml",
+    )
+    database.add(movie)
+    database.flush()
+    database.add_all(
+        [
+            OttSourceRelease(
+                source="curated_feed",
+                external_key="multi-source-calendar",
+                title=movie.title,
+                platform="Prime Video",
+                release_date=date(2027, 7, 10),
+                source_url="https://example.test/calendar/prime-video",
+                status="MATCHED",
+                matched_movie_id=movie.id,
+            ),
+            MovieReleaseDate(
+                movie_id=movie.id,
+                country="IN",
+                release_date=date(2027, 7, 11),
+                release_type="4",
+            ),
+        ]
+    )
+    database.commit()
+
+    payload = client.get("/api/v1/calendar/this-month?month=2027-07").json()
+    matches = [item for item in payload["ott"]["items"] if item["id"] == movie.id]
+
+    assert [(item["ott_release_date"], item["ott_platform"]) for item in matches] == [
+        ("2027-07-10", "Prime Video"),
+        ("2027-07-11", "Platform TBA"),
+    ]
+    assert all("verification_state" not in item for item in matches)
 
 
 def test_calendar_today_uses_the_configured_site_date(client, monkeypatch):

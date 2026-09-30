@@ -32,7 +32,7 @@ from app.models.movie_metadata import (
     ProductionCountry,
 )
 from app.models.ott_availability import OttAvailability
-from app.models.operations import MovieComment, OttEvidence
+from app.models.operations import MovieComment, OttEvidence, OttSourceRelease
 from app.models.editorial import EditorialArticle, MovieCorrection
 from app.core.rate_limit import limit
 from app.core.user_auth import require_user, require_user_same_origin
@@ -1832,6 +1832,47 @@ def calendar(
         ),
         language,
     )
+    source_query = _apply_language_filter(
+        db.query(Movie, OttSourceRelease)
+        .join(OttSourceRelease, OttSourceRelease.matched_movie_id == Movie.id)
+        .options(
+            selectinload(Movie.genres),
+            selectinload(Movie.languages),
+            selectinload(Movie.ratings),
+            selectinload(Movie.external_ids),
+        )
+        .filter(
+            Movie.safety_public_visibility == "FULL",
+            Movie.adult.is_(False),
+            OttSourceRelease.status == "MATCHED",
+            OttSourceRelease.platform.is_not(None),
+            func.length(func.trim(OttSourceRelease.platform)) > 0,
+            OttSourceRelease.release_date >= start,
+            OttSourceRelease.release_date < end,
+        ),
+        language,
+    )
+    release_date_query = _apply_language_filter(
+        db.query(Movie, MovieReleaseDate)
+        .join(MovieReleaseDate)
+        .options(
+            selectinload(Movie.genres),
+            selectinload(Movie.languages),
+            selectinload(Movie.ratings),
+            selectinload(Movie.external_ids),
+        )
+        .filter(
+            Movie.safety_public_visibility == "FULL",
+            Movie.adult.is_(False),
+            MovieReleaseDate.release_date >= start,
+            MovieReleaseDate.release_date < end,
+            func.upper(MovieReleaseDate.country) == "IN",
+            func.lower(MovieReleaseDate.release_type).in_(
+                ("4", "digital", "ott", "streaming")
+            ),
+        ),
+        language,
+    )
     ott_rows = [
         (movie, row.provider, row.ott_release_date, row.country, row.provider_logo)
         for movie, row in availability_rows
@@ -1840,21 +1881,33 @@ def calendar(
         (movie, row.platform, row.release_date, row.country, None)
         for movie, row in evidence_query.all()
     )
+    ott_rows.extend(
+        (movie, row.platform, row.release_date, None, None)
+        for movie, row in source_query.all()
+    )
+    ott_rows.extend(
+        (movie, None, row.release_date, row.country, None)
+        for movie, row in release_date_query.all()
+    )
     # One card per local movie and OTT release date. Multiple confirmed
     # providers on the same date are combined without moving later releases
     # into an earlier date group.
     grouped = {}
     for movie, provider, release_date, country, provider_logo in ott_rows:
-        normalized_provider = normalize_platform(provider)
-        if not normalized_provider or normalized_provider.casefold() in {
-            "unknown", "platform tba", "tba", "digital", "vod",
+        normalized_provider = (
+            normalize_platform(provider) if provider else "Platform TBA"
+        )
+        if provider and normalized_provider.casefold() in {
+            "unknown", "tba", "digital", "vod",
         }:
             continue
         key = (movie.id, release_date)
         item = grouped.setdefault(key, _card(movie) | {
             "release_date": release_date,
             "ott_release_date": release_date,
-            "ott_platform_slug": platform_slug(normalized_provider),
+            "ott_platform_slug": (
+                platform_slug(normalized_provider) if provider else None
+            ),
             "ott_platform_logo": provider_logo,
             "ott_releases": [],
         })
