@@ -13,9 +13,10 @@ from app.models.operations import OperationState
 from app.models.ott_availability import OttAvailability
 from app.models.ott_intelligence import OttGoldSetCase
 from app.services.ott_providers import normalize_platform
+from app.services.languages import SUPPORTED_PRIMARY_LANGUAGE_CODES
 
 
-LANGUAGES = ("ml", "ta", "te", "hi", "kn")
+LANGUAGES = SUPPORTED_PRIMARY_LANGUAGE_CODES
 
 
 class OttGoldSetService:

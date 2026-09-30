@@ -4,12 +4,15 @@ from PIL import Image
 import pytest
 
 from app.models.operations import DataQualityIssue, OperationState
+from app.models.movie_metadata import MovieImage
+from app.models.movie import Movie
 from app.models.ott_availability import OttAvailability
 from app.services.image_fallback import ImageFallbackService
 from app.services.notification_service import NotificationService
 from app.services.operations import DataHealthService, OttResearchService
 from app.services.release_status import site_date
 from app.core.rate_limit import limit
+from app.config.settings import settings
 from fastapi import HTTPException
 from starlette.requests import Request
 from app.workers.celery_app import celery_app
@@ -65,6 +68,52 @@ def test_image_validation_and_whole_database_cursors(database, tmp_path, monkeyp
         .cursor
         == 2
     )
+    totals = database.query(OperationState).filter_by(name="image_health_movies").one().details
+    assert totals == {
+        "posters_valid": 2,
+        "posters_repaired": 0,
+        "posters_unavailable": 0,
+        "backdrops_valid": 2,
+        "backdrops_repaired": 0,
+        "backdrops_unavailable": 0,
+        "logos_valid": 2,
+        "logos_repaired": 0,
+        "logos_unavailable": 0,
+        "failed": 0,
+    }
+
+
+def test_image_health_preserves_existing_primary_logo(database, tmp_path, monkeypatch):
+    logo = tmp_path / "logos" / "tmdb" / "movie-1.png"
+    logo.parent.mkdir(parents=True)
+    Image.new("RGBA", (8, 4)).save(logo)
+    database.add(
+        MovieImage(
+            movie_id=1,
+            image_type="logo",
+            source="tmdb",
+            source_id="logo-1",
+            local_path="/media/logos/tmdb/movie-1.png",
+            is_primary=True,
+        )
+    )
+    database.commit()
+
+    service = ImageFallbackService(database)
+    service.media_root = tmp_path
+    monkeypatch.setattr(
+        service,
+        "_download",
+        lambda *args, **kwargs: pytest.fail("healthy logo must not be downloaded again"),
+    )
+
+    result = service.recover_movie(database.get(Movie, 1), "logo")
+
+    assert result == {
+        "status": "HEALTHY",
+        "path": "/media/logos/tmdb/movie-1.png",
+        "type": "logo",
+    }
 
 
 def test_ott_confidence_canonical_conflict_and_backoff(database, monkeypatch):
@@ -191,7 +240,7 @@ def test_identity_rate_limit_is_private_and_request_maintenance_is_scheduled(
         celery_app.conf.beat_schedule["imdb-id-recovery"]["task"]
         == "ratings.imdb_id_backfill"
     )
-    assert (
-        celery_app.conf.beat_schedule["imdb-rating-refresh"]["task"]
-        == "ratings.imdb_refresh"
-    )
+    if settings.IMDB_RATING_REFRESH_ENABLED:
+        assert celery_app.conf.beat_schedule["imdb-rating-refresh"]["task"] == "ratings.imdb_refresh"
+    else:
+        assert "imdb-rating-refresh" not in celery_app.conf.beat_schedule

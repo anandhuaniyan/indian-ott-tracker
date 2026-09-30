@@ -208,7 +208,21 @@ class OTTReconciliationService:
             if manual_dates:
                 chosen_date = max(manual_dates, key=lambda value: max(row.id for row in by_date[value] if row.manually_verified))
                 chosen_rows = by_date[chosen_date]
-                conflict_rows = [row for value, candidates in by_date.items() if value != chosen_date for row in candidates]
+                # A later administrator correction replaces the earlier manual
+                # date. Preserve the old evidence for audit history, but do not
+                # turn two deliberate edits into an unresolved source conflict.
+                chosen = max(
+                    (row for row in chosen_rows if row.manually_verified),
+                    key=lambda row: row.id,
+                )
+                for value, candidates in by_date.items():
+                    if value != chosen_date:
+                        for row in candidates:
+                            if row.manually_verified:
+                                row.status = "SUPERSEDED"
+                                row.superseded_by_id = chosen.id
+                            else:
+                                conflict_rows.append(row)
             elif len(official_dates) == 1:
                 chosen_date = next(iter(official_dates))
                 chosen_rows = by_date[chosen_date]
@@ -229,7 +243,10 @@ class OTTReconciliationService:
                 if len({source_key(row) for row in candidates}) >= 2:
                     chosen_date, chosen_rows = candidate_date, candidates
 
-            if conflict_rows:
+            manual_choice = bool(
+                chosen_date and any(row.manually_verified for row in chosen_rows)
+            )
+            if conflict_rows and not manual_choice:
                 any_conflict = True
                 for row in conflict_rows:
                     if not row.manually_verified:
@@ -240,6 +257,10 @@ class OTTReconciliationService:
                 state = "CONFLICTING"
                 reason = "Credible sources disagree about the OTT date; no date was guessed"
             elif chosen_date:
+                if conflict_rows:
+                    any_conflict = True
+                for row in conflict_rows:
+                    row.status = "CONFLICTING"
                 chosen = max(chosen_rows, key=lambda row: (row.manually_verified, authority(row), row.date_confidence or row.confidence or 0, row.id))
                 date_confidence = 100 if chosen.manually_verified else max(
                     self.threshold,

@@ -98,7 +98,20 @@ class ImageFallbackService:
     def recover_movie(self, movie: Movie, image_type="poster"):
         if image_type not in MOVIE_TYPES:
             raise ValueError(f"Unsupported image type: {image_type}")
-        current = movie.poster_path if image_type == "poster" else movie.backdrop_path if image_type == "backdrop" else None
+        primary_image = (
+            self.db.query(MovieImage)
+            .filter_by(movie_id=movie.id, image_type=image_type, is_primary=True)
+            .first()
+        )
+        current = (
+            movie.poster_path
+            if image_type == "poster"
+            else movie.backdrop_path
+            if image_type == "backdrop"
+            else primary_image.local_path
+            if primary_image
+            else None
+        )
         if self.validate(current) == "HEALTHY":
             self._resolve([f"missing_{image_type}", f"broken_{image_type}", "image_unresolved"], movie_id=movie.id)
             self.db.commit()
@@ -120,7 +133,7 @@ class ImageFallbackService:
         if recovered:
             if image_type == "poster": movie.poster_path = recovered
             elif image_type == "backdrop": movie.backdrop_path = recovered
-            image = self.db.query(MovieImage).filter_by(movie_id=movie.id, image_type=image_type, is_primary=True).first()
+            image = primary_image
             if not image:
                 image = MovieImage(movie_id=movie.id, image_type=image_type, source="fallback", source_id=f"recovered-{movie.id}-{image_type}", is_primary=True)
                 self.db.add(image)
@@ -153,12 +166,27 @@ class ImageFallbackService:
         movie_state = self.db.query(OperationState).filter_by(name="image_health_movies").first()
         if not movie_state:
             movie_state = OperationState(name="image_health_movies"); self.db.add(movie_state); self.db.flush()
+        movie_totals = dict(movie_state.details or {})
+        for image_type in MOVIE_TYPES:
+            plural = f"{image_type}s"
+            for suffix in ("valid", "repaired", "unavailable"):
+                movie_totals.setdefault(f"{plural}_{suffix}", 0)
+        movie_totals.setdefault("failed", 0)
         movies = self.db.query(Movie).filter(Movie.id > movie_state.cursor).order_by(Movie.id).limit(batch_size).all()
         for movie in movies:
             for image_type in MOVIE_TYPES:
                 outcome = self.recover_movie(movie, image_type)
                 results["statuses"][outcome["status"]] = results["statuses"].get(outcome["status"], 0) + 1
+                plural = f"{image_type}s"
+                counter = {
+                    "HEALTHY": f"{plural}_valid",
+                    "RECOVERED": f"{plural}_repaired",
+                    "UNRESOLVED": f"{plural}_unavailable",
+                }.get(outcome["status"])
+                if counter:
+                    movie_totals[counter] += 1
             movie_state.cursor = movie.id; movie_state.processed_count += 1; results["movies"] += 1
+            movie_state.details = dict(movie_totals)
         if not movies:
             movie_state.cursor = 0
         person_state = self.db.query(OperationState).filter_by(name="image_health_people").first()

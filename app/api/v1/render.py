@@ -15,7 +15,7 @@ SITE_URL = settings.SITE_URL.rstrip("/")
 SITE_NAME = "OTT Tracker"
 
 BOT_UA_PATTERN = re.compile(
-    r"(googlebot|bingbot|slurp|duckduckbot|baiduspider|yandexbot|sogou|pinterestbot|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|applebot|amazonbot|mj12bot|ahrefsbot|semrushbot|bytespider|kirimai|youindex|cocrawler)",
+    r"(googlebot|bingbot|slurp|duckduckbot|baiduspider|yandexbot|sogou|pinterestbot|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|applebot|amazonbot|mj12bot|ahrefsbot|semrushbot|shapbot|bytespider|kirimai|youindex|cocrawler)",
     re.IGNORECASE,
 )
 

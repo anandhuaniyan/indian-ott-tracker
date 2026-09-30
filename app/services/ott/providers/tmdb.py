@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from app.config.settings import settings
 from app.services.ott.providers.base import NormalizedOttEvidence, normalize_availability_type
 from app.services.ott_providers import normalize_platform
-from app.services.tmdb.client import TMDbClient
+from app.services.tmdb.client import TMDbClient, TMDbRequestError
 
 
 class TMDBOTTProvider:
@@ -29,7 +29,16 @@ class TMDBOTTProvider:
     def fetch_movie(self, movie) -> list[NormalizedOttEvidence]:
         now = datetime.now(timezone.utc)
         evidence: list[NormalizedOttEvidence] = []
-        providers = self.client.get(f"/movie/{movie.tmdb_id}/watch/providers").get("results", {}).get("IN", {})
+        try:
+            provider_payload = self.client.get(f"/movie/{movie.tmdb_id}/watch/providers")
+        except TMDbRequestError as exc:
+            # A removed/unknown TMDB movie is an entity-level no-result, not a
+            # provider outage. Treating a 404 as provider downtime would open
+            # the shared circuit and fail every later catalogue candidate.
+            if exc.status_code == 404:
+                return []
+            raise
+        providers = provider_payload.get("results", {}).get("IN", {})
         source_url = providers.get("link") or f"https://www.themoviedb.org/movie/{movie.tmdb_id}/watch"
         for category in ("flatrate", "free", "ads", "rent", "buy"):
             for item in providers.get(category, []):
@@ -57,7 +66,12 @@ class TMDBOTTProvider:
                         notes="Availability only; release date is not inferred",
                     )
                 )
-        release_payload = self.client.get(f"/movie/{movie.tmdb_id}/release_dates")
+        try:
+            release_payload = self.client.get(f"/movie/{movie.tmdb_id}/release_dates")
+        except TMDbRequestError as exc:
+            if exc.status_code == 404:
+                return evidence
+            raise
         for country in release_payload.get("results", []):
             if country.get("iso_3166_1") != "IN":
                 continue

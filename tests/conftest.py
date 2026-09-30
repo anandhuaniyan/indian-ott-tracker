@@ -50,11 +50,17 @@ def isolate_external_rate_limit_store(monkeypatch):
     """
     from app.core.rate_limit import _reset_local_fallback_for_tests
     from app.core.session_auth import _reset_session_store_for_tests
+    from app.core.user_auth import _reset_user_session_store_for_tests
 
     _reset_local_fallback_for_tests()
     _reset_session_store_for_tests()
+    _reset_user_session_store_for_tests()
     monkeypatch.setattr(
         "app.core.rate_limit.redis.from_url",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError()),
+    )
+    monkeypatch.setattr(
+        "app.core.user_auth.redis.from_url",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ConnectionError()),
     )
     # A developer's production .env correctly enables Secure cookies, while the
@@ -64,6 +70,7 @@ def isolate_external_rate_limit_store(monkeypatch):
     yield
     _reset_local_fallback_for_tests()
     _reset_session_store_for_tests()
+    _reset_user_session_store_for_tests()
 
 
 @pytest.fixture()

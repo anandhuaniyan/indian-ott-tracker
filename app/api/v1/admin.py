@@ -4,7 +4,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -21,6 +22,7 @@ from app.core.session_auth import (
 )
 from app.database.connection import get_db
 from app.models.movie import Movie
+from app.models.content_safety import ContentSafetyAudit
 from app.models.discovery import MovieDiscoveryCandidate, MovieDiscoveryRun
 from app.models.movie_metadata import (
     ExternalId,
@@ -35,6 +37,7 @@ from app.models.operations import (
     BackfillRecord,
     ContactRequest,
     DataQualityIssue,
+    MaintenanceWindow,
     MovieComment,
     MovieRequest,
     NotificationLog,
@@ -53,16 +56,24 @@ from app.models.ott_intelligence import (
     OttReconciliationDecision,
 )
 from app.services.image_fallback import ImageFallbackService
-from app.services.languages import language_name
+from app.services.languages import (
+    ALL_PUBLIC_LANGUAGE_CODES,
+    SUPPORTED_PRIMARY_LANGUAGES,
+    SUPPORTED_PRIMARY_LANGUAGE_CODES,
+    language_name,
+    normalize_language_code,
+)
 from app.services.movie_requests import (
     EMAIL_KINDS,
     MovieRequestAutomationService,
     MovieRequestEmailService,
     MovieRequestUpdateEmailService,
 )
+from app.services.language_health import language_health
 from app.services.contact_requests import ContactRequestNotificationService, TYPE_LABELS
 from app.services.ott_source_sync import OttSourceSyncService, SOURCES
 from app.services.ott.gold_set import OttGoldSetService
+from app.services.ott.catalogue_audit import ott_completeness_metrics
 from app.services.ott.provider_controls import OTTApiBudgetManager
 from app.services.ott.reconciliation import SOURCE_AUTHORITY, source_type as normalized_source_type
 from app.services.operations import OttResearchService, ResearchUsageService
@@ -80,9 +91,15 @@ from app.services.notification_service import NotificationService
 from app.services.request_discord import RequestDiscordService, serialize_delivery
 from app.services.rating_provider import IMDbRatingRefreshService
 from app.services.research import ResearchPipelineService
+from app.services.report_issue_uploads import stored_screenshot_path
+from app.services.content_safety import ContentSafetyService
+from app.services.maintenance import as_utc, serialize_maintenance
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin"])
+SUPPORTED_LANGUAGE_PATTERN = "^(" + "|".join(ALL_PUBLIC_LANGUAGE_CODES) + ")$"
 REQUEST_STATUSES = {"PENDING", "REVIEWING", "FOUND", "ADDED", "REJECTED"}
+MAINTENANCE_STATUSES = {"SCHEDULED", "COMPLETED", "CANCELLED"}
+MAINTENANCE_IMPACTS = {"NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
 OTT_STATUSES = {
     "UNKNOWN",
     "QUEUED",
@@ -175,6 +192,100 @@ class ResearchStart(BaseModel):
 class DiscoveryStart(BaseModel):
     deep: bool = False
     confirmed: bool = False
+
+
+class ContentSafetyAction(BaseModel):
+    classification: str = Field(pattern="^(SAFE|MATURE|RESTRICTED|BLOCKED)$")
+    reason: str = Field(min_length=3, max_length=1000)
+    risk_score: int | None = Field(default=None, ge=0, le=100)
+
+
+class MaintenanceCreate(BaseModel):
+    title: str = Field(min_length=3, max_length=200)
+    description: str = Field(min_length=3, max_length=5000)
+    start_time: datetime
+    end_time: datetime
+    affected_services: list[str] = Field(default_factory=list, max_length=20)
+    impact_level: str = Field(default="LOW")
+    impact_message: str = Field(min_length=3, max_length=500)
+
+    @field_validator("title", "description", "impact_message")
+    @classmethod
+    def clean_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("affected_services")
+    @classmethod
+    def clean_services(cls, values: list[str]) -> list[str]:
+        cleaned = [str(value).strip()[:100] for value in values if str(value).strip()]
+        return list(dict.fromkeys(cleaned))
+
+    @field_validator("impact_level")
+    @classmethod
+    def valid_impact(cls, value: str) -> str:
+        value = value.strip().upper()
+        if value not in MAINTENANCE_IMPACTS:
+            raise ValueError("Unknown maintenance impact level")
+        return value
+
+    @model_validator(mode="after")
+    def valid_window(self):
+        if self.start_time.tzinfo is None or self.end_time.tzinfo is None:
+            raise ValueError("Maintenance times must include a timezone")
+        if as_utc(self.end_time) <= as_utc(self.start_time):
+            raise ValueError("End time must be after start time")
+        return self
+
+
+class MaintenanceUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=3, max_length=200)
+    description: str | None = Field(default=None, min_length=3, max_length=5000)
+    start_time: datetime | None = None
+    end_time: datetime | None = None
+    affected_services: list[str] | None = Field(default=None, max_length=20)
+    impact_level: str | None = None
+    impact_message: str | None = Field(default=None, min_length=3, max_length=500)
+    status: str | None = None
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def timezone_required(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("Maintenance times must include a timezone")
+        return value
+
+    @field_validator("title", "description", "impact_message")
+    @classmethod
+    def clean_optional_text(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+    @field_validator("affected_services")
+    @classmethod
+    def clean_optional_services(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        cleaned = [str(value).strip()[:100] for value in values if str(value).strip()]
+        return list(dict.fromkeys(cleaned))
+
+    @field_validator("impact_level")
+    @classmethod
+    def valid_optional_impact(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().upper()
+        if value not in MAINTENANCE_IMPACTS:
+            raise ValueError("Unknown maintenance impact level")
+        return value
+
+    @field_validator("status")
+    @classmethod
+    def valid_status(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().upper()
+        if value not in MAINTENANCE_STATUSES:
+            raise ValueError("Unknown maintenance status")
+        return value
 
 
 def _pagination(total: int, page: int, page_size: int):
@@ -604,7 +715,7 @@ def _imdb_health(db: Session) -> dict:
         "imdb_provider_configured": bool(
             settings.IMDB_RATING_PROVIDER
             and settings.IMDB_RATING_API_URL
-            and settings.IMDB_RATING_API_KEY
+            and (settings.OMDB_API_KEYS or settings.IMDB_RATING_API_KEY)
         ),
         "imdb_provider_quota_or_rate_limited": quota_blocked,
         "imdb_id_backfill_status": id_state.status if id_state else "IDLE",
@@ -650,6 +761,15 @@ def session(_: None = Depends(require_admin_session)):
     return {"authenticated": True}
 
 
+@router.get("/language-health")
+def admin_language_health(
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    """Report canonical original-language integrity and catalogue counts."""
+    return language_health(db)
+
+
 @router.get("/dashboard")
 def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
     now = datetime.now(timezone.utc)
@@ -669,6 +789,7 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
         .all()
     )
     total_movies = db.query(Movie).count()
+    language_report = language_health(db)
     confirmed_ott = (
         db.query(func.count(func.distinct(OttAvailability.movie_id)))
         .filter(OttAvailability.verification_status == "CONFIRMED")
@@ -889,13 +1010,14 @@ def dashboard(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
             }
             for x in jobs
         ],
+        "language_health": language_report,
     }
 
 
 @router.get("/discovery")
 def discovery(
     status: str | None = None,
-    language: str | None = Query(default=None, pattern="^(ml|ta|te|hi|kn)$"),
+    language: str | None = Query(default=None, pattern=SUPPORTED_LANGUAGE_PATTERN),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -1330,6 +1452,12 @@ def _contact_request(item: ContactRequest, db: Session | None = None) -> dict:
         "expected_ott_platform": item.expected_ott_platform,
         "expected_ott_release_date": item.expected_ott_release_date,
         "evidence_url": item.evidence_url,
+        "screenshot_url": (
+            f"/api/v1/admin/contact-requests/{item.request_id}/screenshot"
+            if item.screenshot_path else None
+        ),
+        "screenshot_mime_type": item.screenshot_mime_type,
+        "screenshot_size": item.screenshot_size,
         "local_movie_id": item.local_movie_id,
         "ott_evidence_id": item.ott_evidence_id,
         "discord_status": item.discord_status,
@@ -1405,6 +1533,30 @@ def contact_request_detail(
     if not item:
         raise HTTPException(404, "Contact request not found")
     return _contact_request(item, db)
+
+
+@router.get("/contact-requests/{request_id}/screenshot")
+def contact_request_screenshot(
+    request_id: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    item = db.query(ContactRequest).filter_by(request_id=request_id).first()
+    if not item or not item.screenshot_path:
+        raise HTTPException(404, "Screenshot not found")
+    try:
+        path = stored_screenshot_path(item.screenshot_path)
+    except ValueError as exc:
+        raise HTTPException(404, "Screenshot not found") from exc
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise HTTPException(404, "Screenshot not found")
+    return FileResponse(
+        path,
+        media_type=item.screenshot_mime_type or "application/octet-stream",
+        filename=f"{item.request_id}_screenshot{path.suffix}",
+        content_disposition_type="inline",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.patch("/contact-requests/{request_id}", dependencies=[Depends(require_same_origin)])
@@ -1607,6 +1759,9 @@ def notify_requester_movie_added(
             item.completion_email_last_error
             or "Requester notification could not be sent",
         )
+    # Discord delivery is independently durable and failure-isolated. Repeated
+    # admin clicks reuse the same completion event key.
+    discord = RequestDiscordService(db).schedule_completion(item)
     _audit(
         db,
         "requester_added_notification_sent",
@@ -1617,7 +1772,10 @@ def notify_requester_movie_added(
         else "Already sent; duplicate suppressed",
     )
     db.commit()
-    return result | {"request": _request(item, db, rich=True)}
+    return result | {
+        "request": _request(item, db, rich=True),
+        "discord_status": discord.status,
+    }
 
 
 @router.post(
@@ -1739,6 +1897,104 @@ def send_requester_update(
     _audit(db, "requester_update_sent", "movie_request", request_id, f"{event_type}: {result['status']}")
     db.commit()
     return result
+
+
+@router.get("/maintenance")
+def maintenance_windows(
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    rows = (
+        db.query(MaintenanceWindow)
+        .order_by(MaintenanceWindow.start_time.desc(), MaintenanceWindow.id.desc())
+        .all()
+    )
+    now = datetime.now(timezone.utc)
+    return {"items": [serialize_maintenance(item, now) for item in rows]}
+
+
+@router.post("/maintenance", dependencies=[Depends(require_same_origin)])
+def create_maintenance_window(
+    payload: MaintenanceCreate,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    item = MaintenanceWindow(
+        title=payload.title,
+        description=payload.description,
+        start_time=as_utc(payload.start_time),
+        end_time=as_utc(payload.end_time),
+        status="SCHEDULED",
+        affected_services=payload.affected_services,
+        impact_level=payload.impact_level,
+        impact_message=payload.impact_message,
+    )
+    db.add(item)
+    db.flush()
+    _audit(db, "maintenance_created", "maintenance_window", item.id, item.title)
+    db.commit()
+    db.refresh(item)
+    return serialize_maintenance(item)
+
+
+@router.patch("/maintenance/{maintenance_id}", dependencies=[Depends(require_same_origin)])
+def update_maintenance_window(
+    maintenance_id: int,
+    payload: MaintenanceUpdate,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    item = db.get(MaintenanceWindow, maintenance_id)
+    if not item:
+        raise HTTPException(404, "Maintenance window not found")
+    changes = payload.model_dump(exclude_unset=True)
+    start_time = as_utc(changes.get("start_time", item.start_time))
+    end_time = as_utc(changes.get("end_time", item.end_time))
+    if end_time <= start_time:
+        raise HTTPException(422, "End time must be after start time")
+    for key, value in changes.items():
+        if key in {"start_time", "end_time"} and value is not None:
+            value = as_utc(value)
+        setattr(item, key, value)
+    now = datetime.now(timezone.utc)
+    item.updated_at = now
+    if payload.status == "COMPLETED" and not item.completed_at:
+        item.completed_at = now
+        item.cancelled_at = None
+    elif payload.status == "CANCELLED" and not item.cancelled_at:
+        item.cancelled_at = now
+        item.completed_at = None
+    elif payload.status == "SCHEDULED":
+        item.completed_at = None
+        item.cancelled_at = None
+    _audit(
+        db,
+        "maintenance_updated",
+        "maintenance_window",
+        item.id,
+        f"{item.title}: {item.status}",
+    )
+    db.commit()
+    db.refresh(item)
+    return serialize_maintenance(item)
+
+
+@router.delete("/maintenance/{maintenance_id}", dependencies=[Depends(require_same_origin)])
+def delete_maintenance_window(
+    maintenance_id: int,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    item = db.get(MaintenanceWindow, maintenance_id)
+    if not item:
+        raise HTTPException(404, "Maintenance window not found")
+    if item.status != "CANCELLED":
+        raise HTTPException(409, "Cancel a maintenance window before deleting it")
+    title = item.title
+    db.delete(item)
+    _audit(db, "maintenance_deleted", "maintenance_window", maintenance_id, title)
+    db.commit()
+    return {"deleted": True, "id": maintenance_id}
 
 
 @router.get("/comments")
@@ -2278,6 +2534,7 @@ def jobs(db: Session = Depends(get_db), _: None = Depends(require_admin_session)
             "processed_count": item.processed_count,
             "total_count": item.total_count,
             "completed_at": item.completed_at,
+            "details": item.details or {},
             "remaining": (
                 max(0, item.total_count - item.processed_count)
                 if item.total_count
@@ -2308,26 +2565,74 @@ def backfills(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
     progress = []
     for name in operations:
         state = states.get(name)
-        failures = (
-            db.query(BackfillRecord).filter_by(operation=name, status="FAILED").count()
-        )
+        records = db.query(BackfillRecord).filter(BackfillRecord.operation == name)
+        failures = records.filter(BackfillRecord.status == "FAILED").count()
+        permanent = records.filter(
+            or_(
+                BackfillRecord.status == "PERMANENT",
+                and_(
+                    BackfillRecord.status == "FAILED",
+                    BackfillRecord.attempts >= settings.BACKFILL_MAX_ATTEMPTS,
+                ),
+            )
+        ).count()
+        retryable = records.filter(
+            BackfillRecord.status == "FAILED",
+            BackfillRecord.attempts < settings.BACKFILL_MAX_ATTEMPTS,
+        ).count()
+        last_attempt = records.with_entities(func.max(BackfillRecord.last_attempt_at)).scalar()
+        live_processed = state.processed_count if state else 0
+        # Backfill records are polymorphic and deliberately have no FK.  Ignore
+        # records whose source entity was subsequently removed so historical
+        # checkpoints can never make processed exceed the live total.
+        if name == "operations.image_backfill":
+            live_processed = (
+                records.join(Movie, BackfillRecord.entity_id == Movie.id)
+                .filter(
+                    BackfillRecord.entity_type == "movie",
+                    BackfillRecord.status.in_(["DONE", "PERMANENT"]),
+                ).count()
+                + records.join(Person, BackfillRecord.entity_id == Person.id)
+                .filter(
+                    BackfillRecord.entity_type == "person",
+                    BackfillRecord.status.in_(["DONE", "PERMANENT"]),
+                ).count()
+            )
+        total = max(state.total_count if state else 0, live_processed)
+        display_status = state.status if state else "IDLE"
+        if display_status == "COMPLETE" and total and live_processed < total:
+            display_status = "PAUSED"
+        elif display_status == "COMPLETE" and (failures or permanent):
+            display_status = "COMPLETE WITH FAILURES"
+        details = (state.details or {}) if state else {}
         progress.append(
             {
                 "operation": name,
-                "status": state.status if state else "IDLE",
+                "status": display_status,
                 "cursor": state.cursor if state else 0,
-                "processed": state.processed_count if state else 0,
-                "total": state.total_count if state else 0,
+                "processed": min(live_processed, total),
+                "total": total,
                 "remaining": (
-                    max(0, state.total_count - state.processed_count)
-                    if state and state.total_count
+                    max(0, total - live_processed)
+                    if total
                     else None
                 ),
                 "failed": failures,
+                "retryable_failures": retryable,
+                "permanent_failures": permanent,
+                "progress_percent": round((min(live_processed, total) / total) * 100, 1) if total else None,
+                "current_batch": details.get("current_batch") or details.get("batch_size"),
+                "throughput_per_minute": details.get("throughput_per_minute"),
+                "last_attempt": last_attempt,
                 "last_success": state.last_success_at if state else None,
                 "last_failure": state.last_failure_at if state else None,
                 "last_error": state.last_error if state else None,
                 "completed_at": state.completed_at if state else None,
+                "explanation": (
+                    "Required eligibility classifier for the OTT queue; not run yet."
+                    if name == "operations.ott_eligibility_backfill" and state is None
+                    else None
+                ),
             }
         )
     total_movies = db.query(Movie).count()
@@ -2428,7 +2733,7 @@ def backfills(db: Session = Depends(get_db), _: None = Depends(require_admin_ses
             "imdb": bool(
                 settings.IMDB_RATING_PROVIDER
                 and settings.IMDB_RATING_API_URL
-                and settings.IMDB_RATING_API_KEY
+                and (settings.OMDB_API_KEYS or settings.IMDB_RATING_API_KEY)
             ),
             "google_ott_search": bool(
                 settings.GOOGLE_SEARCH_API_KEY and settings.GOOGLE_SEARCH_ENGINE_ID
@@ -2665,7 +2970,9 @@ def research_history(
     if result:
         query = query.filter(ResearchRun.result == result.upper())
     if language:
-        query = query.filter(Movie.original_language == language)
+        query = query.filter(
+            Movie.original_language == normalize_language_code(language)
+        )
     if date_from:
         query = query.filter(ResearchRun.created_at >= datetime.combine(date_from, time.min, tzinfo=timezone.utc))
     if date_to:
@@ -2823,7 +3130,7 @@ def import_deep_search_movie(
         popularity=payload.get("popularity"),
         vote_average=payload.get("vote_average"),
         vote_count=payload.get("vote_count"),
-        original_language=payload.get("original_language") or None,
+        original_language=normalize_language_code(payload.get("original_language")),
         adult=bool(payload.get("adult", False)),
         status=payload.get("status") or None,
         tagline=payload.get("tagline") or None,
@@ -2912,7 +3219,9 @@ def admin_movies(
         )
         query = query.filter(or_(*conditions))
     if language:
-        query = query.filter(Movie.original_language == language.lower())
+        query = query.filter(
+            Movie.original_language == normalize_language_code(language)
+        )
     if year:
         query = query.filter(func.extract("year", Movie.release_date) == year)
     if platform:
@@ -3041,12 +3350,7 @@ def _release_item(movie: Movie, availability: OttAvailability, source_count: int
 @router.get("/ott-overview")
 def ott_overview(db: Session = Depends(get_db), _: None = Depends(require_admin_session)):
     coverage = _ott_coverage(db)
-    languages = []
-    for code, label in (("ml", "Malayalam"), ("ta", "Tamil"), ("te", "Telugu"), ("hi", "Hindi"), ("kn", "Kannada")):
-        total = db.query(Movie).filter(Movie.original_language == code).count()
-        platform_known = db.query(func.count(func.distinct(OttAvailability.movie_id))).join(Movie, Movie.id == OttAvailability.movie_id).filter(Movie.original_language == code, OttAvailability.country == "IN").scalar() or 0
-        confirmed = db.query(func.count(func.distinct(OttAvailability.movie_id))).join(Movie, Movie.id == OttAvailability.movie_id).filter(Movie.original_language == code, OttAvailability.country == "IN", OttAvailability.verification_status == "CONFIRMED", OttAvailability.ott_release_date.is_not(None)).scalar() or 0
-        languages.append({"code": code, "language": label, "movies": total, "platform_known": platform_known, "confirmed_date": confirmed, "missing": max(0, total - platform_known)})
+    completeness = ott_completeness_metrics(db)
     def releases(upcoming: bool):
         query = db.query(Movie, OttAvailability).join(OttAvailability, OttAvailability.movie_id == Movie.id).filter(OttAvailability.verification_status == "CONFIRMED", OttAvailability.ott_release_date.is_not(None))
         query = query.filter(OttAvailability.ott_release_date > site_date()) if upcoming else query.filter(OttAvailability.ott_release_date <= site_date(), OttAvailability.ott_release_date >= site_date() - timedelta(days=30))
@@ -3055,7 +3359,13 @@ def ott_overview(db: Session = Depends(get_db), _: None = Depends(require_admin_
             _release_item(movie, item, db.query(OttEvidence).filter(OttEvidence.movie_id == movie.id, OttEvidence.source_url.is_not(None)).count())
             for movie, item in rows
         ]
-    return {"coverage": coverage, "by_language": languages, "upcoming": releases(True), "recent": releases(False)}
+    return {
+        "coverage": coverage | completeness["summary"],
+        "by_language": completeness["by_language"],
+        "by_year": completeness["by_year"],
+        "upcoming": releases(True),
+        "recent": releases(False),
+    }
 
 
 @router.get("/ott-command-center")
@@ -3063,6 +3373,7 @@ def ott_command_center(db: Session = Depends(get_db), _: None = Depends(require_
     """Evidence, agreement, provider, language, and accuracy-gate coverage."""
     today = site_date()
     total = db.query(Movie).count()
+    completeness = ott_completeness_metrics(db)
     platform_known = db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.country == "IN", OttAvailability.provider.is_not(None)).scalar() or 0
     platform_confirmed = db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.country == "IN", OttAvailability.verification_status.in_(["PLATFORM_CONFIRMED", "CONFIRMED"])).scalar() or 0
     date_known = db.query(func.count(func.distinct(OttAvailability.movie_id))).filter(OttAvailability.country == "IN", OttAvailability.ott_release_date.is_not(None)).scalar() or 0
@@ -3105,13 +3416,7 @@ def ott_command_center(db: Session = Depends(get_db), _: None = Depends(require_
     for bucket in agreement.values():
         bucket["platform_agreement"] = round(bucket["platform_agreed"] / bucket["platform_compared"] * 100, 1) if bucket["platform_compared"] else None
         bucket["date_agreement"] = round(bucket["date_agreed"] / bucket["date_compared"] * 100, 1) if bucket["date_compared"] else None
-    by_language = []
-    for code, label in (("ml", "Malayalam"), ("ta", "Tamil"), ("te", "Telugu"), ("hi", "Hindi"), ("kn", "Kannada")):
-        movies = db.query(Movie).filter(Movie.original_language == code).count()
-        known = db.query(func.count(func.distinct(OttAvailability.movie_id))).join(Movie, Movie.id == OttAvailability.movie_id).filter(Movie.original_language == code, OttAvailability.country == "IN").scalar() or 0
-        confirmed = db.query(func.count(func.distinct(OttAvailability.movie_id))).join(Movie, Movie.id == OttAvailability.movie_id).filter(Movie.original_language == code, OttAvailability.country == "IN", OttAvailability.verification_status == "CONFIRMED", OttAvailability.ott_release_date.is_not(None)).scalar() or 0
-        conflicts = db.query(func.count(func.distinct(OttReconciliationDecision.movie_id))).join(Movie, Movie.id == OttReconciliationDecision.movie_id).filter(Movie.original_language == code, OttReconciliationDecision.is_current.is_(True), OttReconciliationDecision.state == "CONFLICTING").scalar() or 0
-        by_language.append({"code": code, "language": label, "movies": movies, "platform_known": known, "date_confirmed": confirmed, "unknown": max(0, movies - known), "conflicts": conflicts})
+    by_language = completeness["by_language"]
     provider_names = ("tmdb_justwatch", "streaming_availability", "watchmode", "ottplay", "tavily")
     health_rows = {row.provider: row for row in db.query(OttProviderHealth).filter(OttProviderHealth.provider.in_(provider_names)).all()}
     enabled = {
@@ -3141,21 +3446,25 @@ def ott_command_center(db: Session = Depends(get_db), _: None = Depends(require_
     gold_state = db.query(OperationState).filter_by(name="ott.gold_set_accuracy").first()
     web_state = db.query(OperationState).filter_by(name="ott.web_research_one_shot").first()
     gold = gold_state.details if gold_state and gold_state.details else {
-        "total": db.query(OttGoldSetCase).count(), "verified": db.query(OttGoldSetCase).filter(OttGoldSetCase.manually_verified_at.is_not(None)).count(), "target": settings.OTT_GOLD_SET_SIZE_PER_LANGUAGE * 5, "gate_passed": False, "automatic_publication_enabled": settings.OTT_INTELLIGENCE_AUTO_PUBLICATION_ENABLED,
+        "total": db.query(OttGoldSetCase).count(), "verified": db.query(OttGoldSetCase).filter(OttGoldSetCase.manually_verified_at.is_not(None)).count(), "target": settings.OTT_GOLD_SET_SIZE_PER_LANGUAGE * len(SUPPORTED_PRIMARY_LANGUAGE_CODES), "gate_passed": False, "automatic_publication_enabled": settings.OTT_INTELLIGENCE_AUTO_PUBLICATION_ENABLED,
     }
     return {
         "summary": {
             "total_movies": total,
-            "platform_known": platform_known,
+            "complete_ott_data": completeness["summary"]["complete"],
+            "missing_platform": completeness["summary"]["missing_platform"],
+            "missing_ott_date": completeness["summary"]["missing_date"],
+            "platform_known_date_unknown": completeness["summary"]["platform_known_date_unknown"],
+            "needs_review": completeness["summary"]["needs_review"],
+            "no_verified_ott_found": completeness["summary"]["no_verified_ott_found"],
+            "researched": completeness["summary"]["researched"],
+            "never_checked": completeness["summary"]["never_checked"],
+            "research_coverage_percent": completeness["summary"]["research_coverage_percent"],
+            "complete_data_percent": completeness["summary"]["complete_percent"],
             "platform_confirmed": platform_confirmed,
-            "ott_date_known": date_known,
-            "ott_date_confirmed": date_confirmed,
-            "platform_only": max(0, platform_known - date_confirmed),
-            "unknown": max(0, total - platform_known),
             "upcoming": current_states.get("UPCOMING_CONFIRMED", 0),
             "released": current_states.get("RELEASED_CONFIRMED", 0),
             "conflicting": current_states.get("CONFLICTING", 0),
-            "needs_review": current_states.get("NEEDS_REVIEW", 0),
             "not_found": current_states.get("NOT_FOUND", 0),
             "recently_stale": stale,
         },
@@ -3163,6 +3472,7 @@ def ott_command_center(db: Session = Depends(get_db), _: None = Depends(require_
         "source_authority": SOURCE_AUTHORITY,
         "source_agreement": agreement,
         "by_language": by_language,
+        "by_year": completeness["by_year"],
         "providers": providers,
         "gold_set": gold,
         "web_research": {
@@ -3302,7 +3612,9 @@ def ott_releases(
     if search:
         query = query.filter(or_(Movie.title.ilike(f"%{search.strip()}%"), Movie.original_title.ilike(f"%{search.strip()}%")))
     if language:
-        query = query.filter(Movie.original_language == language)
+        query = query.filter(
+            Movie.original_language == normalize_language_code(language)
+        )
     if platform:
         query = query.filter(OttAvailability.provider.ilike(f"%{platform.strip()}%"))
     if status == "UPCOMING":
@@ -3487,7 +3799,7 @@ def system_health(db: Session = Depends(get_db), _: None = Depends(require_admin
         automation("OTT RESEARCH", "operations.ott_research", timedelta(minutes=30)),
         automation("OTT WEB RESEARCH", "operations.ott_web_research", timedelta(days=1)),
         automation("OTT VERIFICATION", "operations.ott_verification", timedelta(days=1)),
-        automation("IMDb REFRESH", "ratings.imdb_refresh", timedelta(hours=6), configured=omdb["configured"]),
+        automation("IMDb REFRESH", "ratings.imdb_refresh", timedelta(hours=6), configured=omdb["configured"] and settings.IMDB_RATING_REFRESH_ENABLED),
     ]
     return {
         "services": [
@@ -3520,6 +3832,7 @@ def system_health(db: Session = Depends(get_db), _: None = Depends(require_admin
             },
         ],
         "automations": automations,
+        "language_health": language_health(db),
     }
 
 
@@ -3556,6 +3869,150 @@ def test_omdb_provider(
         "movie_id": movie_id,
         "rating_updated": result.get("updated", False),
     }
+
+
+def _content_safety_item(row: ContentSafetyAudit) -> dict:
+    return {
+        "id": row.id,
+        "movie_id": row.movie_id,
+        "tmdb_id": row.tmdb_id,
+        "imdb_id": row.imdb_id,
+        "title": row.title,
+        "original_title": row.original_title,
+        "release_date": row.release_date,
+        "language": row.language,
+        "language_name": language_name(row.language, row.language or "Unknown"),
+        "previous_classification": row.previous_classification,
+        "new_classification": row.new_classification,
+        "risk_score": row.risk_score,
+        "tmdb_adult": row.tmdb_adult,
+        "certification": row.certification,
+        "reasons": row.reasons or [],
+        "classification_source": row.classification_source,
+        "action": row.action,
+        "public_visibility_before": row.public_visibility_before,
+        "public_visibility_after": row.public_visibility_after,
+        "notification_status": row.notification_status,
+        "notification_attempts": row.notification_attempts,
+        "notification_error": row.notification_error,
+        "notified_at": row.notified_at,
+        "created_at": row.created_at,
+    }
+
+
+@router.get("/content-safety")
+def content_safety_history(
+    state: str = Query("ALL", pattern="^(ALL|RESTRICTED|BLOCKED|RESTORED|AUTO|MANUAL)$"),
+    search: str | None = Query(default=None, max_length=200),
+    movie_id: int | None = Query(default=None, ge=1),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    query = db.query(ContentSafetyAudit)
+    if state in {"RESTRICTED", "BLOCKED"}:
+        query = query.filter(ContentSafetyAudit.new_classification == state)
+    elif state == "RESTORED":
+        query = query.filter(ContentSafetyAudit.action == "RESTORED")
+    elif state == "AUTO":
+        query = query.filter(ContentSafetyAudit.classification_source == "AUTOMATIC")
+    elif state == "MANUAL":
+        query = query.filter(ContentSafetyAudit.classification_source == "MANUAL")
+    if search:
+        term = f"%{search.strip()}%"
+        query = query.filter(or_(
+            ContentSafetyAudit.title.ilike(term),
+            ContentSafetyAudit.original_title.ilike(term),
+            ContentSafetyAudit.imdb_id.ilike(term),
+        ))
+    if movie_id:
+        query = query.filter(ContentSafetyAudit.movie_id == movie_id)
+    total = query.count()
+    rows = (
+        query.order_by(ContentSafetyAudit.created_at.desc(), ContentSafetyAudit.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    counts = {
+        "restricted": db.query(func.count(Movie.id)).filter(Movie.safety_classification == "RESTRICTED").scalar() or 0,
+        "blocked": db.query(func.count(Movie.id)).filter(Movie.safety_classification == "BLOCKED").scalar() or 0,
+        "restored": db.query(func.count(ContentSafetyAudit.id)).filter(ContentSafetyAudit.action == "RESTORED").scalar() or 0,
+        "notification_failed": db.query(func.count(ContentSafetyAudit.id)).filter(ContentSafetyAudit.notification_status == "FAILED").scalar() or 0,
+    }
+    return _pagination(total, page, page_size) | {
+        "state": state,
+        "counts": counts,
+        "items": [_content_safety_item(row) for row in rows],
+    }
+
+
+@router.get("/content-safety/movies/{movie_id}")
+def content_safety_movie(
+    movie_id: int,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    movie = db.get(Movie, movie_id)
+    if not movie:
+        raise HTTPException(404, "Movie not found")
+    history = (
+        db.query(ContentSafetyAudit)
+        .filter(ContentSafetyAudit.movie_id == movie_id)
+        .order_by(ContentSafetyAudit.created_at.desc(), ContentSafetyAudit.id.desc())
+        .all()
+    )
+    return {
+        "movie": {
+            "id": movie.id,
+            "tmdb_id": movie.tmdb_id,
+            "title": movie.title,
+            "classification": movie.safety_classification,
+            "risk_score": movie.safety_risk_score,
+            "reasons": movie.safety_reasons or [],
+            "public_visibility": movie.safety_public_visibility,
+            "classification_source": movie.safety_classification_source,
+            "classified_at": movie.safety_classified_at,
+            "manual_override": movie.safety_manual_override,
+        },
+        "history": [_content_safety_item(row) for row in history],
+    }
+
+
+@router.patch(
+    "/content-safety/movies/{movie_id}",
+    dependencies=[Depends(require_same_origin)],
+)
+def update_content_safety_movie(
+    movie_id: int,
+    payload: ContentSafetyAction,
+    db: Session = Depends(get_db),
+    _: None = Depends(require_admin_session),
+):
+    movie = (
+        db.query(Movie)
+        .options(selectinload(Movie.external_ids), selectinload(Movie.release_dates))
+        .filter(Movie.id == movie_id)
+        .first()
+    )
+    if not movie:
+        raise HTTPException(404, "Movie not found")
+    audit = ContentSafetyService(db).apply_manual(
+        movie,
+        payload.classification,
+        payload.reason,
+        payload.risk_score,
+    )
+    _audit(
+        db,
+        "content_safety_manual_override",
+        "movie",
+        movie_id,
+        f"{audit.previous_classification} -> {audit.new_classification}: {payload.reason}",
+    )
+    db.commit()
+    return {"movie": {"id": movie.id, "classification": movie.safety_classification, "public_visibility": movie.safety_public_visibility}, "audit": _content_safety_item(audit)}
 
 
 @router.get("/audit")

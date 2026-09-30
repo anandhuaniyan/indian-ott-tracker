@@ -32,10 +32,16 @@ from app.models.movie_metadata import (
     ProductionCountry,
 )
 from app.models.ott_availability import OttAvailability
-from app.models.operations import MovieComment, OttEvidence, OttSourceRelease
+from app.models.operations import MovieComment, OttEvidence
 from app.models.editorial import EditorialArticle, MovieCorrection
 from app.core.rate_limit import limit
 from app.core.user_auth import require_user, require_user_same_origin
+from app.services.movie_title_search import (
+    SEARCH_FUZZY_MAX_GAP,
+    SEARCH_FUZZY_THRESHOLD,
+    SEARCH_MIN_TRIGRAM_LENGTH,
+    SEARCH_STRONG_FUZZY_THRESHOLD,
+)
 from app.services.release_status import (
     ReleaseStatusService,
     best_canonical_ott,
@@ -112,12 +118,6 @@ def maintenance_status(db: Session = Depends(get_db)):
 # The trigram layer exists purely for typo tolerance (vazha/vaaza -> Vaazha),
 # not to pad results: movies that merely share an actor, keyword, or a loose
 # alternative-title word are intentionally excluded from normal search.
-SEARCH_FUZZY_THRESHOLD = 0.40
-SEARCH_MIN_TRIGRAM_LENGTH = 3
-SEARCH_STRONG_FUZZY_THRESHOLD = 0.60
-SEARCH_FUZZY_MAX_GAP = 0.15
-
-
 class CommentSubmission(BaseModel):
     display_name: str = Field(min_length=2, max_length=50)
     comment: str = Field(min_length=2, max_length=2000)
@@ -266,6 +266,40 @@ def _canonical_ott_rows(movie: Movie) -> list[OttAvailability]:
     return sorted(selected.values(), key=lambda row: normalize_platform(row.provider))
 
 
+def _valid_public_ott_evidence_query(db: Session):
+    """Validated streaming-date evidence awaiting canonical reconciliation."""
+    return db.query(OttEvidence).filter(
+        OttEvidence.release_date.is_not(None),
+        OttEvidence.platform.is_not(None),
+        func.length(func.trim(OttEvidence.platform)) > 0,
+        OttEvidence.source_url.is_not(None),
+        OttEvidence.inspected_at.is_not(None),
+        OttEvidence.rejected_at.is_(None),
+        OttEvidence.superseded_by_id.is_(None),
+        ~func.upper(OttEvidence.status).in_(("SUPERSEDED", "CONFLICTING")),
+        func.upper(OttEvidence.country) == "IN",
+        func.upper(OttEvidence.availability_type).in_(("SUBSCRIPTION", "ADS", "FREE")),
+        func.upper(OttEvidence.fact_type).in_(("RELEASE_DATE", "ANNOUNCEMENT")),
+        func.upper(func.coalesce(OttEvidence.verification_method, "")) != "USER_REPORT",
+        OttEvidence.movie_match_confidence >= 70,
+        OttEvidence.platform_confidence >= 70,
+        OttEvidence.date_confidence >= 65,
+    )
+
+
+def _public_ott_evidence_release(db: Session, movie_id: int) -> OttEvidence | None:
+    return (
+        _valid_public_ott_evidence_query(db)
+        .filter(OttEvidence.movie_id == movie_id)
+        .order_by(
+            OttEvidence.manually_verified.desc(),
+            OttEvidence.date_confidence.desc(),
+            OttEvidence.id.desc(),
+        )
+        .first()
+    )
+
+
 def _card(movie: Movie) -> dict:
     imdb = _stored_rating(movie, "imdb")
     imdb_id = next(
@@ -316,7 +350,6 @@ def _card(movie: Movie) -> dict:
         "ott_platform": ", ".join(platforms) or None,
         "ott_platforms": platforms,
         "ott_release_date": confirmed_ott.ott_release_date if confirmed_ott else None,
-        "ott_state": confirmed_ott.status.upper() if confirmed_ott else None,
     }
 
 
@@ -1765,6 +1798,9 @@ def calendar(
             Movie.adult.is_(False),
             OttAvailability.ott_release_date >= start,
             OttAvailability.ott_release_date < end,
+            OttAvailability.provider.is_not(None),
+            func.length(func.trim(OttAvailability.provider)) > 0,
+            func.lower(OttAvailability.watch_type).in_(("subscription", "ads", "free")),
             # A stored OTT date is the calendar source of truth. Its workflow,
             # verification, source, confidence, and enrichment state are not
             # calendar eligibility criteria.
@@ -1779,8 +1815,9 @@ def calendar(
         .all()
     )
     evidence_query = _apply_language_filter(
-        db.query(Movie, OttEvidence)
-        .join(OttEvidence)
+        _valid_public_ott_evidence_query(db)
+        .join(Movie, Movie.id == OttEvidence.movie_id)
+        .with_entities(Movie, OttEvidence)
         .options(
             selectinload(Movie.genres),
             selectinload(Movie.languages),
@@ -1792,42 +1829,6 @@ def calendar(
             Movie.adult.is_(False),
             OttEvidence.release_date >= start,
             OttEvidence.release_date < end,
-            OttEvidence.rejected_at.is_(None),
-        ),
-        language,
-    )
-    source_query = _apply_language_filter(
-        db.query(Movie, OttSourceRelease)
-        .join(OttSourceRelease, OttSourceRelease.matched_movie_id == Movie.id)
-        .options(
-            selectinload(Movie.genres),
-            selectinload(Movie.languages),
-            selectinload(Movie.ratings),
-            selectinload(Movie.external_ids),
-        )
-        .filter(
-            Movie.safety_public_visibility == "FULL",
-            Movie.adult.is_(False),
-            OttSourceRelease.release_date >= start,
-            OttSourceRelease.release_date < end,
-        ),
-        language,
-    )
-    release_date_query = _apply_language_filter(
-        db.query(Movie, MovieReleaseDate)
-        .join(MovieReleaseDate)
-        .options(
-            selectinload(Movie.genres),
-            selectinload(Movie.languages),
-            selectinload(Movie.ratings),
-            selectinload(Movie.external_ids),
-        )
-        .filter(
-            Movie.safety_public_visibility == "FULL",
-            Movie.adult.is_(False),
-            MovieReleaseDate.release_date >= start,
-            MovieReleaseDate.release_date < end,
-            func.lower(MovieReleaseDate.release_type).in_(("4", "digital", "ott", "streaming")),
         ),
         language,
     )
@@ -1839,28 +1840,25 @@ def calendar(
         (movie, row.platform, row.release_date, row.country, None)
         for movie, row in evidence_query.all()
     )
-    ott_rows.extend(
-        (movie, row.platform, row.release_date, None, None)
-        for movie, row in source_query.all()
-    )
-    ott_rows.extend(
-        (movie, None, row.release_date, row.country, None)
-        for movie, row in release_date_query.all()
-    )
     # One card per local movie and OTT release date. Multiple confirmed
     # providers on the same date are combined without moving later releases
     # into an earlier date group.
     grouped = {}
     for movie, provider, release_date, country, provider_logo in ott_rows:
+        normalized_provider = normalize_platform(provider)
+        if not normalized_provider or normalized_provider.casefold() in {
+            "unknown", "platform tba", "tba", "digital", "vod",
+        }:
+            continue
         key = (movie.id, release_date)
         item = grouped.setdefault(key, _card(movie) | {
             "release_date": release_date,
             "ott_release_date": release_date,
-            "ott_platform_slug": platform_slug(provider) if provider else None,
+            "ott_platform_slug": platform_slug(normalized_provider),
             "ott_platform_logo": provider_logo,
             "ott_releases": [],
         })
-        release = {"platform": normalize_platform(provider) if provider else "Platform TBA",
+        release = {"platform": normalized_provider,
                    "release_date": release_date, "country": country}
         existing_release = next(
             (
@@ -1978,6 +1976,7 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
     ).classify_movie(movie, sync_evidence=False)
     ott_summary = best_canonical_ott(movie)
     confirmed_ott = confirmed_canonical_ott(movie)
+    evidence_ott = _public_ott_evidence_release(db, movie.id)
     platforms = sorted({normalize_platform(x.provider) for x in movie.ott_availabilities
                           if x.status in PUBLIC_OTT_STATES and normalize_platform(x.provider)})
     grouped_crew = {}
@@ -2028,7 +2027,9 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
                 normalize_platform(ott_summary.provider) if ott_summary else None
             ),
             "ott_release_date": (
-                confirmed_ott.ott_release_date if confirmed_ott else None
+                confirmed_ott.ott_release_date
+                if confirmed_ott
+                else evidence_ott.release_date if evidence_ott else None
             ),
             "certification": certification,
             "budget": movie.budget,
@@ -2150,15 +2151,88 @@ def movie_detail(movie_id: int, db: Session = Depends(get_db)):
     }
     primary_trailer = next((item for item in movie.trailers if item.is_primary and not item.is_unavailable), None)
     quality = evaluate_movie_ads_quality(movie, credits=credits, releases=releases, trailer=primary_trailer)
-    timeline = []
     labels = {"2": "Limited theatrical release", "3": "Theatrical release", "4": "Digital release", "theatrical": "Theatrical release", "digital": "Digital release", "ott": "OTT release", "streaming": "OTT release"}
-    for row in releases:
-        timeline.append({"date": row.release_date, "label": labels.get(row.release_type.lower(), f"{row.release_type} release"), "kind": "release"})
+    unique_releases = {
+        (row.country or "", row.release_date, row.release_type.lower()): row
+        for row in releases
+    }
+    theatrical_types = {"2", "3", "limited theatrical", "theatrical"}
+    digital_types = {"4", "digital"}
+    streaming_types = {"ott", "streaming"}
+    selected_release_keys = set()
+    timeline = []
+
+    def add_release(row, label: str) -> None:
+        key = (row.country or "", row.release_date, row.release_type.lower())
+        if key in selected_release_keys:
+            return
+        selected_release_keys.add(key)
+        timeline.append({
+            "date": row.release_date,
+            "label": label,
+            "kind": "release",
+            "country": row.country,
+        })
+
+    theatrical = sorted(
+        (row for row in unique_releases.values() if row.release_type.lower() in theatrical_types),
+        key=lambda row: (row.release_date, row.country or ""),
+    )
+    primary = next(
+        (row for row in theatrical if row.release_date == classification.theatrical_date),
+        theatrical[0] if theatrical else None,
+    )
+    if primary:
+        add_release(primary, "Primary theatrical release")
+    for country_code, country_label in (("IN", "India theatrical release"),):
+        row = next((item for item in theatrical if item.country == country_code), None)
+        if row:
+            add_release(row, country_label)
+    for country_code in {item.iso_3166_1 for item in countries if item.iso_3166_1 != "IN"}:
+        row = next((item for item in theatrical if item.country == country_code), None)
+        if row:
+            add_release(row, f"{country_code} theatrical release")
+    digital = sorted(
+        (row for row in unique_releases.values() if row.release_type.lower() in digital_types),
+        key=lambda row: (row.release_date, row.country or ""),
+    )
+    if digital:
+        add_release(digital[0], "Digital release")
+    stored_streaming = sorted(
+        (row for row in unique_releases.values() if row.release_type.lower() in streaming_types),
+        key=lambda row: (row.release_date, row.country or ""),
+    )
+    if stored_streaming:
+        add_release(stored_streaming[0], "OTT release")
+    seen_ott = set()
     for row in _canonical_ott_rows(movie):
         if row.ott_release_date:
-            timeline.append({"date": row.ott_release_date, "label": "OTT release", "kind": "ott"})
-    timeline.sort(key=lambda item: str(item["date"]))
+            key = (normalize_platform(row.provider), row.ott_release_date)
+            if key not in seen_ott:
+                seen_ott.add(key)
+                timeline.append({
+                    "date": row.ott_release_date,
+                    "label": f"OTT release · {key[0]}",
+                    "kind": "ott",
+                    "country": row.country,
+                })
+    timeline.sort(key=lambda item: (str(item["date"]), item["label"]))
+    international_releases = [
+        {
+            "country": row.country,
+            "date": row.release_date,
+            "type": row.release_type,
+            "label": labels.get(row.release_type.lower(), f"{row.release_type} release"),
+            "certification": row.certification,
+            "note": row.note,
+        }
+        for key, row in sorted(
+            unique_releases.items(), key=lambda item: (item[0][1], item[0][0], item[0][2])
+        )
+        if key not in selected_release_keys
+    ]
     payload["release_timeline"] = timeline
+    payload["international_releases"] = international_releases
     payload["ads"] = {"eligible": quality.eligible, "reason": quality.reason}
     # Public GET endpoints are deliberately read-only. Maintenance and admin
     # workflows own all repair scheduling.

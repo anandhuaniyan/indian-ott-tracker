@@ -1,6 +1,8 @@
 import json
 import logging
+import uuid
 from datetime import date, datetime, timedelta, timezone
+from redis import Redis
 from sqlalchemy import case, exists, func, select
 from app.workers.celery_app import celery_app
 from app.database.connection import SessionLocal
@@ -9,10 +11,15 @@ from app.services.operations import (
     OttResearchService,
     ResearchUsageService,
 )
-from app.services.release_status import ReleaseStatusService
+from app.services.release_status import (
+    INDIAN_ORIGINAL_LANGUAGE_CODES,
+    ReleaseStatusService,
+    site_date,
+)
 from app.services.image_fallback import ImageFallbackService
 from app.config.settings import settings
 from app.core.secrets import sanitize_error
+from app.services.tmdb.client import TMDbRequestError
 from app.services.ott_providers import (
     configured_ott_provider,
     inspect_source,
@@ -29,6 +36,75 @@ from app.models.operations import (
 from app.models.ott_availability import OttAvailability
 
 log = logging.getLogger(__name__)
+
+CATALOGUE_RECONCILIATION_LOCK = "locks:tmdb:catalogue_reconciliation"
+CATALOGUE_RECONCILIATION_LOCK_TTL = 12 * 60 * 60
+
+
+def _acquire_catalogue_reconciliation_lock() -> tuple[Redis, str] | None:
+    client = Redis.from_url(settings.REDIS_URL)
+    token = str(uuid.uuid4())
+    acquired = client.set(
+        CATALOGUE_RECONCILIATION_LOCK,
+        token,
+        nx=True,
+        ex=CATALOGUE_RECONCILIATION_LOCK_TTL,
+    )
+    return (client, token) if acquired else None
+
+
+def _release_catalogue_reconciliation_lock(client: Redis, token: str) -> None:
+    client.eval(
+        """
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+            return redis.call('del', KEYS[1])
+        end
+        return 0
+        """,
+        1,
+        CATALOGUE_RECONCILIATION_LOCK,
+        token,
+    )
+
+
+@celery_app.task(name="content_safety.scan", bind=True)
+def content_safety_scan(self, batch_size: int = 500, continuous: bool = False):
+    from app.services.content_safety import ContentSafetyService
+
+    result = _run(lambda db: ContentSafetyService(db).scan_batch(batch_size, bulk=True))
+    if continuous and not result.get("complete"):
+        self.apply_async(kwargs={"batch_size": batch_size, "continuous": True}, countdown=2)
+    return result
+
+
+@celery_app.task(
+    name="content_safety.notification",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=300,
+)
+def content_safety_notification(self, audit_id: int):
+    from app.services.content_safety import ContentSafetyService
+
+    sent = _run(lambda db: ContentSafetyService(db).notify_audit(audit_id))
+    if not sent:
+        raise self.retry(exc=RuntimeError("Content-safety Discord delivery failed"))
+    return {"audit_id": audit_id, "status": "SENT"}
+
+
+@celery_app.task(
+    name="content_safety.digest_notification",
+    bind=True,
+    max_retries=3,
+    default_retry_delay=300,
+)
+def content_safety_digest_notification(self, audit_ids: list[int], scanned: int):
+    from app.services.content_safety import ContentSafetyService
+
+    sent = _run(lambda db: ContentSafetyService(db).notify_digest(audit_ids, scanned))
+    if not sent:
+        raise self.retry(exc=RuntimeError("Content-safety Discord digest delivery failed"))
+    return {"audit_ids": audit_ids, "status": "DIGEST_SENT"}
 
 
 def _json_safe(value):
@@ -121,6 +197,24 @@ def _continue(task, result, *, batch_size=None, countdown=2):
         finally:
             db.close()
     return result
+
+
+def _locked_backfill(operation: str, callback):
+    """Allow only one chain step per operation, including after redelivery."""
+    client = Redis.from_url(settings.REDIS_URL)
+    key = f"backfill-lock:{operation}"
+    token = uuid.uuid4().hex
+    if not client.set(key, token, nx=True, ex=3600):
+        return {"operation": operation, "complete": True, "duplicate_skipped": True}
+    try:
+        return _run(callback)
+    finally:
+        client.eval(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
+            1,
+            key,
+            token,
+        )
 
 
 @celery_app.task(
@@ -217,6 +311,90 @@ def movie_discovery_weekly():
 
 
 @celery_app.task(
+    name="tmdb.catalogue_reconciliation",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def tmdb_catalogue_reconciliation():
+    """Rescan supported TMDB catalogues with durable, isolated cursors."""
+    lock = _acquire_catalogue_reconciliation_lock()
+    if lock is None:
+        log.info("job=tmdb.catalogue_reconciliation outcome=skipped_active_run")
+        return {"status": "SKIPPED_ACTIVE_RUN", "processed": 0, "inserted": 0, "errors": 0}
+
+    client, token = lock
+    try:
+        from app.services.languages import LANGUAGE_CONFIG
+        from app.services.tmdb.bulk_importer import SUPPORTED_LANGUAGES, TMDbBulkImporter
+
+        priority = ("ml", "ta", "te", "hi", "kn", "ko", "ja", "en", "fr")
+        enabled = {
+            language.code
+            for language in LANGUAGE_CONFIG
+            if language.enabled and language.code in SUPPORTED_LANGUAGES
+        }
+        languages = [language for language in priority if language in enabled]
+        languages.extend(sorted(enabled.difference(languages)))
+        current_year = date.today().year
+        vote_floors = {language: 0 for language in languages}
+        segments: dict[str, dict] = {}
+
+        # Independent future-year cursors prevent a large current-year catalogue
+        # from starving the following two upcoming years.
+        for year in range(current_year, current_year + 3):
+            segments[str(year)] = TMDbBulkImporter(
+                languages=languages,
+                start_year=year,
+                end_year=year,
+                end_date=date(year, 12, 31),
+                operation_prefix=f"movies.catalogue_reconciliation.{year}",
+                minimum_vote_counts=vote_floors,
+            ).run_import(
+                restart_completed=False,
+                max_pages=5,
+                max_new_movies_per_language=10,
+            )
+
+        if current_year > 2011:
+            segments["history"] = TMDbBulkImporter(
+                languages=languages,
+                start_year=2011,
+                end_year=current_year - 1,
+                end_date=date(current_year - 1, 12, 31),
+                operation_prefix="movies.catalogue_reconciliation.history",
+                minimum_vote_counts=vote_floors,
+            ).run_import(
+                restart_completed=False,
+                max_pages=5,
+                max_new_movies_per_language=10,
+            )
+
+        totals = {
+            key: sum(int(result.get(key) or 0) for result in segments.values())
+            for key in (
+                "processed",
+                "inserted",
+                "existing",
+                "filtered",
+                "duplicate_imdb",
+                "errors",
+            )
+        }
+        rejected_by_reason: dict[str, int] = {}
+        for result in segments.values():
+            for reason, count in (result.get("rejected_by_reason") or {}).items():
+                rejected_by_reason[reason] = rejected_by_reason.get(reason, 0) + int(count)
+        return {
+            **totals,
+            "rejected_by_reason": rejected_by_reason,
+            "segments": segments,
+        }
+    finally:
+        _release_catalogue_reconciliation_lock(client, token)
+
+
+@celery_app.task(
     name="movies.discovery_manual",
     autoretry_for=(Exception,),
     retry_backoff=True,
@@ -264,19 +442,30 @@ def movie_discovery_manual(deep: bool = False, research_run_id: str | None = Non
 
 @celery_app.task(
     name="tmdb.metadata_enrichment",
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    max_retries=3,
+    autoretry_for=(),
 )
 def metadata_enrichment():
     def run(db):
         from app.services.movie_metadata_service import MovieMetadataService
+        from app.services.tmdb.client import metadata_request_context
 
         state = db.query(OperationState).filter_by(name="metadata_enrichment").first()
         if not state:
             state = OperationState(name="metadata_enrichment")
             db.add(state)
             db.flush()
+        # Keep failed movies retryable without allowing them to starve the
+        # normal cursor scan. Each scheduled run has at most five retry slots.
+        now = datetime.now(timezone.utc)
+        retry_ids = []
+        for issue in db.query(DataQualityIssue).filter_by(
+            issue_type="TMDB_METADATA_RETRY_PENDING", resolved_at=None
+        ).order_by(DataQualityIssue.id):
+            deadline = datetime.fromisoformat(json.loads(issue.detail)["next_retry_at"])
+            if deadline <= now and issue.movie_id <= state.cursor:
+                retry_ids.append(issue.movie_id)
+            if len(retry_ids) == 5:
+                break
         movies = (
             db.query(Movie)
             .filter(Movie.id > state.cursor)
@@ -284,24 +473,93 @@ def metadata_enrichment():
             .limit(20)
             .all()
         )
+        cycle_complete = not movies
+        movies = db.query(Movie).filter(Movie.id.in_(retry_ids)).all() + movies
         if not movies:
             state.cursor = 0
             db.commit()
             return {"processed": 0, "cycle_complete": True}
         service = MovieMetadataService(db)
         ott_service = OttResearchService(db, settings.OTT_CONFIRMATION_THRESHOLD)
+        processed = failed = 0
         for movie in movies:
-            service.enrich_movie(movie)
+            movie_id, tmdb_id = movie.id, movie.tmdb_id
+            pending = db.query(DataQualityIssue).filter_by(
+                movie_id=movie_id, issue_type="TMDB_METADATA_RETRY_PENDING", resolved_at=None
+            ).first()
+            if pending and datetime.fromisoformat(json.loads(pending.detail)["next_retry_at"]) > now:
+                state.cursor = max(state.cursor, movie_id)
+                db.commit()
+                continue
+            # Skip movies with an open TMDB_NOT_FOUND issue
+            if (
+                db.query(DataQualityIssue)
+                .filter_by(
+                    movie_id=movie.id, issue_type="TMDB_NOT_FOUND", resolved_at=None
+                )
+                .first()
+            ):
+                state.cursor = max(state.cursor, movie_id)
+                db.commit()
+                continue
+
+            try:
+                with metadata_request_context(movie_id, tmdb_id):
+                    service.enrich_movie(movie)
+            except TMDbRequestError as exc:
+                db.rollback()
+                # Persist an existing state before enrichment so rollback
+                # cannot discard a newly created cursor record.
+                state = db.query(OperationState).filter_by(name="metadata_enrichment").first()
+                if state is None:
+                    state = OperationState(name="metadata_enrichment", cursor=0, processed_count=0)
+                    db.add(state)
+                kind = ("TMDB_NOT_FOUND" if exc.status_code == 404 else
+                        "TMDB_METADATA_RETRY_PENDING" if exc.retryable else "TMDB_METADATA_NEEDS_REVIEW")
+                issue = db.query(DataQualityIssue).filter_by(
+                    movie_id=movie_id, issue_type=kind, resolved_at=None
+                ).first()
+                if issue is None:
+                    issue = DataQualityIssue(movie_id=movie_id, issue_type=kind, severity="warning")
+                    db.add(issue)
+                delay = max(900, getattr(exc, "retry_after", 0))
+                issue.detail = json.dumps({
+                    "endpoint": exc.endpoint.split("?", 1)[0], "status": exc.status_code,
+                    "attempts": exc.attempts,
+                    "next_retry_at": (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat(),
+                })
+                if pending is not None and kind != "TMDB_METADATA_RETRY_PENDING":
+                    pending.resolved_at = datetime.now(timezone.utc)
+                state.cursor = max(state.cursor, movie_id)
+                state.last_failure_at = datetime.now(timezone.utc)
+                state.last_error = str(exc)
+                db.commit()
+                failed += 1
+                log.warning(
+                    "job=tmdb.metadata_enrichment movie_id=%s tmdb_id=%s endpoint=%s "
+                    "status=%s attempt=%s max_attempts=5 next_retry_delay=%s outcome=%s",
+                    movie_id, tmdb_id, exc.endpoint, exc.status_code, exc.attempts,
+                    delay if exc.retryable else 0, kind,
+                )
+                continue
+
             ReleaseStatusService(db).classify_movie(movie)
             ott_service.queue_movie(movie.id)
-            state.cursor = movie.id
+            if pending:
+                pending.resolved_at = datetime.now(timezone.utc)
+            state.cursor = max(state.cursor, movie.id)
             state.processed_count += 1
+            processed += 1
+            db.commit()
+        if cycle_complete:
+            state.cursor = 0
         state.last_success_at = datetime.now(timezone.utc)
         db.commit()
         return {
-            "processed": len(movies),
+            "processed": processed,
+            "failed": failed,
             "cursor": state.cursor,
-            "cycle_complete": False,
+            "cycle_complete": cycle_complete,
         }
 
     return _run(run)
@@ -325,7 +583,7 @@ def imdb_rating_refresh():
 def imdb_id_backfill(self, batch_size=None, continuous=True):
     from app.services.backfill import IMDbIdRecoveryService
 
-    result = _run(lambda db: IMDbIdRecoveryService(db).run(batch_size))
+    result = _locked_backfill("ratings.imdb_id_backfill", lambda db: IMDbIdRecoveryService(db).run(batch_size))
     return (
         _continue(self, result, batch_size=batch_size, countdown=5)
         if continuous
@@ -337,7 +595,7 @@ def imdb_id_backfill(self, batch_size=None, continuous=True):
 def metadata_backfill(self, batch_size=None, continuous=True):
     from app.services.backfill import MetadataBackfillService
 
-    result = _run(lambda db: MetadataBackfillService(db).run(batch_size))
+    result = _locked_backfill("tmdb.metadata_backfill", lambda db: MetadataBackfillService(db).run(batch_size))
     return _continue(self, result, batch_size=batch_size) if continuous else result
 
 
@@ -345,7 +603,7 @@ def metadata_backfill(self, batch_size=None, continuous=True):
 def person_backfill(self, batch_size=None, continuous=True):
     from app.services.backfill import PersonBackfillService
 
-    result = _run(lambda db: PersonBackfillService(db).run(batch_size))
+    result = _locked_backfill("tmdb.person_backfill", lambda db: PersonBackfillService(db).run(batch_size))
     return _continue(self, result, batch_size=batch_size) if continuous else result
 
 
@@ -353,7 +611,7 @@ def person_backfill(self, batch_size=None, continuous=True):
 def image_backfill(self, batch_size=None, continuous=True):
     from app.services.backfill import ImageBackfillService
 
-    result = _run(lambda db: ImageBackfillService(db).run(batch_size))
+    result = _locked_backfill("operations.image_backfill", lambda db: ImageBackfillService(db).run(batch_size))
     return _continue(self, result, batch_size=batch_size) if continuous else result
 
 
@@ -361,7 +619,7 @@ def image_backfill(self, batch_size=None, continuous=True):
 def trailer_backfill(self, batch_size=None, continuous=True):
     from app.services.backfill import TrailerBackfillService
 
-    result = _run(lambda db: TrailerBackfillService(db).run(batch_size))
+    result = _locked_backfill("tmdb.trailer_backfill", lambda db: TrailerBackfillService(db).run(batch_size))
     return (
         _continue(self, result, batch_size=batch_size, countdown=5)
         if continuous
@@ -373,7 +631,7 @@ def trailer_backfill(self, batch_size=None, continuous=True):
 def imdb_backfill(self, batch_size=None, continuous=True):
     from app.services.backfill import IMDbBackfillService
 
-    result = _run(lambda db: IMDbBackfillService(db).run(batch_size))
+    result = _locked_backfill("ratings.imdb_backfill", lambda db: IMDbBackfillService(db).run(batch_size))
     return (
         _continue(self, result, batch_size=batch_size, countdown=5)
         if continuous
@@ -385,7 +643,7 @@ def imdb_backfill(self, batch_size=None, continuous=True):
 def ott_backfill(self, batch_size=None, continuous=True):
     from app.services.backfill import OttQueueBackfillService
 
-    result = _run(lambda db: OttQueueBackfillService(db).run(batch_size))
+    result = _locked_backfill("operations.ott_eligibility_backfill", lambda db: OttQueueBackfillService(db).run(batch_size))
     return _continue(self, result, batch_size=batch_size) if continuous else result
 
 
@@ -547,7 +805,20 @@ def cleanup():
     return _run(run)
 
 
-def _ott_research_batch(db, research_run_id: str | None = None):
+def _window_tier(movie, today):
+    """0=recent window, 1=mid window, 2=older. None date counts as older."""
+    if not movie or not movie.theatrical_release_date:
+        return 2
+    high_cutoff = today - timedelta(days=settings.OTT_RESEARCH_HIGH_PRIORITY_DAYS)
+    medium_cutoff = today - timedelta(days=settings.OTT_RESEARCH_MEDIUM_PRIORITY_DAYS)
+    if movie.theatrical_release_date >= high_cutoff:
+        return 0
+    if movie.theatrical_release_date >= medium_cutoff:
+        return 1
+    return 2
+
+
+def _ott_research_batch(db, research_run_id: str | None = None, limit: int | None = None):
     provider = configured_ott_provider()
     service = OttResearchService(db, settings.OTT_CONFIRMATION_THRESHOLD)
     if not getattr(provider, "configured", False):
@@ -559,6 +830,8 @@ def _ott_research_batch(db, research_run_id: str | None = None):
         usage.monthly_snapshot(now) if getattr(provider, "is_tavily", False) else None
     )
     available_slots = daily["remaining"]
+    if limit is not None:
+        available_slots = min(limit, available_slots)
     if monthly is not None and monthly["remaining"] <= 0:
         return {
             "configured": True,
@@ -585,11 +858,36 @@ def _ott_research_batch(db, research_run_id: str | None = None):
             MovieRequest.status.in_(["PENDING", "REVIEWING", "FOUND"]),
         )
     )
+    today = site_date(now)
+    high_cutoff = today - timedelta(days=settings.OTT_RESEARCH_HIGH_PRIORITY_DAYS)
+    medium_cutoff = today - timedelta(days=settings.OTT_RESEARCH_MEDIUM_PRIORITY_DAYS)
+    language_rank = case(
+        (Movie.original_language == "ml", 0),
+        (Movie.original_language == "ta", 1),
+        (Movie.original_language == "te", 2),
+        (Movie.original_language == "hi", 3),
+        (Movie.original_language == "kn", 4),
+        else_=5,
+    )
+    release_window_rank = case(
+        (
+            Movie.theatrical_release_date.isnot(None)
+            & (Movie.theatrical_release_date >= high_cutoff),
+            0,
+        ),
+        (
+            Movie.theatrical_release_date.isnot(None)
+            & (Movie.theatrical_release_date >= medium_cutoff),
+            1,
+        ),
+        else_=2,
+    )
     queue = (
         db.query(OttEvidence)
         .join(Movie, Movie.id == OttEvidence.movie_id)
         .filter(
             Movie.ott_research_eligibility == "ELIGIBLE",
+            Movie.original_language.in_(INDIAN_ORIGINAL_LANGUAGE_CODES),
             OttEvidence.source_url.is_(None),
             OttEvidence.status.in_(
                 ["UNKNOWN", "QUEUED", "POSSIBLE", "NOT_FOUND", "CONFLICTING", "FAILED"]
@@ -598,13 +896,45 @@ def _ott_research_batch(db, research_run_id: str | None = None):
         )
         .order_by(
             case((requested, 0), else_=1),
+            release_window_rank,
+            language_rank,
             Movie.theatrical_release_date.desc(),
             Movie.popularity.desc(),
             OttEvidence.next_check,
         )
-        .limit(available_slots)
+        .limit(100)
         .all()
     )
+    if limit is not None and limit >= 5:
+        high_slots = min(
+            max(1, int(limit * 0.7)) if limit >= 5 else limit,
+            available_slots,
+        )
+        medium_slots = available_slots - high_slots
+        pool_movies = {
+            m.id: m
+            for m in db.query(Movie).filter(Movie.id.in_([i.movie_id for i in queue])).all()
+        }
+
+        def tier(item):
+            movie = pool_movies.get(item.movie_id)
+            return _window_tier(movie, today) if movie else 2
+
+        high = [item for item in queue if tier(item) == 0][:high_slots]
+        medium = [item for item in queue if tier(item) == 1][:medium_slots]
+        older = [item for item in queue if tier(item) == 2]
+        queue = high + medium + older[: available_slots - len(high) - len(medium)]
+
+    if not queue:
+        return {
+            "configured": True,
+            "processed": 0,
+            "queries": 0,
+            "complete": True,
+            "daily": daily,
+            "monthly": monthly,
+            "limit": limit,
+        }
     processed = 0
     queries_used = 0
     for item in queue:
@@ -716,6 +1046,7 @@ def _ott_research_batch(db, research_run_id: str | None = None):
             )
             if evidence.status == "CONFIRMED":
                 evaluated = "CONFIRMED"
+                break
             elif evidence.status in {"CONFLICTING", "NEEDS_REVIEW"}:
                 evaluated = evidence.status
             elif evaluated == "UNKNOWN":
@@ -790,6 +1121,115 @@ def ott_research():
             parent.completed_at = datetime.now(timezone.utc)
             db.commit()
             raise
+    return _run(run)
+
+
+@celery_app.task(
+    name="operations.ott_research_scheduled",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def ott_research_scheduled(limit: int, run_key: str):
+    from app.models.research import ResearchRun
+    from app.services.research import ResearchPipelineService
+
+    def run(db):
+        service = ResearchPipelineService(db)
+        parent, created = service.create_run(
+            trigger_type="AUTOMATED_SCHEDULE", initiated_by="celery:beat",
+            category="OTT", active_key=run_key,
+        )
+        if not created:
+            return service.serialize(parent) | {"skipped": "already_running"}
+        parent.status, parent.started_at = "RUNNING", datetime.now(timezone.utc)
+        db.commit()
+        try:
+            result = _ott_research_batch(db, parent.run_id, limit=limit)
+            parent = db.query(ResearchRun).filter_by(run_id=parent.run_id).one()
+            parent.status = "COMPLETE"
+            parent.evidence_created = db.query(func.count(OttEvidence.id)).filter_by(research_run_id=parent.run_id).scalar() or 0
+            parent.result = "UPDATED" if parent.evidence_created else "NO_CHANGE"
+            parent.database_changes = ["evidence_created"] if parent.evidence_created else []
+            parent.details = {"batch": _json_safe(result)}
+            parent.completed_at, parent.active_key = datetime.now(timezone.utc), None
+            db.commit()
+            return service.serialize(parent)
+        except Exception:
+            parent = db.query(ResearchRun).filter_by(run_id=parent.run_id).one()
+            parent.status, parent.result, parent.active_key = "FAILED", "FAILED", None
+            parent.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            raise
+    return _run(run)
+
+
+@celery_app.task(name="operations.ai_ott_research_movie")
+def ai_ott_research_movie(movie_id: int, dry_run: bool = True):
+    """Bounded, singleton AI research for one movie; intentionally unscheduled."""
+    from app.models.research import ResearchRun
+    from app.services.ott.ai_research import OTTResearchAgent
+    from app.services.ai_research_audit import AIResearchAuditService
+    from app.models.ai_research_audit import AIResearchAuditRun
+    from app.services.research import ResearchPipelineService
+
+    def run(db):
+        if not dry_run and not settings.AI_RESEARCH_ENABLED:
+            return {
+                "movie_id": movie_id,
+                "decision": "DEFERRED_PROVIDER_ERROR",
+                "provider_error": "AI_RESEARCH_DISABLED",
+                "evidence_created": 0,
+            }
+        service = ResearchPipelineService(db)
+        record, created = service.create_run(
+            movie_id=movie_id,
+            trigger_type="ADMIN_MANUAL",
+            initiated_by="celery:ai-ott-research",
+            category="OTT_AI",
+            active_key=f"ai-ott:{movie_id}",
+        )
+        if not created:
+            return service.serialize(record) | {"skipped": "already_running"}
+        record.status = "RUNNING"
+        record.started_at = datetime.now(timezone.utc)
+        db.commit()
+        try:
+            report = OTTResearchAgent(db).research_movie(
+                movie_id,
+                dry_run=dry_run,
+                research_run_id=record.run_id,
+            )
+            payload = report.serializable()
+            record = db.query(ResearchRun).filter_by(run_id=record.run_id).one()
+            record.status = "COMPLETE"
+            record.result = report.decision.value
+            record.queries_attempted = report.queries
+            record.providers_attempted = [report.provider]
+            record.web_searches_attempted = len(report.queries)
+            record.sources_discovered = len(report.findings)
+            record.evidence_created = report.evidence_created
+            record.details = {"ai_research": payload, "dry_run": dry_run}
+            record.completed_at = datetime.now(timezone.utc)
+            record.active_key = None
+            db.commit()
+            AIResearchAuditService(db).complete_run(record.run_id)
+            return payload
+        except Exception as exc:
+            db.rollback()
+            record = db.query(ResearchRun).filter_by(run_id=record.run_id).one()
+            record.status = "FAILED"
+            record.result = "DEFERRED_PROVIDER_ERROR"
+            record.errors = [{"step": "ai_ott_research", "error": sanitize_error(exc)}]
+            record.completed_at = datetime.now(timezone.utc)
+            record.active_key = None
+            db.commit()
+            if db.get(AIResearchAuditRun, record.run_id):
+                AIResearchAuditService(db).complete_run(
+                    record.run_id, status="FAILED", error=exc
+                )
+            raise
+
     return _run(run)
 
 
@@ -934,6 +1374,19 @@ def ott_intelligence_movie(movie_id: int):
 
 
 @celery_app.task(
+    name="operations.ott_catalogue_audit",
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    max_retries=3,
+)
+def ott_catalogue_audit(batch_size: int = 100):
+    """Advance the priority-ordered, database-wide India OTT audit."""
+    from app.services.ott.catalogue_audit import OttCatalogueAuditService
+
+    return _run(lambda db: OttCatalogueAuditService(db).run(batch_size=batch_size))
+
+
+@celery_app.task(
     name="operations.ott_intelligence_weekly",
     autoretry_for=(Exception,),
     retry_backoff=True,
@@ -1005,6 +1458,17 @@ def repair_orchestrator(self):
                 state.cursor += 1
         elif state.cursor == 5:
             result = _ott_research_batch(db)
+            if result.get("stopped"):
+                state.status = "PAUSED"
+                state.last_failure_at = datetime.now(timezone.utc)
+                state.last_error = str(result["stopped"])
+                db.commit()
+                return {
+                    "complete": True,
+                    "blocked": result["stopped"],
+                    "stage": state.cursor,
+                    "result": result,
+                }
             if result.get("complete") or result.get("configured") is False:
                 state.cursor = 6
                 health = db.query(OperationState).filter_by(name="data_health").first()

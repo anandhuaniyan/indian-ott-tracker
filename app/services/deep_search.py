@@ -14,7 +14,8 @@ from app.config.settings import settings
 from app.models.movie import Movie
 from app.models.movie_metadata import Person
 from app.services.roles import normalize_role
-from app.services.languages import language_name
+from app.services.languages import language_filter_codes, language_name, normalize_language_code
+from app.services.movie_title_search import rank_live_movie_results
 from app.services.tmdb.client import TMDbClient
 
 
@@ -111,7 +112,9 @@ class DeepSearchService:
             "title": item.get("title") or item.get("original_title") or "Untitled",
             "original_title": item.get("original_title"),
             "release_date": item.get("release_date") or None,
-            "original_language": item.get("original_language") or None,
+            "original_language": normalize_language_code(
+                item.get("original_language")
+            ),
             "original_language_name": language_name(item.get("original_language")),
             "overview": item.get("overview") or None,
             "poster_path": item.get("poster_path") or None,
@@ -189,14 +192,20 @@ class DeepSearchService:
         # TMDB's search ``language`` parameter localizes returned text; it does
         # not filter original language. Keep the lookup a genuine movie search
         # and apply the requested original-language filter to its live results.
-        if language:
-            raw = [item for item in raw if item.get("original_language") == language]
+        language_codes = language_filter_codes(language)
+        if language_codes:
+            raw = [
+                item
+                for item in raw
+                if normalize_language_code(item.get("original_language")) in language_codes
+            ]
+        raw = rank_live_movie_results(query, raw)
         matches = self._movie_matches(raw)
         return {
             "source": "live",
             "page": payload.get("page", page),
             "total_pages": min(payload.get("total_pages") or 0, 500),
-            "total_results": len(raw) if language else payload.get("total_results") or 0,
+            "total_results": len(raw) if language_codes else payload.get("total_results") or 0,
             "results": [self._movie_summary(item, matches.get(item.get("id"))) for item in raw],
         }
 
@@ -287,7 +296,9 @@ class DeepSearchService:
             ttl=self.DETAIL_TTL,
             append_to_response=append,
         )
-        original_language = payload.get("original_language") or "en"
+        original_language = (
+            normalize_language_code(payload.get("original_language")) or "en"
+        )
         image_languages = ",".join(dict.fromkeys(["en", original_language, "null"]))
         image_payload = self._get(
             f"/movie/{movie_id}/images",
@@ -387,7 +398,9 @@ class DeepSearchService:
             "verified_title": title,
             "original_title": payload.get("original_title") or None,
             "release_date": (payload.get("release_date") or "")[:10] or None,
-            "original_language": payload.get("original_language") or None,
+            "original_language": normalize_language_code(
+                payload.get("original_language")
+            ),
             "language_name": language_name(payload.get("original_language")),
             "poster_path": payload.get("poster_path") or None,
             "backdrop_path": payload.get("backdrop_path") or None,

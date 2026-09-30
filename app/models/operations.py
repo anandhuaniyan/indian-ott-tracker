@@ -124,6 +124,9 @@ class ContactRequest(TimestampMixin, Base):
     expected_ott_platform: Mapped[str | None] = mapped_column(String(100))
     expected_ott_release_date: Mapped[date | None] = mapped_column(Date)
     evidence_url: Mapped[str | None] = mapped_column(String(1000))
+    screenshot_path: Mapped[str | None] = mapped_column(String(255))
+    screenshot_mime_type: Mapped[str | None] = mapped_column(String(50))
+    screenshot_size: Mapped[int | None] = mapped_column(Integer)
     local_movie_id: Mapped[int | None] = mapped_column(
         ForeignKey("movies.id", ondelete="SET NULL"), index=True
     )
@@ -258,13 +261,39 @@ class OperationState(TimestampMixin, Base):
     processed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     status: Mapped[str] = mapped_column(
-        String(20), default="IDLE", nullable=False, index=True
+        String(40), default="IDLE", nullable=False, index=True
     )
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     details: Mapped[dict | None] = mapped_column(JSON)
+
+
+class MaintenanceWindow(TimestampMixin, Base):
+    """Administrator-managed public maintenance notice."""
+
+    __tablename__ = "maintenance_windows"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    start_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    end_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), default="SCHEDULED", nullable=False, index=True
+    )
+    affected_services: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    impact_level: Mapped[str] = mapped_column(
+        String(20), default="LOW", nullable=False
+    )
+    impact_message: Mapped[str] = mapped_column(String(500), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AdminAuditLog(TimestampMixin, Base):

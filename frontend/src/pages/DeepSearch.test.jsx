@@ -22,11 +22,13 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 it("searches live movies with year/language and shows the external ID neutrally", async () => {
-  get.mockImplementation((path) => Promise.resolve(path === "/api/v1/languages" ? [{ code: "ml", name: "Malayalam" }] : { page: 1, total_pages: 1, total_results: 1, results: [{ id: 1469458, title: "Aadu", original_title: "ആട്", release_date: "2026-01-01", original_language: "ml", original_language_name: "Malayalam", poster_path: "/aadu.jpg", overview: "Overview", in_library: false }] }));
+  get.mockImplementation((path) => Promise.resolve(path === "/api/v1/languages" ? [{ code: "ml", name: "Malayalam", region: "indian", group: "primary" }] : { page: 1, total_pages: 1, total_results: 1, results: [{ id: 1469458, title: "Aadu", original_title: "ആട്", release_date: "2026-01-01", original_language: "ml", original_language_name: "Malayalam", poster_path: "/aadu.jpg", overview: "Overview", in_library: false }] }));
   render(<MemoryRouter><DeepSearch/></MemoryRouter>);
+  await screen.findByRole("tab", { name: "Indian" });
   fireEvent.change(screen.getByLabelText("Movie name"), { target: { value: "Aadu" } });
   fireEvent.change(screen.getByLabelText("Year"), { target: { value: "2026" } });
-  fireEvent.change(screen.getByLabelText("Language"), { target: { value: "ml" } });
+  fireEvent.click(screen.getByRole("tab", { name: "Indian" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Malayalam" }));
   fireEvent.click(screen.getByRole("button", { name: "Search live source" }));
   expect(await screen.findByRole("heading", { name: "Aadu" })).toBeInTheDocument();
   expect(screen.getByText("1469458")).toBeInTheDocument();
@@ -36,6 +38,25 @@ it("searches live movies with year/language and shows the external ID neutrally"
   expect(screen.getByText("Not in local database")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Request Movie" })).toHaveAttribute("href", "/request-movie?movie_name=Aadu&movie_external_id=1469458&release_year=2026&language=ml");
   expect(document.body).not.toHaveTextContent(/TMDB/i);
+});
+
+it("keeps each deep-search mode in its dedicated responsive form layout", async () => {
+  get.mockResolvedValue([]);
+  render(<MemoryRouter><DeepSearch/></MemoryRouter>);
+
+  const form = document.querySelector(".deep-search-form");
+  expect(form).toHaveClass("deep-search-form-movies");
+  expect(screen.getByText("Languages")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("tab", { name: "People" }));
+  expect(form).toHaveClass("deep-search-form-people");
+  expect(screen.getByLabelText("Person name")).toBeInTheDocument();
+  expect(screen.queryByText("Languages")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Year")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("tab", { name: "IMDb ID" }));
+  expect(form).toHaveClass("deep-search-form-imdb");
+  expect(screen.getByLabelText("IMDb ID")).toBeInTheDocument();
 });
 
 it("renders live movie detail, images, credits, releases, providers, recommendations and similar separately", async () => {
@@ -61,7 +82,7 @@ it("renders live movie detail, images, credits, releases, providers, recommendat
   expect(screen.getByRole("heading", { name: "Similar Movies" })).toBeInTheDocument();
   expect(screen.getByText(/does not establish an OTT release date/i)).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Open Local Movie" })).toHaveAttribute("href", "/movies/91");
-  expect(screen.getByRole("link", { name: "Request Movie" })).toHaveAttribute("href", "/request-movie?movie_name=Aadu&movie_external_id=1469458&language=ml");
+  expect(screen.queryByRole("link", { name: "Request Movie" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Malayalam" })).toHaveAttribute("href", "/languages/ml");
   expect(document.body).not.toHaveTextContent(/TMDB/i);
 });

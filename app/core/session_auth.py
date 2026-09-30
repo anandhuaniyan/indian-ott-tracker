@@ -7,11 +7,15 @@ import secrets
 import threading
 import time
 
-from fastapi import Cookie, HTTPException, Request, status
+from fastapi import Cookie, Depends, HTTPException, Request, status
+from sqlalchemy.orm import Session
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 import redis
 
 from app.config.settings import settings
+from app.core.user_auth import USER_COOKIE, _session_identity
+from app.database.connection import get_db
+from app.models.community_rating import User
 
 COOKIE = "ott_admin_session"
 SESSION_TTL_SECONDS = 60 * 60 * 8
@@ -91,8 +95,30 @@ def create_session() -> str:
     )
 
 
-def require_admin_session(ott_admin_session: str | None = Cookie(default=None)):
-    if not ott_admin_session: raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin login required")
+def require_admin_session(
+    ott_admin_session: str | None = Cookie(default=None),
+    ott_user_session: str | None = Cookie(default=None, alias=USER_COOKIE),
+    db: Session = Depends(get_db),
+):
+    authenticated_non_admin = False
+    user_identity = _session_identity(ott_user_session)
+    user_id = user_identity[0] if user_identity else None
+    if user_id is not None:
+        user = db.get(User, user_id)
+        if (
+            user is None
+            or not user.is_active
+            or user_identity is None
+            or user_identity[1] != user.auth_session_version
+        ):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin login required")
+        if user.role == "ADMIN":
+            return f"user:{user.id}"
+        authenticated_non_admin = True
+    if not ott_admin_session:
+        code = status.HTTP_403_FORBIDDEN if authenticated_non_admin else status.HTTP_401_UNAUTHORIZED
+        detail = "Administrator access required" if authenticated_non_admin else "Admin login required"
+        raise HTTPException(status_code=code, detail=detail)
     try:
         payload = _signer().loads(ott_admin_session, max_age=SESSION_TTL_SECONDS)
         session_id = payload.get("sid")

@@ -153,6 +153,7 @@ def test_omdb_diagnostic_lists_only_missing_names(database, monkeypatch):
     monkeypatch.setattr(settings, "IMDB_RATING_PROVIDER", "")
     monkeypatch.setattr(settings, "IMDB_RATING_API_URL", "")
     monkeypatch.setattr(settings, "IMDB_RATING_API_KEY", "")
+    monkeypatch.setattr(settings, "OMDB_API_KEYS", "")
     status = IMDbRatingRefreshService(database).health()
     assert status["configured"] is False
     assert status["status"] == "NOT_CONFIGURED"

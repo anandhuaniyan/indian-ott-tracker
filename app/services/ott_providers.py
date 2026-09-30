@@ -102,6 +102,8 @@ PLATFORM_ALIASES = {
     "aha": "aha",
 }
 
+PUBLIC_OTT_STATES = ("available", "confirmed", "announced", "upcoming", "released")
+
 LANGUAGE_NAMES = {
     "ml": "malayalam",
     "ta": "tamil",
@@ -112,6 +114,13 @@ LANGUAGE_NAMES = {
     "mr": "marathi",
     "pa": "punjabi",
     "gu": "gujarati",
+    "en": "english",
+    "ko": "korean",
+    "ja": "japanese",
+    "zh": "chinese",
+    "es": "spanish",
+    "fr": "french",
+    "th": "thai",
 }
 
 INDIA_FOCUSED_DOMAINS = (
@@ -135,14 +144,19 @@ OTT_CUES = re.compile(
 
 
 def source_rank(url: str | None) -> tuple[str, float]:
-    domain = (url or "").lower()
-    if any(x in domain for x in OFFICIAL):
+    hostname = (urlparse(url or "").hostname or "").lower().rstrip(".")
+
+    def matches(candidate: str) -> bool:
+        candidate = candidate.lower().rstrip(".")
+        return hostname == candidate or hostname.endswith(f".{candidate}")
+
+    if any(matches(x) for x in OFFICIAL):
         return "official_platform", 95.0
-    if any(x in domain for x in OFFICIAL_STUDIO):
+    if any(matches(x) for x in OFFICIAL_STUDIO):
         return "official_announcement", 92.0
-    if any(x in domain for x in OFFICIAL_ANNOUNCEMENT):
+    if any(matches(x) for x in OFFICIAL_ANNOUNCEMENT):
         return "official_announcement_needs_identity_verification", 75.0
-    if any(x in domain for x in TRUSTED):
+    if any(matches(x) for x in TRUSTED):
         return "established_publication", 82.0
     return "unknown", 35.0
 
@@ -160,15 +174,26 @@ def normalize_platform(value: str | None) -> str | None:
     return value.strip()
 
 
+def platform_slug(value: str | None) -> str | None:
+    """Return the canonical public route slug for a provider or alias."""
+    canonical = normalize_platform(value)
+    if not canonical or len(canonical) > 100:
+        return None
+    # Reject scraped prose/URLs without mutating the underlying evidence row.
+    if re.search(r"\.{2,}|https?://|[/\\?#]", canonical, re.IGNORECASE):
+        return None
+    return canonical.lower().replace(" ", "-")
+
+
 def source_name(url: str | None) -> str | None:
     hostname = (urlparse(url or "").hostname or "").lower()
     return hostname.removeprefix("www.") or None
 
 
 def _platform(url: str, text: str) -> str | None:
-    domain = urlparse(url).netloc.lower()
+    domain = (urlparse(url).hostname or "").lower().rstrip(".")
     for key, name in PLATFORMS.items():
-        if key in domain:
+        if domain == key or domain.endswith(f".{key}"):
             return name
     return normalize_platform(text)
 
@@ -230,7 +255,7 @@ def _matches_movie(movie, text: str) -> bool:
     )
     explicit_languages = set(
         re.findall(
-            r"\b(malayalam|tamil|telugu|hindi|kannada|bengali|marathi|punjabi|gujarati)\s+(?:film|movie)\b",
+            r"\b(malayalam|tamil|telugu|hindi|kannada|bengali|marathi|punjabi|gujarati|english|korean|japanese|chinese|spanish|french|thai)\s+(?:film|movie)\b",
             text.lower(),
         )
     )
@@ -450,8 +475,8 @@ class TavilySearchProvider:
             timeout=self.timeout,
             follow_redirects=True,
         )
-        if response.status_code in {402, 429}:
-            raise RuntimeError("Tavily free quota or rate limit reached")
+        if response.status_code in {402, 429, 432}:
+            return [{"error": "QUOTA_EXCEEDED"}]
         response.raise_for_status()
         return response.json().get("results", [])
 
@@ -484,6 +509,8 @@ class TavilySearchProvider:
         seen: set[str] = set()
         for index, query in enumerate(queries[:maximum]):
             raw_results = self._request(query, before_query)
+            if any(item.get("error") == "QUOTA_EXCEEDED" for item in raw_results):
+                return [{"error": "QUOTA_EXCEEDED"}]
             for item in raw_results:
                 url = item.get("url")
                 text = " ".join(filter(None, (item.get("title"), item.get("content"))))

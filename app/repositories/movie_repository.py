@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models.genre import Genre
 from app.models.language import Language
 from app.models.movie import Movie
+from app.services.languages import normalize_language_code
 
 
 class MovieRepository:
@@ -44,7 +45,7 @@ class MovieRepository:
         year=None,
     ):
 
-        query = self.db.query(Movie)
+        query = self.db.query(Movie).filter(Movie.safety_public_visibility == "FULL")
 
         if language:
 
@@ -90,7 +91,7 @@ class MovieRepository:
         sort="latest",
     ):
 
-        query = self.db.query(Movie)
+        query = self.db.query(Movie).filter(Movie.safety_public_visibility == "FULL")
 
         if language:
 
@@ -171,7 +172,8 @@ class MovieRepository:
                 selectinload(Movie.ott_availabilities),
             )
             .filter(
-                Movie.id == movie_id
+                Movie.id == movie_id,
+                Movie.safety_public_visibility != "HIDDEN",
             )
             .first()
         )
@@ -189,6 +191,7 @@ class MovieRepository:
                 selectinload(Movie.ott_availabilities),
             )
             .filter(
+                Movie.safety_public_visibility == "FULL",
                 Movie.title.ilike(
                     f"%{query}%"
                 )
@@ -234,8 +237,8 @@ class MovieRepository:
             "vote_count"
         )
 
-        movie.original_language = item.get(
-            "original_language"
+        movie.original_language = normalize_language_code(
+            item.get("original_language")
         )
 
         movie.adult = item.get(

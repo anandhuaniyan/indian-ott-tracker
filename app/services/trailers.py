@@ -10,18 +10,19 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import re
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.orm import Session
 
 from app.models.movie import Movie
 from app.models.movie_metadata import MovieTrailer
+from app.services.languages import INDIAN_ORIGINAL_LANGUAGE_CODES
 
 
 YOUTUBE_KEY = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
-INDIAN_LANGUAGES = {
-    "hi", "ta", "te", "ml", "kn", "bn", "mr", "gu", "pa", "ur", "or",
-    "as", "sa", "ne", "si",
-}
+INDIAN_LANGUAGES = frozenset(INDIAN_ORIGINAL_LANGUAGE_CODES)
 
 _JUNK_PATTERNS = (
     r"reaction",
@@ -168,6 +169,11 @@ def trailer_videos_payload(movie: Movie, limit: int = 6) -> list[dict]:
 class TrailerService:
     def __init__(self, db: Session):
         self.db = db
+        self.last_write_outcomes: dict[str, int] = {
+            "created": 0,
+            "existing_video_reused": 0,
+            "duplicate_skipped": 0,
+        }
 
     @staticmethod
     def _published(value: str | None) -> datetime | None:
@@ -179,7 +185,41 @@ class TrailerService:
         except (TypeError, ValueError):
             return None
 
-    def _store(self, movie: Movie, value: dict, now: datetime, *, current_keys: set[str]) -> None:
+    def _existing_or_create(self, movie_id: int, key: str) -> tuple[MovieTrailer, str]:
+        item = self.db.query(MovieTrailer).filter_by(
+            movie_id=movie_id, provider="YouTube", video_key=key
+        ).first()
+        if item:
+            return item, "existing_video_reused"
+        if self.db.bind and self.db.bind.dialect.name == "postgresql":
+            statement = (
+                postgresql_insert(MovieTrailer)
+                .values(movie_id=movie_id, provider="YouTube", video_key=key)
+                .on_conflict_do_nothing(
+                    index_elements=["movie_id", "provider", "video_key"]
+                )
+                .returning(MovieTrailer.id)
+            )
+            inserted_id = self.db.execute(statement).scalar_one_or_none()
+            if inserted_id is not None:
+                return self.db.get(MovieTrailer, inserted_id), "created"
+            item = self.db.query(MovieTrailer).filter_by(
+                movie_id=movie_id, provider="YouTube", video_key=key
+            ).one()
+            return item, "duplicate_skipped"
+        try:
+            with self.db.begin_nested():
+                item = MovieTrailer(movie_id=movie_id, provider="YouTube", video_key=key)
+                self.db.add(item)
+                self.db.flush()
+            return item, "created"
+        except IntegrityError:
+            item = self.db.query(MovieTrailer).filter_by(
+                movie_id=movie_id, provider="YouTube", video_key=key
+            ).one()
+            return item, "duplicate_skipped"
+
+    def _store(self, movie: Movie, value: dict, now: datetime, *, current_keys: set[str]) -> str | None:
         key = (value.get("key") or "").strip()
         site = (value.get("site") or "").lower()
         video_type = _normalized_type(value.get("type"))
@@ -189,17 +229,10 @@ class TrailerService:
             or not valid_youtube_key(key)
             or junk_trailer_name(value.get("name"))
         ):
-            return
+            return None
         current_keys.add(key)
-        item = (
-            self.db.query(MovieTrailer)
-            .filter_by(movie_id=movie.id, provider="YouTube", video_key=key)
-            .first()
-        )
-        if not item:
-            item = MovieTrailer(movie_id=movie.id, provider="YouTube", video_key=key)
-            self.db.add(item)
-            self.db.flush()
+        item, outcome = self._existing_or_create(movie.id, key)
+        self.last_write_outcomes[outcome] += 1
         was_unavailable = item.is_unavailable
         item.video_type = _LABEL_NAMES.get(video_type, video_type)
         item.name = (value.get("name") or "Trailer").strip()[:500]
@@ -213,15 +246,24 @@ class TrailerService:
         item.last_checked_at = now
         if was_unavailable:
             item.is_unavailable = False
+        return outcome
 
-    def upsert(self, movie: Movie, data: dict, *, commit: bool = False) -> MovieTrailer | None:
+    def upsert(self, movie: Movie, data: dict, *, commit: bool = False, authoritative: bool = True) -> MovieTrailer | None:
+        self.last_write_outcomes = {"created": 0, "existing_video_reused": 0, "duplicate_skipped": 0}
         now = datetime.now(timezone.utc)
+        previous_primary = next(
+            (
+                item for item in movie.trailers
+                if item.is_primary and not item.is_unavailable and valid_youtube_key(item.video_key)
+            ),
+            None,
+        )
         results = data.get("results")
         current_keys: set[str] = set()
         for value in results or []:
             self._store(movie, value, now, current_keys=current_keys)
 
-        if isinstance(results, list) and results:
+        if authoritative and isinstance(results, list) and results:
             for stored in self.db.query(MovieTrailer).filter_by(movie_id=movie.id).all():
                 if stored.provider.lower() != "youtube" or not valid_youtube_key(stored.video_key):
                     continue
@@ -229,11 +271,17 @@ class TrailerService:
                     stored.is_unavailable = True
                     stored.last_checked_at = now
 
-        primary = next(iter(ranked_trailers(movie)), None)
+        self.db.flush()
+        self.db.expire(movie, ["trailers"])
+        primary = previous_primary if not authoritative and previous_primary else next(iter(ranked_trailers(movie)), None)
         for item in movie.trailers:
             item.is_primary = item is primary
         if commit:
-            self.db.commit()
+            try:
+                self.db.commit()
+            except IntegrityError:
+                self.db.rollback()
+                raise
             if primary:
                 self.db.refresh(primary)
         return primary

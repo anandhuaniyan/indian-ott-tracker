@@ -1,9 +1,14 @@
-import secrets
+import secrets, json
 from datetime import date, datetime, timezone
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator, BeforeValidator
+from datetime import date, datetime, timezone
+from typing import Annotated
+
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -23,6 +28,13 @@ from app.services.tmdb.client import TMDbRequestError
 from app.services.contact_requests import ContactRequestNotificationService
 from app.services.operations import OttResearchService
 from app.services.release_status import best_canonical_ott
+from app.services.languages import normalize_language_code
+from app.services.report_issue_uploads import (
+    ScreenshotUploadError,
+    delete_screenshot,
+    store_screenshot,
+    validate_screenshot,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["Operations"])
 
@@ -35,6 +47,7 @@ class RequestMovie(BaseModel):
     language: str | None = Field(default=None, max_length=20)
     whatsapp_phone: str | None = Field(default=None, max_length=50)
     details: str | None = Field(default=None, max_length=2000)
+    website: str | None = Field(default=None, max_length=100, alias="website")
 
     @field_validator("email")
     @classmethod
@@ -44,7 +57,7 @@ class RequestMovie(BaseModel):
             raise ValueError("A valid email address is required")
         return value
 
-    @field_validator("movie_name", "language", "whatsapp_phone", "details", mode="before")
+    @field_validator("movie_name", "language", "whatsapp_phone", "details", "website", mode="before")
     @classmethod
     def clean_optional_text(cls, value):
         return value.strip() if isinstance(value, str) else value
@@ -67,6 +80,7 @@ class ContactSubmission(BaseModel):
     expected_ott_platform: str | None = Field(default=None, max_length=100)
     expected_ott_release_date: date | None = None
     evidence_url: str | None = Field(default=None, max_length=1000, pattern=r"^https?://")
+    website: str | None = Field(default=None, max_length=100)
 
     @field_validator("request_type")
     @classmethod
@@ -86,10 +100,18 @@ class ContactSubmission(BaseModel):
             raise ValueError("Enter a valid email address")
         return value
 
-    @field_validator("name", "whatsapp", "phone", "comment", "movie_name", "issue_type", "expected_ott_platform", mode="before")
+    @field_validator("name", "whatsapp", "phone", "comment", "movie_name", "issue_type", "expected_ott_platform", "website", mode="before")
     @classmethod
     def clean_text(cls, value):
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("expected_ott_release_date", mode="before")
+    @classmethod
+    def empty_date_to_none(cls, value):
+        if value in ("", "null"):
+            return None
+        return value
+
 
     @model_validator(mode="after")
     def contact_required(self):
@@ -102,6 +124,8 @@ class ContactSubmission(BaseModel):
 def request_movie(
     payload: RequestMovie, request: Request, db: Session = Depends(get_db)
 ):
+    if payload.website:
+        raise HTTPException(422, "Submission rejected as spam")
     limit(request, "movie-request", 5, 3600)
     limit(request, "movie-request-email-hour", 8, 3600, identity=payload.email)
     limit(request, "movie-request-email-day", 20, 86400, identity=payload.email)
@@ -209,13 +233,17 @@ def request_movie(
         email=str(payload.email),
         external_movie_id=movie_external_id,
         release_year=release_date.year if release_date else None,
-        language=payload.language or snapshot.get("original_language"),
+        language=normalize_language_code(
+            payload.language or snapshot.get("original_language")
+        ),
         whatsapp_phone=payload.whatsapp_phone or None,
         details=payload.details.strip() if payload.details else None,
         verified_title=verified_title,
         original_title=snapshot.get("original_title"),
         verified_release_date=release_date,
-        verified_original_language=snapshot.get("original_language"),
+        verified_original_language=normalize_language_code(
+            snapshot.get("original_language")
+        ),
         verified_language_name=snapshot.get("language_name"),
         poster_path=snapshot.get("poster_path"),
         backdrop_path=snapshot.get("backdrop_path"),
@@ -333,9 +361,46 @@ def request_movie(
 
 
 @router.post("/contact-requests", status_code=201)
-def submit_contact_request(
-    payload: ContactSubmission, request: Request, db: Session = Depends(get_db)
-):
+async def submit_contact_request(request: Request, db: Session = Depends(get_db)):
+    """Accept the established JSON body or multipart with an optional screenshot."""
+    content_type = request.headers.get("content-type", "").lower()
+    screenshot_upload: UploadFile | None = None
+    try:
+        if content_type.startswith("multipart/form-data"):
+            form = await request.form()
+            screenshot_value = form.get("screenshot")
+            if isinstance(screenshot_value, (UploadFile, StarletteUploadFile)) and screenshot_value.filename:
+                screenshot_upload = screenshot_value
+            raw_payload = {
+                key: value
+                for key, value in form.items()
+                if key != "screenshot" and value != ""
+            }
+        else:
+            try:
+                body = await request.body()
+                if not body:
+                    raise HTTPException(422, "Empty request body")
+                raw_payload = json.loads(body)
+            except Exception:
+                raise HTTPException(422, "Invalid JSON payload")
+        payload = ContactSubmission.model_validate(raw_payload)
+
+
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+    validated_screenshot = None
+    if screenshot_upload is not None:
+        try:
+            validated_screenshot = await validate_screenshot(screenshot_upload)
+        except ScreenshotUploadError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from exc
+        finally:
+            await screenshot_upload.close()
+
+    if payload.website:
+        raise HTTPException(422, "Submission rejected as spam")
     limit(request, "contact-request", 8, 3600)
     contact_identity = payload.email or payload.whatsapp or payload.phone or "anonymous"
     limit(request, "contact-request-identity", 12, 86400, identity=contact_identity)
@@ -357,8 +422,22 @@ def submit_contact_request(
         evidence_url=str(payload.evidence_url) if payload.evidence_url else None,
         local_movie_id=movie.id if movie else None,
     )
+    stored_filename = None
+    if validated_screenshot is not None:
+        try:
+            stored_filename, stored_size = store_screenshot(validated_screenshot)
+        except OSError as exc:
+            raise HTTPException(503, "Screenshot storage is temporarily unavailable.") from exc
+        item.screenshot_path = stored_filename
+        item.screenshot_mime_type = validated_screenshot.mime_type
+        item.screenshot_size = stored_size
     db.add(item)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        delete_screenshot(stored_filename)
+        raise
     db.refresh(item)
     if payload.request_type == "INCORRECT_OTT" and movie:
         evidence = OttResearchService(db).record_evidence(
@@ -385,6 +464,7 @@ def submit_contact_request(
         "type": item.request_type,
         "discord_status": outcomes["discord"],
         "receipt_email_status": outcomes["email"],
+        "screenshot_attached": bool(item.screenshot_path),
     }
 
 

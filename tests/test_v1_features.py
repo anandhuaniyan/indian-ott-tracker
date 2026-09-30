@@ -208,7 +208,12 @@ def test_home_discover_search_and_browse(client):
     assert home["trending"][0]["rating_source"] == "IMDb"
     assert "tmdb_id" not in home["trending"][0]
     assert "display_id" not in home["trending"][0]
-    assert home["language_sections"]["ml"]["items"]
+    assert home["language"] == "all"
+    assert home["language_counts"]["all"] == 2
+    assert home["language_counts"]["indian"] == 2
+    assert [item["code"] for item in home["languages"]] == ["ml"]
+    assert home["language_groups"]["indian"]["primary"][0]["name"] == "Malayalam"
+    assert home["language_groups"]["international"]["primary"] == []
     assert home["platforms"][0]["name"] == "Netflix"
     assert (
         client.get(
@@ -226,6 +231,23 @@ def test_home_discover_search_and_browse(client):
     assert client.get("/api/v1/discover?release_status=upcoming").json()["total"] == 1
     search = client.get("/api/v1/search?q=Example").json()
     assert search["movies"]["total"] == 1 and search["people"]["total"] == 2
+
+    public_languages = client.get("/api/v1/languages").json()
+    assert public_languages == [
+        {
+            "code": "ml",
+            "name": "Malayalam",
+            "slug": "malayalam",
+            "region": "indian",
+            "group": "primary",
+            "enabled": True,
+            "movie_count": 2,
+        }
+    ]
+    assert [item["code"] for item in client.get("/api/v1/discover").json()["filters"]["languages"]] == ["ml"]
+    assert client.get("/api/v1/discover?language_region=indian").json()["total"] == 2
+    assert client.get("/api/v1/discover?language_region=international").json()["total"] == 0
+    assert client.get("/api/v1/discover?language_region=unknown").status_code == 422
 
 
 def test_home_view_more_sections_keep_their_data_context(client, database):
@@ -291,9 +313,10 @@ def test_public_ott_platform_aliases_are_canonical_and_deduplicated(client, data
 
 def test_public_movie_detail_does_not_expose_internal_ott_status(client):
     detail = client.get("/api/v1/movies/1/detail").json()
+    assert "verification" not in detail
     for key in (
         "ott_status", "ott_verified", "ott_candidate", "ott_research_status",
-        "ott_confidence", "ott_confidence_label",
+        "ott_confidence", "ott_confidence_label", "ott_state",
     ):
         assert key not in detail["movie"]
     for row in detail["movie"]["ott"]:
@@ -302,6 +325,43 @@ def test_public_movie_detail_does_not_expose_internal_ott_status(client):
             "confidence", "platform_confidence", "date_confidence",
             "last_checked", "last_verified",
         }.intersection(row)
+
+
+def test_public_release_timeline_is_concise_and_international_rows_are_collapsed(
+    client, database
+):
+    database.add_all(
+        [
+            MovieReleaseDate(
+                movie_id=1,
+                country=country,
+                release_date=date(2026, 8, 15 + index),
+                release_type="3",
+            )
+            for index, country in enumerate(("US", "GB", "FR", "DE", "JP"))
+        ]
+        + [
+            MovieReleaseDate(
+                movie_id=1,
+                country="US",
+                release_date=date(2026, 9, 1),
+                release_type="4",
+            )
+        ]
+    )
+    database.commit()
+
+    detail = client.get("/api/v1/movies/1/detail").json()
+
+    assert len(detail["release_timeline"]) <= 4
+    assert any(
+        item["label"] == "Primary theatrical release"
+        for item in detail["release_timeline"]
+    )
+    assert any(
+        item["label"] == "Digital release" for item in detail["release_timeline"]
+    )
+    assert len(detail["international_releases"]) >= 4
 
 
 def test_calendar_ott_movie_and_person(client, database):
@@ -422,6 +482,414 @@ def test_calendar_today_uses_the_configured_site_date(client, monkeypatch):
     assert payload["today"] == "2026-08-29"
     assert payload["start_date"] == "2026-08-01"
     assert payload["end_date"] == "2026-08-31"
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["available", "confirmed", "announced", "upcoming", "released"],
+)
+def test_calendar_includes_every_confirmed_public_ott_state(
+    client, database, status
+):
+    release = date(2027, 6, 15)
+    movie = Movie(
+        tmdb_id=31000 + ["available", "confirmed", "announced", "upcoming", "released"].index(status),
+        title=f"Calendar {status}",
+        release_date=date(2025, 1, 1),
+        original_language="ml",
+    )
+    database.add(movie)
+    database.flush()
+    database.add(
+        OttAvailability(
+            movie_id=movie.id,
+            provider="Netflix",
+            country="IN",
+            ott_release_date=release,
+            status=status,
+            verification_status="CONFIRMED",
+            confidence=100,
+        )
+    )
+    database.commit()
+
+    payload = client.get("/api/v1/calendar/this-month?month=2027-06").json()
+
+    assert any(
+        item["id"] == movie.id
+        and item["ott_release_date"] == release.isoformat()
+        for item in payload["ott"]["items"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("verification_status", "confidence", "country"),
+    [
+        ("UNKNOWN", 100, "IN"),
+        ("CONFIRMED", 10, "IN"),
+        ("CONFIRMED", 100, "US"),
+    ],
+)
+def test_calendar_includes_dated_ott_rows_regardless_of_workflow_metadata(
+    client, database, verification_status, confidence, country
+):
+    movie = Movie(
+        tmdb_id=31100 + [
+            ("UNKNOWN", 100, "IN"),
+            ("CONFIRMED", 10, "IN"),
+            ("CONFIRMED", 100, "US"),
+        ].index((verification_status, confidence, country)),
+        title=f"Excluded {verification_status} {confidence} {country}",
+        original_language="ml",
+    )
+    database.add(movie)
+    database.flush()
+    database.add(
+        OttAvailability(
+            movie_id=movie.id,
+            provider="Prime Video",
+            country=country,
+            ott_release_date=date(2027, 6, 16),
+            status="upcoming",
+            verification_status=verification_status,
+            confidence=confidence,
+        )
+    )
+    database.commit()
+
+    payload = client.get("/api/v1/calendar/this-month?month=2027-06").json()
+
+    assert any(item["id"] == movie.id for item in payload["ott"]["items"])
+
+
+def test_calendar_does_not_publish_evidence_without_canonical_ott_relationship(
+    client, database
+):
+    """Evidence is research input, not a public calendar relationship."""
+    movie = Movie(
+        tmdb_id=31150,
+        title="Modha Rathiri Calendar Regression",
+        original_language="ta",
+    )
+    database.add(movie)
+    database.flush()
+    database.add(
+        OttEvidence(
+            movie_id=movie.id,
+            platform="Netflix",
+            release_date=date(2027, 6, 21),
+            country="IN",
+            status="POSSIBLE",
+            source_type="established_publication",
+            verification_method="CURATED_DATE_LIST",
+            confidence=25,
+        )
+    )
+    database.commit()
+
+    payload = client.get("/api/v1/calendar/this-month?month=2027-06").json()
+    matches = [item for item in payload["ott"]["items"] if item["id"] == movie.id]
+
+    assert matches == []
+
+
+def test_calendar_and_detail_use_validated_subscription_evidence_before_reconciliation(
+    client, database
+):
+    """Modha Rathri regression: a worker need not copy valid OTT evidence first."""
+    movie = Movie(
+        tmdb_id=1685882,
+        title="Modha Rathri",
+        original_language="ta",
+    )
+    database.add(movie)
+    database.flush()
+    database.add(
+        OttEvidence(
+            movie_id=movie.id,
+            platform="Netflix",
+            release_date=date(2027, 6, 23),
+            country="IN",
+            status="POSSIBLE",
+            source_url="https://publisher.example/modha-rathri",
+            source_type="established_publication",
+            fact_type="RELEASE_DATE",
+            availability_type="SUBSCRIPTION",
+            verification_method="CURATED_DATE_LIST",
+            confidence=80,
+            movie_match_confidence=100,
+            platform_confidence=80,
+            date_confidence=80,
+            inspected_at=datetime.now(timezone.utc),
+        )
+    )
+    database.commit()
+
+    calendar = client.get("/api/v1/calendar/this-month?month=2027-06").json()
+    matches = [item for item in calendar["ott"]["items"] if item["id"] == movie.id]
+    detail = client.get(f"/api/v1/movies/{movie.id}/detail").json()["movie"]
+
+    assert len(matches) == 1
+    assert matches[0]["ott_platforms"] == ["Netflix"]
+    assert matches[0]["ott_release_date"] == "2027-06-23"
+    assert detail["ott_release_date"] == "2027-06-23"
+    assert "ott_candidate" not in detail
+
+
+def test_calendar_excludes_purchase_only_and_placeholder_releases(client, database):
+    movie = Movie(
+        tmdb_id=31151,
+        title="Purchase Only Calendar Regression",
+        original_language="ta",
+    )
+    database.add(movie)
+    database.flush()
+    database.add_all([
+        OttAvailability(
+            movie_id=movie.id,
+            provider="Prime Video",
+            watch_type="rent",
+            country="IN",
+            ott_release_date=date(2027, 6, 21),
+            status="available",
+        ),
+        OttAvailability(
+            movie_id=movie.id,
+            provider="Platform TBA",
+            watch_type="subscription",
+            country="IN",
+            ott_release_date=date(2027, 6, 22),
+            status="announced",
+        ),
+    ])
+    database.commit()
+
+    payload = client.get("/api/v1/calendar/this-month?month=2027-06").json()
+
+    assert all(item["id"] != movie.id for item in payload["ott"]["items"])
+
+
+def test_calendar_uses_ott_date_and_has_no_two_movie_limit(client, database):
+    release = date(2027, 6, 17)
+    movies = [
+        Movie(
+            tmdb_id=31200 + index,
+            title=f"Same Day Release {index}",
+            release_date=date(2024, 1, index + 1),
+            theatrical_release_date=date(2024, 2, index + 1),
+            original_language="ml",
+        )
+        for index in range(4)
+    ]
+    database.add_all(movies)
+    database.flush()
+    database.add_all(
+        [
+            OttAvailability(
+                movie_id=movie.id,
+                provider="Netflix",
+                country="IN",
+                ott_release_date=release,
+                status="upcoming",
+                verification_status="CONFIRMED",
+                confidence=100,
+            )
+            for movie in movies
+        ]
+    )
+    database.commit()
+
+    payload = client.get("/api/v1/calendar/this-month?month=2027-06").json()
+    same_day = [
+        item for item in payload["ott"]["items"]
+        if item["ott_release_date"] == release.isoformat()
+    ]
+
+    assert {item["id"] for item in same_day} == {movie.id for movie in movies}
+    assert all(item["release_date"] == release.isoformat() for item in same_day)
+    assert payload["ott"]["total"] == 4
+    assert {
+        row.status
+        for row in database.query(OttAvailability)
+        .filter(OttAvailability.movie_id.in_([movie.id for movie in movies]))
+        .all()
+    } == {"upcoming"}
+
+
+def test_calendar_deduplicates_providers_per_movie_and_date(client, database):
+    release = date(2027, 6, 18)
+    movie = Movie(
+        tmdb_id=31300,
+        title="Multi Platform Calendar Film",
+        original_language="ta",
+    )
+    database.add(movie)
+    database.flush()
+    database.add_all(
+        [
+            OttAvailability(
+                movie_id=movie.id,
+                provider=provider,
+                country="IN",
+                watch_type=watch_type,
+                ott_release_date=release,
+                status="announced",
+                verification_status="CONFIRMED",
+                confidence=100,
+            )
+            for provider, watch_type in (
+                ("Prime Video", "subscription"),
+                ("Amazon Prime Video", "subscription"),
+                ("Netflix", "subscription"),
+            )
+        ]
+    )
+    database.commit()
+
+    payload = client.get("/api/v1/calendar/this-month?month=2027-06").json()
+    matches = [
+        item for item in payload["ott"]["items"]
+        if item["id"] == movie.id and item["ott_release_date"] == release.isoformat()
+    ]
+
+    assert len(matches) == 1
+    assert matches[0]["ott_platforms"] == ["Netflix", "Prime Video"]
+    assert len(matches[0]["ott_releases"]) == 2
+
+
+def test_calendar_keeps_distinct_dates_for_the_same_movie(client, database):
+    movie = Movie(
+        tmdb_id=31400,
+        title="Two Date Calendar Film",
+        original_language="te",
+    )
+    database.add(movie)
+    database.flush()
+    database.add_all(
+        [
+            OttAvailability(
+                movie_id=movie.id,
+                provider="Netflix",
+                country="IN",
+                ott_release_date=date(2027, 6, 19),
+                status="confirmed",
+                verification_status="CONFIRMED",
+                confidence=100,
+            ),
+            OttAvailability(
+                movie_id=movie.id,
+                provider="Prime Video",
+                country="IN",
+                ott_release_date=date(2027, 6, 20),
+                status="confirmed",
+                verification_status="CONFIRMED",
+                confidence=100,
+            ),
+        ]
+    )
+    database.commit()
+
+    payload = client.get("/api/v1/calendar/this-month?month=2027-06").json()
+    matches = [item for item in payload["ott"]["items"] if item["id"] == movie.id]
+
+    assert [item["ott_release_date"] for item in matches] == [
+        "2027-06-19",
+        "2027-06-20",
+    ]
+
+
+def test_primary_ott_uses_earliest_verified_premiere_not_later_higher_confidence(
+    client, database
+):
+    movie = Movie(
+        tmdb_id=31401,
+        title="Two Legitimate Streaming Premieres",
+        original_language="ja",
+    )
+    database.add(movie)
+    database.flush()
+    database.add_all([
+        OttAvailability(
+            movie_id=movie.id, provider="Amazon Video", country="IN",
+            watch_type="rent", ott_release_date=date(2027, 7, 1),
+            status="released", verification_status="CONFIRMED", confidence=100,
+        ),
+        OttAvailability(
+            movie_id=movie.id, provider="Crunchyroll", country="IN",
+            watch_type="subscription", ott_release_date=date(2027, 7, 28),
+            status="released", verification_status="CONFIRMED", confidence=90,
+        ),
+        OttAvailability(
+            movie_id=movie.id, provider="Netflix", country="IN",
+            watch_type="subscription", ott_release_date=date(2027, 9, 28),
+            status="released", verification_status="CONFIRMED", confidence=100,
+        ),
+    ])
+    database.commit()
+
+    detail = client.get(f"/api/v1/movies/{movie.id}/detail").json()["movie"]
+    july = client.get("/api/v1/calendar/this-month?month=2027-07").json()
+    september = client.get("/api/v1/calendar/this-month?month=2027-09").json()
+
+    assert detail["ott_release_date"] == "2027-07-28"
+    assert detail["ott_platform"] == "Crunchyroll"
+    assert any(item["id"] == movie.id for item in july["ott"]["items"])
+    assert any(item["id"] == movie.id for item in september["ott"]["items"])
+
+
+def test_calendar_ignores_missing_ott_dates_and_keeps_past_releases(
+    client, database
+):
+    past_release = date(2025, 3, 7)
+    past = Movie(
+        tmdb_id=31500,
+        title="Past Calendar Film",
+        release_date=date(2024, 12, 1),
+        original_language="kn",
+    )
+    missing_date = Movie(
+        tmdb_id=31501,
+        title="Missing OTT Date Film",
+        release_date=past_release,
+        theatrical_release_date=past_release,
+        original_language="kn",
+    )
+    database.add_all([past, missing_date])
+    database.flush()
+    database.add_all(
+        [
+            OttAvailability(
+                movie_id=past.id,
+                provider="ZEE5",
+                country="IN",
+                ott_release_date=past_release,
+                status="released",
+                verification_status="CONFIRMED",
+                confidence=100,
+            ),
+            OttAvailability(
+                movie_id=missing_date.id,
+                provider="ZEE5",
+                country="IN",
+                ott_release_date=None,
+                status="released",
+                verification_status="CONFIRMED",
+                confidence=100,
+            ),
+        ]
+    )
+    database.commit()
+
+    payload = client.get("/api/v1/calendar/this-month?month=2025-03").json()
+
+    assert any(
+        item["id"] == past.id
+        and item["ott_release_date"] == past_release.isoformat()
+        for item in payload["ott"]["items"]
+    )
+    assert all(
+        item["id"] != missing_date.id for item in payload["ott"]["items"]
+    )
 
 
 def test_missing_imdb_rating_is_not_fabricated_and_missing_ott_is_queued(
@@ -1356,7 +1824,7 @@ def test_admin_manual_ott_verification_provenance_and_public_upcoming(
         == 200
     )
 
-    release = date.today() + timedelta(days=4)
+    release = date(2027, 6, 24)
     response = client.post(
         "/api/v1/admin/ott-research/movies/2/verify",
         json={
@@ -1396,6 +1864,33 @@ def test_admin_manual_ott_verification_provenance_and_public_upcoming(
     assert any(
         item["id"] == 2 and item["ott_platform"] == "Prime Video"
         for item in calendar["ott"]["items"]
+    )
+
+    moved_release = date(2027, 7, 2)
+    moved = client.post(
+        "/api/v1/admin/ott-research/movies/2/verify",
+        json={
+            "platform": "Prime Video",
+            "ott_release_date": moved_release.isoformat(),
+            "source_url": "https://primevideo.com/detail/future-film-updated",
+            "source_name": "Prime Video",
+            "country": "IN",
+            "summary": "Administrator corrected the canonical OTT date.",
+        },
+    )
+    assert moved.status_code == 200
+    database.refresh(canonical)
+    assert canonical.ott_release_date == moved_release
+    old_calendar = client.get(
+        f"/api/v1/calendar/this-month?month={release:%Y-%m}"
+    ).json()
+    new_calendar = client.get(
+        f"/api/v1/calendar/this-month?month={moved_release:%Y-%m}"
+    ).json()
+    assert all(item["id"] != 2 for item in old_calendar["ott"]["items"])
+    assert any(
+        item["id"] == 2 and item["ott_release_date"] == moved_release.isoformat()
+        for item in new_calendar["ott"]["items"]
     )
 
     health = client.get("/api/v1/admin/data-health").json()["ott"]

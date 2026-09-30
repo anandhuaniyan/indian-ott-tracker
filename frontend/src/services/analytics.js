@@ -1,3 +1,5 @@
+import { isPrivateRoute } from "./privateRoutes";
+
 const measurementId = () => import.meta.env.VITE_GA_MEASUREMENT_ID;
 
 const isEnabled = () =>
@@ -22,10 +24,13 @@ const track = (name, params = {}) => {
 export const analytics = {
   isEnabled,
   trackEvent: track,
-  trackPageView() {
+  trackPageView(route = window.location) {
+    const pathname = route.pathname || "/";
+    const search = route.search || "";
+    if (isPrivateRoute(pathname)) return;
     track("page_view", {
-      page_path: window.location.pathname + window.location.search,
-      page_location: window.location.href,
+      page_path: pathname + search,
+      page_location: new URL(pathname + search, window.location.origin || window.location.href).href,
       page_title: document.title,
     });
   },

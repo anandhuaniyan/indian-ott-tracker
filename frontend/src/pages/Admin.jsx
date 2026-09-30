@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { API, imageUrl } from "../services/api";
+import { loadLanguageOptions } from "../services/languages";
 
 const call = (path, options) =>
   fetch(`${API}${path}`, { credentials: "include", ...options }).then(
@@ -35,21 +36,39 @@ const useAdmin = (path, refreshMilliseconds = 0) => {
   }, [path, refreshMilliseconds]);
   return [data, error, load];
 };
+const useLanguageOptions = () => {
+  const [items, setItems] = useState([]);
+  useEffect(() => {
+    let current = true;
+    loadLanguageOptions()
+      .then((value) => current && setItems(value))
+      .catch(() => current && setItems([]));
+    return () => {
+      current = false;
+    };
+  }, []);
+  return items;
+};
 
-const Nav = () => (
+export const Nav = () => (
   <nav className="admin-nav">
     <Link to="/admin">Dashboard</Link>
     <Link to="/admin/requests">Requests</Link>
     <Link to="/admin/contact-requests">Contact requests</Link>
+    <Link to="/admin/maintenance">Maintenance</Link>
     <Link to="/admin/movies">Movies</Link>
     <Link to="/admin/discovery">Discovery</Link>
+    <Link to="/admin/ai-activity">AI activity</Link>
+    <Link to="/admin/support">Support</Link>
     <Link to="/admin/research-history">Research history</Link>
     <Link to="/admin/comments">Comments</Link>
+    <Link to="/admin/content-safety">Content safety</Link>
     <Link to="/admin/data-health">Data health</Link>
     <Link to="/admin/images">Images</Link>
     <Link to="/admin/ott-research">OTT research</Link>
     <Link to="/admin/ott-gold-set">OTT gold set</Link>
     <Link to="/admin/jobs">Jobs</Link>
+    <Link to="/admin/pinterest">Pinterest</Link>
     <Link to="/admin/notifications">Notifications</Link>
     <Link to="/admin/sources">Sources</Link>
     <Link to="/admin/system-health">System health</Link>
@@ -94,11 +113,11 @@ const duration = (seconds) => {
 const when = (value) => value ? new Date(value).toLocaleString() : "Never";
 const Status = ({ children }) => {
   const value = String(children || "UNKNOWN");
-  const tone = /FAILED|DOWN|CONFLICT|OVERDUE|REJECTED/.test(value)
+  const tone = /FAILED|DOWN|CONFLICT|OVERDUE|REJECTED|BLOCKED|RESTRICTED/.test(value)
     ? "danger"
     : /PENDING|POSSIBLE|ATTENTION|URGENT|REVIEW|DEGRADED|STALE|QUEUED|RUNNING/.test(value)
       ? "warning"
-      : /HEALTHY|SENT|ADDED|APPROVED|CONFIRMED|COMPLETE|MATCHED/.test(value)
+      : /HEALTHY|SENT|ADDED|APPROVED|CONFIRMED|COMPLETE|MATCHED|RESTORED|SAFE/.test(value)
         ? "success"
         : "neutral";
   return <strong className={`admin-status admin-status-${tone}`}>{value.replaceAll("_", " ")}</strong>;
@@ -116,35 +135,95 @@ const Pager = ({ data, onPage }) => data?.pages > 1 ? (
   </nav>
 ) : null;
 
-export function Login() {
-  const navigate = useNavigate(),
-    [error, setError] = useState();
+const maintenanceServices = ["Website", "Movies", "Movie Search", "OTT Calendar", "Movie Pages", "Images", "API", "Movie Updates", "Admin Panel", "Background Jobs", "Other"];
+const emptyMaintenance = {
+  title: "OTT Tracker System Maintenance",
+  description: "",
+  start_time: "",
+  end_time: "",
+  affected_services: [],
+  impact_level: "LOW",
+  impact_message: "Brief interruptions may occur.",
+};
+const localDateTimeValue = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+};
+
+export function Maintenance() {
+  const [data, error, reload] = useAdmin("/api/v1/admin/maintenance", 15000);
+  const [form, setForm] = useState(emptyMaintenance);
+  const [editingId, setEditingId] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  if (error) return <Guard error={error} />;
+  const updateField = (field, value) => setForm((current) => ({ ...current, [field]: value }));
+  const toggleService = (service) => updateField(
+    "affected_services",
+    form.affected_services.includes(service)
+      ? form.affected_services.filter((item) => item !== service)
+      : [...form.affected_services, service],
+  );
+  const payload = () => ({
+    ...form,
+    start_time: new Date(form.start_time).toISOString(),
+    end_time: new Date(form.end_time).toISOString(),
+  });
   const submit = (event) => {
     event.preventDefault();
+    setSaving(true);
+    setMessage("");
     call(
-      "/api/v1/admin/login",
-      json("POST", { password: new FormData(event.target).get("password") }),
-    )
-      .then(() => navigate("/admin"))
-      .catch((reason) => setError(reason.message));
+      editingId ? `/api/v1/admin/maintenance/${editingId}` : "/api/v1/admin/maintenance",
+      json(editingId ? "PATCH" : "POST", payload()),
+    ).then(() => {
+      setMessage(editingId ? "Maintenance window updated." : "Maintenance window scheduled.");
+      setEditingId(null);
+      setForm(emptyMaintenance);
+      reload();
+    }).catch((reason) => setMessage(reason.message)).finally(() => setSaving(false));
   };
-  return (
-    <main>
-      <h1>Admin login</h1>
-      <form className="request" onSubmit={submit}>
-        <input
-          name="password"
-          type="password"
-          minLength="8"
-          required
-          autoComplete="current-password"
-          placeholder="Password"
-        />
-        <button>Sign in</button>
-      </form>
-      {error && <p role="alert">{error}</p>}
-    </main>
-  );
+  const edit = (item) => {
+    setEditingId(item.id);
+    setForm({
+      title: item.title,
+      description: item.description,
+      start_time: localDateTimeValue(item.start_time),
+      end_time: localDateTimeValue(item.end_time),
+      affected_services: item.affected_services || [],
+      impact_level: item.impact_level,
+      impact_message: item.impact_message,
+    });
+  };
+  const action = (item, status) => call(
+    `/api/v1/admin/maintenance/${item.id}`,
+    json("PATCH", { status }),
+  ).then(reload).catch((reason) => setMessage(reason.message));
+  const remove = (item) => call(
+    `/api/v1/admin/maintenance/${item.id}`,
+    { method: "DELETE" },
+  ).then(reload).catch((reason) => setMessage(reason.message));
+  const availableServices = [...new Set([...maintenanceServices, ...(form.affected_services || [])])];
+  return <Page title="Maintenance">
+    <form className="admin-form maintenance-admin-form" onSubmit={submit}>
+      <h2>{editingId ? "Edit maintenance window" : "Schedule maintenance"}</h2>
+      <label>Title<input required minLength="3" maxLength="200" value={form.title} onChange={(event) => updateField("title", event.target.value)} /></label>
+      <div className="admin-field-grid"><label>Start time<input required type="datetime-local" value={form.start_time} onChange={(event) => updateField("start_time", event.target.value)} /></label><label>End time<input required type="datetime-local" value={form.end_time} onChange={(event) => updateField("end_time", event.target.value)} /></label></div>
+      <fieldset><legend>Affected services</legend><div className="maintenance-service-options">{availableServices.map((service) => <label key={service}><input type="checkbox" checked={form.affected_services.includes(service)} onChange={() => toggleService(service)} />{service}</label>)}</div></fieldset>
+      <label>Expected impact<select value={form.impact_level} onChange={(event) => updateField("impact_level", event.target.value)}>{["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"].map((level) => <option key={level}>{level}</option>)}</select></label>
+      <label>Impact message<input required minLength="3" maxLength="500" value={form.impact_message} onChange={(event) => updateField("impact_message", event.target.value)} /></label>
+      <label>Description<textarea required minLength="3" maxLength="5000" value={form.description} onChange={(event) => updateField("description", event.target.value)} /></label>
+      <div className="admin-actions"><button disabled={saving}>{saving ? "Saving…" : editingId ? "Save changes" : "Schedule maintenance"}</button>{editingId && <button type="button" onClick={() => { setEditingId(null); setForm(emptyMaintenance); }}>Cancel edit</button>}</div>
+      {message && <p role="status">{message}</p>}
+    </form>
+    <section className="maintenance-admin-list" aria-labelledby="maintenance-list-heading"><h2 id="maintenance-list-heading">Maintenance windows</h2>{!data ? <p>Loading…</p> : data.items.length ? data.items.map((item) => <article key={item.id}><header><h3>{item.title}</h3><Status>{item.status}</Status></header><p>{formatDateTime(item.start_time)} – {formatDateTime(item.end_time)}</p><p>{item.impact_level} · {item.impact_message}</p><p>{item.affected_services?.join(", ") || "No affected services specified"}</p><div className="admin-actions"><button onClick={() => edit(item)}>Edit</button>{item.stored_status === "SCHEDULED" && <><button onClick={() => action(item, "COMPLETED")}>Mark completed</button><button onClick={() => action(item, "CANCELLED")}>Cancel maintenance</button></>}{item.stored_status === "CANCELLED" && <button className="danger" onClick={() => remove(item)}>Delete</button>}</div></article>) : <p className="empty">No maintenance windows have been created.</p>}</section>
+  </Page>;
+}
+
+export function Login() {
+  return <Navigate to="/login?returnTo=/admin" replace />;
 }
 
 export function Dashboard() {
@@ -158,8 +237,8 @@ export function Dashboard() {
       </Page>
     );
   const logout = () =>
-    call("/api/v1/admin/logout", { method: "POST" }).then(() =>
-      navigate("/admin/login"),
+    call("/api/v1/auth/logout", { method: "POST" }).then(() =>
+      navigate("/login"),
     );
   return (
     <Page title="Admin dashboard">
@@ -191,6 +270,29 @@ export function Dashboard() {
           </Link>
         ))}
       </div>
+      {data.language_health && (
+        <section className="admin-panel">
+          <h2>Language health</h2>
+          <div className="metrics">
+            <article><strong>{data.language_health.null_original_language_count}</strong><span>Null original language</span></article>
+            <article><strong>{data.language_health.unknown_language_count}</strong><span>Unknown language</span></article>
+            <article><strong>{data.language_health.unsupported_language_count}</strong><span>Unsupported language</span></article>
+            <article><strong>{data.language_health.language_mismatch_count}</strong><span>Language mismatch</span></article>
+          </div>
+          <div className="admin-language-coverage">
+            {data.language_health.by_language.map((item) => (
+              <article key={item.code}>
+                <h3>{item.language}</h3>
+                <dl>
+                  <div><dt>Movies</dt><dd>{item.total}</dd></div>
+                  <div><dt>Correct</dt><dd>{item.correct}</dd></div>
+                  <div><dt>Mismatch</dt><dd>{item.mismatch}</dd></div>
+                </dl>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
       <section className="admin-panel">
         <h2>Actionable alerts</h2>
         <div className="admin-alerts">
@@ -279,6 +381,7 @@ export function Dashboard() {
 }
 
 export function Discovery() {
+  const languageOptions = useLanguageOptions();
   const location = useLocation();
   const initial = new URLSearchParams(location.search);
   const [status, setStatus] = useState(initial.get("status") || "NEEDS_REVIEW");
@@ -325,9 +428,7 @@ export function Discovery() {
       </select>
       <select value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }}>
         <option value="">All languages</option>
-        <option value="ml">Malayalam</option><option value="ta">Tamil</option>
-        <option value="te">Telugu</option><option value="hi">Hindi</option>
-        <option value="kn">Kannada</option>
+        {languageOptions.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}
       </select>
       <button onClick={reload}>Refresh</button>
     </div>
@@ -603,6 +704,8 @@ export function ContactRequests() {
         {item.request_type === "INCORRECT_OTT" && <><div><dt>Reported platform</dt><dd>{item.expected_ott_platform || "Unknown"}</dd></div><div><dt>Reported OTT date</dt><dd>{item.expected_ott_release_date || "Unknown"}</dd></div></>}
       </dl>
       <h3>Comment</h3><p className="pre-wrap">{item.comment}</p>
+      <h3>Screenshot</h3>
+      {item.screenshot_url ? <div className="admin-report-screenshot"><a href={`${API}${item.screenshot_url}`} target="_blank" rel="noreferrer"><img src={`${API}${item.screenshot_url}`} alt={`Screenshot attached to ${item.request_id}`} loading="lazy" /></a><a href={`${API}${item.screenshot_url}`} target="_blank" rel="noreferrer">Open full image</a></div> : <p className="empty">No screenshot attached</p>}
       <h3>Discord delivery history</h3>
       <div className="admin-research-grid">{(item.discord_delivery_history || []).map((delivery, index) => <article key={`${delivery.notification_type}-${index}`}><header><strong>{delivery.notification_type.replaceAll("_", " ")}</strong><Status>{delivery.status}</Status></header><p>{delivery.attempt_count} attempt(s) · {delivery.sent_at ? when(delivery.sent_at) : delivery.attempted_at ? when(delivery.attempted_at) : "Not attempted yet"}</p>{delivery.sanitized_error && <small>{delivery.sanitized_error}</small>}</article>)}{!item.discord_delivery_history?.length && <p className="empty">No Discord delivery events recorded.</p>}</div>
       <h3>Email delivery history</h3>
@@ -897,6 +1000,90 @@ export function DataHealth() {
   );
 }
 
+export function ContentSafety() {
+  const location = useLocation();
+  const initialMovie = new URLSearchParams(location.search).get("movie") || "";
+  const [state, setState] = useState("ALL");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [reason, setReason] = useState("Administrator reviewed this title");
+  const [message, setMessage] = useState("");
+  const query = new URLSearchParams({ state, page: String(page), page_size: "50" });
+  if (search) query.set("search", search);
+  if (initialMovie) query.set("movie_id", initialMovie);
+  const [data, error, reload] = useAdmin(`/api/v1/admin/content-safety?${query}`);
+  const update = (movieId, classification) => {
+    setMessage("");
+    call(`/api/v1/admin/content-safety/movies/${movieId}`, json("PATCH", {
+      classification,
+      reason,
+    }))
+      .then(() => { setMessage(`Movie ${movieId} changed to ${classification}.`); reload(); })
+      .catch((failure) => setMessage(failure.message));
+  };
+  if (error) return <Guard error={error} />;
+  return (
+    <Page title="Content safety history">
+      <p>Every restrictive visibility change and restoration is retained here. Movies are never deleted by this workflow.</p>
+      {data && <div className="metrics">
+        <article><strong>{data.counts.restricted}</strong><span>Currently restricted</span></article>
+        <article><strong>{data.counts.blocked}</strong><span>Currently blocked</span></article>
+        <article><strong>{data.counts.restored}</strong><span>Restorations recorded</span></article>
+        <article><strong>{data.counts.notification_failed}</strong><span>Discord failures</span></article>
+      </div>}
+      <div className="admin-counter-tabs" aria-label="Content safety filters">
+        {["ALL", "RESTRICTED", "BLOCKED", "RESTORED", "AUTO", "MANUAL"].map((value) => (
+          <button key={value} className={state === value ? "active" : ""} onClick={() => { setState(value); setPage(1); }}>{value}</button>
+        ))}
+      </div>
+      <div className="toolbar">
+        <input aria-label="Search safety history" value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Title or IMDb ID" />
+        <button type="button" onClick={reload}>Refresh</button>
+      </div>
+      <label className="admin-safety-reason">Reason for manual action
+        <input value={reason} minLength="3" maxLength="1000" onChange={(event) => setReason(event.target.value)} />
+      </label>
+      {message && <p className="admin-message" role="status">{message}</p>}
+      {!data ? <p>Loading…</p> : data.items.length ? <div className="admin-safety-list">
+        {data.items.map((item) => <article className="admin-panel" key={item.id}>
+          <header className="admin-safety-header">
+            <div><h2>{item.title}</h2><p>{item.release_date?.slice(0, 4) || "Year unknown"} · {item.language_name}</p></div>
+            <Status>{item.new_classification}</Status>
+          </header>
+          <dl className="admin-request-facts">
+            <div><dt>Transition</dt><dd>{item.previous_classification} → {item.new_classification}</dd></div>
+            <div><dt>Risk score</dt><dd>{item.risk_score}/100</dd></div>
+            <div><dt>Action</dt><dd>{item.action.replaceAll("_", " ")}</dd></div>
+            <div><dt>Source</dt><dd>{item.classification_source}</dd></div>
+            <div><dt>Visibility</dt><dd>{item.public_visibility_before} → {item.public_visibility_after}</dd></div>
+            <div><dt>Changed</dt><dd>{when(item.created_at)}</dd></div>
+          </dl>
+          <p><strong>Reason:</strong> {(item.reasons || []).join("; ")}</p>
+          <details>
+            <summary>Open details</summary>
+            <dl className="admin-request-facts">
+              <div><dt>Original title</dt><dd>{item.original_title || "—"}</dd></div>
+              <div><dt>TMDB ID</dt><dd>{item.tmdb_id}</dd></div>
+              <div><dt>IMDb ID</dt><dd>{item.imdb_id || "—"}</dd></div>
+              <div><dt>Certification</dt><dd>{item.certification || "Unknown"}</dd></div>
+              <div><dt>TMDB adult signal</dt><dd>{item.tmdb_adult ? "Yes" : "No"}</dd></div>
+              <div><dt>Discord</dt><dd>{item.notification_status} ({item.notification_attempts} attempts)</dd></div>
+            </dl>
+            {item.notification_error && <p className="admin-error">{item.notification_error}</p>}
+          </details>
+          <div className="admin-request-actions">
+            <button disabled={reason.trim().length < 3} onClick={() => update(item.movie_id, "SAFE")}>Restore as safe</button>
+            <button disabled={reason.trim().length < 3} onClick={() => update(item.movie_id, "MATURE")}>Restore as mature</button>
+            <button disabled={reason.trim().length < 3} onClick={() => update(item.movie_id, "RESTRICTED")}>Restrict</button>
+            <button disabled={reason.trim().length < 3} onClick={() => update(item.movie_id, "BLOCKED")}>Block</button>
+          </div>
+        </article>)}
+      </div> : <p className="empty">No content-safety transitions match this filter.</p>}
+      <Pager data={data} onPage={setPage} />
+    </Page>
+  );
+}
+
 export function Images() {
   const [status, setStatus] = useState("unresolved");
   const [data, error, reload] = useAdmin(
@@ -1102,7 +1289,8 @@ export function OttResearch() {
               <span>Needs review</span>
             </article>
           </div>
-          {(command?.by_language || overview?.by_language) && <><h2>OTT coverage by language</h2><div className="admin-language-coverage">{(command?.by_language || overview.by_language).map((item) => <article key={item.code}><h3>{item.language}</h3><dl><div><dt>Movies</dt><dd>{item.movies}</dd></div><div><dt>Platform known</dt><dd>{item.platform_known}</dd></div><div><dt>Confirmed date</dt><dd>{item.date_confirmed ?? item.confirmed_date}</dd></div><div><dt>Unknown</dt><dd>{item.unknown ?? item.missing}</dd></div>{item.conflicts != null && <div><dt>Conflicts</dt><dd>{item.conflicts}</dd></div>}</dl></article>)}</div></>}
+          {(command?.by_language || overview?.by_language) && <><h2>OTT coverage by language</h2><div className="admin-language-coverage">{(command?.by_language || overview.by_language).map((item) => <article key={item.code}><h3>{item.language}</h3><dl><div><dt>Movies</dt><dd>{item.movies}</dd></div><div><dt>Researched</dt><dd>{item.researched ?? 0} ({item.research_coverage_percent ?? 0}%)</dd></div><div><dt>Complete</dt><dd>{item.complete ?? item.date_confirmed ?? item.confirmed_date ?? 0}</dd></div><div><dt>Missing platform</dt><dd>{item.missing_platform ?? item.unknown ?? item.missing ?? 0}</dd></div><div><dt>Missing OTT date</dt><dd>{item.missing_date ?? Math.max(0, item.movies - (item.date_confirmed ?? item.confirmed_date ?? 0))}</dd></div><div><dt>Platform known / date unknown</dt><dd>{item.platform_known_date_unknown ?? Math.max(0, (item.platform_known ?? 0) - (item.date_confirmed ?? item.confirmed_date ?? 0))}</dd></div><div><dt>Needs review</dt><dd>{item.needs_review ?? item.conflicts ?? 0}</dd></div></dl></article>)}</div></>}
+          {(command?.by_year || overview?.by_year)?.length > 0 && <><h2>OTT coverage by year</h2><Table headers={["Year", "Movies", "Researched", "Complete", "Missing platform", "Missing date", "Platform / no date", "Needs review"]} rows={(command?.by_year || overview.by_year).map((item) => <tr key={item.year}><td>{item.year}</td><td>{item.movies}</td><td>{item.researched} ({item.research_coverage_percent}%)</td><td>{item.complete} ({item.complete_percent}%)</td><td>{item.missing_platform}</td><td>{item.missing_date}</td><td>{item.platform_known_date_unknown}</td><td>{item.needs_review}</td></tr>)} /></>}
           {releases?.items?.some((item) => Object.hasOwn(item, "source_count")) && <><h2>OTT release records</h2><div className="admin-release-grid">{releases.items.map((item) => <article key={item.id}><img src={imageUrl(item.poster)} alt="" loading="lazy" /><div><Link to={`/movies/${item.movie_id}`}><strong>{item.movie}</strong></Link><p>{item.language || "Unknown language"} · {item.platform}</p><p>{item.ott_release_date || "Date unknown"}</p><Status>{item.status}</Status><button onClick={() => inspect(item.movie_id)}>Evidence ({item.source_count})</button></div></article>)}</div></>}
           <Table
             headers={[
@@ -1250,6 +1438,7 @@ function GoldSetCase({ item, onSaved }) {
 }
 
 export function OttGoldSet() {
+  const languageOptions = useLanguageOptions();
   const [language, setLanguage] = useState("");
   const [verified, setVerified] = useState("");
   const [page, setPage] = useState(1);
@@ -1259,7 +1448,7 @@ export function OttGoldSet() {
   if (error) return <Guard error={error} />;
   return <Page title="OTT accuracy gold set">
     <p>These cases must be manually verified before the new multi-provider engine may publish automatically. Unknown is a valid expected result.</p>
-    <div className="toolbar"><select aria-label="Language" value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }}><option value="">All languages</option>{[["ml", "Malayalam"], ["ta", "Tamil"], ["te", "Telugu"], ["hi", "Hindi"], ["kn", "Kannada"]].map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select><select aria-label="Verification state" value={verified} onChange={(event) => { setVerified(event.target.value); setPage(1); }}><option value="">All cases</option><option value="false">Unverified</option><option value="true">Verified</option></select><button onClick={generate}>Create / complete 100-movie set</button></div>
+    <div className="toolbar"><select aria-label="Language" value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }}><option value="">All languages</option>{languageOptions.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select><select aria-label="Verification state" value={verified} onChange={(event) => { setVerified(event.target.value); setPage(1); }}><option value="">All cases</option><option value="false">Unverified</option><option value="true">Verified</option></select><button onClick={generate}>Create / complete 100-movie set</button></div>
     {message && <p role="status">{message}</p>}
     {data?.accuracy && <section className="admin-panel"><header><h2>Accuracy gate</h2><Status>{data.accuracy.gate_passed ? "PASSED" : "BLOCKED"}</Status></header><p>{data.accuracy.verified}/{data.accuracy.target} verified · Platform precision {data.accuracy.platform_precision == null ? "not measured" : `${(data.accuracy.platform_precision * 100).toFixed(1)}%`} · Date precision {data.accuracy.date_precision == null ? "not measured" : `${(data.accuracy.date_precision * 100).toFixed(1)}%`} · False dates {data.accuracy.false_dates}</p></section>}
     {!data ? <p>Loading…</p> : <div className="admin-source-grid">{data.items.map((item) => <GoldSetCase key={item.id} item={item} onSaved={reload} />)}</div>}
@@ -1268,6 +1457,7 @@ export function OttGoldSet() {
 }
 
 export function Movies() {
+  const languageOptions = useLanguageOptions();
   const initial = new URLSearchParams(useLocation().search);
   const [search, setSearch] = useState(initial.get("search") || ""),
     [language, setLanguage] = useState(initial.get("language") || ""),
@@ -1293,7 +1483,7 @@ export function Movies() {
   return <Page title="Movies">
     <form className="admin-filter-grid" onSubmit={(event) => { event.preventDefault(); apply(); }}>
       <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Title, local ID, TMDB ID or IMDb ID" />
-      <select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="">All languages</option><option value="ml">Malayalam</option><option value="ta">Tamil</option><option value="te">Telugu</option><option value="hi">Hindi</option><option value="kn">Kannada</option></select>
+      <select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="">All languages</option>{languageOptions.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select>
       <input type="number" min="1888" max="2100" value={year} onChange={(event) => setYear(event.target.value)} placeholder="Year" />
       <input value={platform} onChange={(event) => setPlatform(event.target.value)} placeholder="OTT platform" />
       <select value={ott} onChange={(event) => setOtt(event.target.value)}><option value="">Any OTT state</option><option value="confirmed">OTT confirmed</option><option value="missing">OTT missing</option><option value="needs_review">OTT needs review</option></select>
@@ -1328,6 +1518,7 @@ export function Sources() {
 }
 
 export function ResearchHistory() {
+  const languageOptions = useLanguageOptions();
   const initial = new URLSearchParams(useLocation().search);
   const [tab, setTab] = useState(initial.get("tab") || "all");
   const [category, setCategory] = useState(initial.get("category") || "");
@@ -1342,7 +1533,7 @@ export function ResearchHistory() {
     <div className="admin-filter-grid">
       <select aria-label="Research category" value={category} onChange={(event) => { setCategory(event.target.value); setPage(1); }}><option value="">All categories</option>{["DISCOVERY", "FULL", "OTT", "WEB", "IMDB", "TMDB"].map((value) => <option key={value}>{value}</option>)}</select>
       <select aria-label="Research result" value={result} onChange={(event) => { setResult(event.target.value); setPage(1); }}><option value="">All results</option>{["UPDATED", "NO_CHANGE", "LOW_CONFIDENCE", "NEEDS_REVIEW", "CONFLICTING", "NOT_FOUND", "TECHNICAL_FAILURE", "FAILED"].map((value) => <option key={value}>{value}</option>)}</select>
-      <select aria-label="Movie language" value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }}><option value="">All languages</option>{[["ml", "Malayalam"], ["ta", "Tamil"], ["te", "Telugu"], ["hi", "Hindi"], ["kn", "Kannada"]].map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+      <select aria-label="Movie language" value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }}><option value="">All languages</option>{languageOptions.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select>
       <button onClick={reload}>Refresh</button>
     </div>
     {!data ? <p>Loading…</p> : <>
@@ -1457,30 +1648,33 @@ export function Jobs() {
       {backfills && (
         <>
           <h2>Backfill progress</h2>
-          <Table
-            headers={[
-              "Operation",
-              "Status",
-              "Processed / total",
-              "Remaining",
-              "Failures",
-              "Last success",
-              "Last error",
-            ]}
-            rows={backfills.progress.map((item) => (
-              <tr key={item.operation}>
-                <td>{item.operation}</td>
-                <td>{item.status}</td>
-                <td>
-                  {item.processed} / {item.total || "not counted"}
-                </td>
-                <td>{item.remaining ?? "—"}</td>
-                <td>{item.failed}</td>
-                <td>{item.last_success || "Never"}</td>
-                <td>{item.last_error || "—"}</td>
-              </tr>
+          <div className="backfill-grid">
+            {backfills.progress.map((item) => (
+              <article className="backfill-card" key={item.operation}>
+                <header>
+                  <h3>{item.operation}</h3>
+                  <Status>{item.status}</Status>
+                </header>
+                <div className="backfill-progress-copy">
+                  <strong>{item.progress_percent != null ? `${item.progress_percent}%` : "Not counted"}</strong>
+                  <span>{item.processed.toLocaleString()} / {item.total ? item.total.toLocaleString() : "not counted"}</span>
+                </div>
+                {item.total > 0 && <progress max={item.total} value={item.processed} aria-label={`${item.operation} progress`} />}
+                <dl className="backfill-facts">
+                  <div><dt>Remaining</dt><dd>{item.remaining?.toLocaleString() ?? "—"}</dd></div>
+                  <div><dt>Failures</dt><dd>{item.failed.toLocaleString()}</dd></div>
+                  <div><dt>Checkpoint</dt><dd>{item.cursor?.toLocaleString() || "—"}</dd></div>
+                  <div><dt>Current batch</dt><dd>{item.current_batch?.toLocaleString() || "—"}</dd></div>
+                  <div><dt>Last attempt</dt><dd>{when(item.last_attempt)}</dd></div>
+                  <div><dt>Last successful update</dt><dd>{when(item.last_success)}</dd></div>
+                  <div><dt>Throughput</dt><dd>{item.throughput_per_minute != null ? `${item.throughput_per_minute}/min` : "—"}</dd></div>
+                  <div><dt>Failure classes</dt><dd>{item.retryable_failures} retryable · {item.permanent_failures} permanent</dd></div>
+                </dl>
+                {item.explanation && <p className="backfill-explanation">{item.explanation}</p>}
+                {item.last_error && <div className="backfill-error"><strong>Last error</strong><p>{item.last_error}</p></div>}
+              </article>
             ))}
-          />
+          </div>
           <h2>Database coverage</h2>
           <div className="metrics">
             {Object.entries(backfills.coverage).map(([label, value]) => (
@@ -1518,6 +1712,7 @@ export function Jobs() {
               "Last failure",
               "Last error",
               "Cursor / processed / total",
+              "Checkpoint",
               "Progress",
             ]}
             rows={jobs.filter((item) => !status || item.status === status).map((item) => (
@@ -1530,6 +1725,11 @@ export function Jobs() {
                 <td>
                   {item.cursor} / {item.processed_count} /{" "}
                   {item.total_count || "—"}
+                </td>
+                <td>
+                  {item.details?.language
+                    ? `${item.details.language} · ${item.details.current_year || "—"} · page ${item.details.page || "—"}`
+                    : "—"}
                 </td>
                 <td>{item.progress}</td>
               </tr>
@@ -1583,6 +1783,221 @@ export function Notifications() {
             </tr>
           ))}
         />
+      )}
+    </Page>
+  );
+}
+
+export function Pinterest() {
+  const [tab, setTab] = useState("pins");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [stats, statsError, reloadStats] = useAdmin("/api/v1/pinterest/stats");
+  const [pins, pinsError, reloadPins] = useAdmin(
+    `/api/v1/pinterest/pins?status=${statusFilter}&pin_type=${typeFilter}`,
+  );
+  const [boards, boardsError] = useAdmin("/api/v1/pinterest/boards");
+  const [authStatus, authError] = useAdmin("/api/v1/pinterest/auth/status");
+  const [templates] = useAdmin("/api/v1/pinterest/templates");
+  const [newPinMovieId, setNewPinMovieId] = useState("");
+  const [newPinTemplate, setNewPinTemplate] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const createPin = () => {
+    if (!newPinMovieId) return;
+    setCreating(true);
+    setMessage("");
+    call("/api/v1/pinterest/pins", json("POST", {
+      movie_id: parseInt(newPinMovieId, 10),
+      force_template: newPinTemplate || null,
+    }))
+      .then((result) => {
+        setMessage(`Pin created: ${result.pin_type} (status: ${result.status})`);
+        setNewPinMovieId("");
+        reloadPins();
+        reloadStats();
+      })
+      .catch((err) => setMessage(`Error: ${err.message}`))
+      .finally(() => setCreating(false));
+  };
+
+  const syncBoards = () => {
+    setSyncing(true);
+    call("/api/v1/pinterest/boards/sync", { method: "POST" })
+      .then((result) => {
+        setMessage(`Synced ${result.synced} boards`);
+      })
+      .catch((err) => setMessage(`Sync error: ${err.message}`))
+      .finally(() => setSyncing(false));
+  };
+
+  const pinAction = (pinId, action) => {
+    call(`/api/v1/pinterest/pins/${pinId}/action`, json("POST", { action }))
+      .then(() => { reloadPins(); reloadStats(); })
+      .catch((err) => setMessage(`Action error: ${err.message}`));
+  };
+
+  const assignBoard = (pinId, boardId) => {
+    call(`/api/v1/pinterest/pins/${pinId}/assign-board`, json("POST", { board_id: parseInt(boardId, 10) }))
+      .then(() => { reloadPins(); setMessage("Board assigned"); })
+      .catch((err) => setMessage(`Board error: ${err.message}`));
+  };
+
+  const openAuth = () => {
+    call("/api/v1/pinterest/auth/url")
+      .then((result) => { window.open(result.url, "_blank"); setMessage("Complete authorization in the new window, then paste the code."); })
+      .catch((err) => setMessage(`Auth error: ${err.message}`));
+  };
+
+  return (
+    <Page title="Pinterest">
+      {message && <p className="admin-message">{message}</p>}
+
+      <div className="admin-tabs">
+        <button className={tab === "pins" ? "active" : ""} onClick={() => setTab("pins")}>Pins</button>
+        <button className={tab === "boards" ? "active" : ""} onClick={() => setTab("boards")}>Boards</button>
+        <button className={tab === "create" ? "active" : ""} onClick={() => setTab("create")}>Create Pin</button>
+        <button className={tab === "settings" ? "active" : ""} onClick={() => setTab("settings")}>Settings</button>
+      </div>
+
+      {tab === "pins" && (
+        <>
+          <h2>Pin Queue</h2>
+          {stats && (
+            <div className="metrics">
+              <article><strong>{stats.total_pins}</strong><span>Total pins</span></article>
+              <article><strong>{stats.published}</strong><span>Published</span></article>
+              {Object.entries(stats.by_status || {}).map(([s, count]) => (
+                <article key={s}><strong>{count}</strong><span>{s}</span></article>
+              ))}
+            </div>
+          )}
+          <div className="toolbar">
+            <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="">All statuses</option>
+              {["PENDING", "READY_FOR_REVIEW", "APPROVED", "PUBLISHED", "FAILED", "SKIPPED", "RIGHTS_REVIEW"].map((s) => (
+                <option key={s}>{s}</option>
+              ))}
+            </select>
+            <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+              <option value="">All types</option>
+              {["NOW_STREAMING", "OTT_RELEASE", "COMING_SOON", "MOVIE_DISCOVERY", "HIGHLY_RATED", "THIS_WEEK_ON_OTT"].map((t) => (
+                <option key={t}>{t}</option>
+              ))}
+            </select>
+          </div>
+          {pinsError ? <Guard error={pinsError} /> : !pins ? <p>Loading...</p> : (
+            <Table
+              headers={["Movie", "Type", "Template", "Status", "Board", "Image", "Actions"]}
+              rows={pins.items.map((pin) => (
+                <tr key={pin.id}>
+                  <td>{pin.movie_title || `Movie ${pin.movie_id}`}</td>
+                  <td><Status>{pin.pin_type}</Status></td>
+                  <td>{pin.template}</td>
+                  <td><Status>{pin.status}</Status></td>
+                  <td>
+                    {pin.board_name || (
+                      <select value="" onChange={(e) => e.target.value && assignBoard(pin.id, e.target.value)}>
+                        <option value="">Assign board</option>
+                        {(boards?.boards || []).map((b) => (
+                          <option key={b.id} value={b.id}>{b.name}</option>
+                        ))}
+                      </select>
+                    )}
+                  </td>
+                  <td>
+                    {pin.image_path ? (
+                      <a href={pin.image_path} target="_blank" rel="noopener noreferrer">View</a>
+                    ) : "—"}
+                  </td>
+                  <td>
+                    {pin.status === "READY_FOR_REVIEW" && (
+                      <>
+                        <button className="admin-btn-sm success" onClick={() => pinAction(pin.id, "approve")}>Approve</button>
+                        <button className="admin-btn-sm danger" onClick={() => pinAction(pin.id, "reject")}>Reject</button>
+                      </>
+                    )}
+                    {pin.status === "APPROVED" && (
+                      <button className="admin-btn-sm primary" onClick={() => pinAction(pin.id, "publish")}>Publish</button>
+                    )}
+                    {pin.status === "FAILED" && (
+                      <button className="admin-btn-sm warning" onClick={() => pinAction(pin.id, "retry")}>Retry</button>
+                    )}
+                    <button className="admin-btn-sm" onClick={() => pinAction(pin.id, "regenerate")}>Regenerate</button>
+                  </td>
+                </tr>
+              ))}
+            />
+          )}
+        </>
+      )}
+
+      {tab === "boards" && (
+        <>
+          <h2>Pinterest Boards</h2>
+          <button className="admin-btn" onClick={syncBoards} disabled={syncing}>
+            {syncing ? "Syncing..." : "Sync from Pinterest"}
+          </button>
+          {boardsError ? <Guard error={boardsError} /> : !boards ? <p>Loading...</p> : (
+            <Table
+              headers={["Name", "Language", "Pins", "Actions"]}
+              rows={boards.boards.map((b) => (
+                <tr key={b.id}>
+                  <td><a href={b.url || "#"} target="_blank" rel="noopener noreferrer">{b.name}</a></td>
+                  <td>{b.language_code || "—"}</td>
+                  <td>{b.pin_count}</td>
+                  <td>—</td>
+                </tr>
+              ))}
+            />
+          )}
+        </>
+      )}
+
+      {tab === "create" && (
+        <>
+          <h2>Create New Pin</h2>
+          <div className="admin-form">
+            <label>Movie ID <input type="number" value={newPinMovieId} onChange={(e) => setNewPinMovieId(e.target.value)} placeholder="e.g. 123" /></label>
+            <label>Template
+              <select value={newPinTemplate} onChange={(e) => setNewPinTemplate(e.target.value)}>
+                <option value="">Auto-detect</option>
+                {(templates?.templates || []).map((t) => (
+                  <option key={t.name} value={t.name}>{t.name} — {t.badge}</option>
+                ))}
+              </select>
+            </label>
+            <button className="admin-btn primary" onClick={createPin} disabled={creating || !newPinMovieId}>
+              {creating ? "Creating..." : "Generate Pin"}
+            </button>
+          </div>
+        </>
+      )}
+
+      {tab === "settings" && (
+        <>
+          <h2>Pinterest Connection</h2>
+          {authError ? <Guard error={authError} /> : !authStatus ? <p>Loading...</p> : (
+            <div className="admin-form">
+              <p>Status: {authStatus.connected ? <Status>CONNECTED</Status> : <Status>NOT_CONNECTED</Status>}</p>
+              {authStatus.expires_at && <p>Token expires: {authStatus.expires_at}</p>}
+              {!authStatus.connected && (
+                <button className="admin-btn primary" onClick={openAuth}>Connect Pinterest Account</button>
+              )}
+              <h3>Developer Setup Required</h3>
+              <ol>
+                <li>Create a Pinterest business account at <a href="https://help.pinterest.com/business/article/create-an-advertiser-account" target="_blank" rel="noopener noreferrer">pinterest.com</a></li>
+                <li>Go to <a href="https://developers.pinterest.com/apps/" target="_blank" rel="noopener noreferrer">developers.pinterest.com/apps</a></li>
+                <li>Accept Developer Terms and click <strong>Connect app</strong></li>
+                <li>Set Redirect URI to: <code>https://otttracker.in/api/v1/integrations/pinterest/callback</code></li>
+                <li>Request scopes: <code>boards:read, boards:write, pins:read, pins:write</code></li>
+                <li>Add App ID and App Secret to your <code>.env</code> file</li>
+              </ol>
+            </div>
+          )}
+        </>
       )}
     </Page>
   );

@@ -18,6 +18,7 @@ from app.models.ott_availability import OttAvailability
 from app.models.research import ResearchRun
 from app.services.backfill import DataHealthService
 from app.services.movie_metadata_service import MovieMetadataService
+from app.services.languages import normalize_language_code
 from app.services.notification_service import NotificationService
 from app.services.ott.intelligence import OTTIntelligenceService
 from app.services.ott.reconciliation import OTTReconciliationService
@@ -147,7 +148,9 @@ class ResearchPipelineService:
                 popularity=payload.get("popularity"),
                 vote_average=payload.get("vote_average"),
                 vote_count=payload.get("vote_count"),
-                original_language=payload.get("original_language"),
+                original_language=normalize_language_code(
+                    payload.get("original_language")
+                ),
                 adult=bool(payload.get("adult", False)),
             )
             self.db.add(movie)

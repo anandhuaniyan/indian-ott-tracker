@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { useLocation } from "react-router-dom";
 import analytics from "../services/analytics";
 import { readConsent as savedConsent } from "../services/consent";
+import { isPrivateRoute } from "../services/privateRoutes";
 
 const MEASUREMENT_ID = () => import.meta.env.VITE_GA_MEASUREMENT_ID;
 
@@ -32,6 +33,7 @@ export default function Tracking() {
   const adsClient = /^ca-pub-\d{16}$/.test(import.meta.env.VITE_ADSENSE_CLIENT_ID || "")
     ? import.meta.env.VITE_ADSENSE_CLIENT_ID : "";
   const location = useLocation();
+  const privateRoute = isPrivateRoute(location.pathname);
   const configured = useRef(false);
 
   useEffect(() => {
@@ -62,7 +64,7 @@ export default function Tracking() {
       );
     }
 
-    if (consent.advertising && adsClient) {
+    if (!privateRoute && consent.advertising && adsClient) {
       loadScript(
         "adsense-script",
         `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(adsClient)}`,
@@ -80,7 +82,7 @@ export default function Tracking() {
           analytics_storage: state.analyticsStorage,
         });
       }
-      if (updated.advertising && adsClient) {
+      if (!privateRoute && updated.advertising && adsClient) {
         loadScript(
           "adsense-script",
           `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(adsClient)}`,
@@ -89,11 +91,11 @@ export default function Tracking() {
     };
     window.addEventListener("consent-updated", onConsentUpdated);
     return () => window.removeEventListener("consent-updated", onConsentUpdated);
-  }, [ga, adsClient, location.pathname, location.search]);
+  }, [ga, adsClient, privateRoute, location.pathname, location.search]);
 
   useEffect(() => {
     if (!configured.current) return;
-    analytics.trackPageView();
+    analytics.trackPageView(location);
   }, [location.pathname, location.search]);
 
   return null;

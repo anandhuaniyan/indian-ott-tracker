@@ -2,9 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import Seo from "../components/Seo";
 import { adminGet, adminPost, get, imageUrl } from "../services/api";
-import { COMMON_LANGUAGE_OPTIONS, languageName } from "../services/languages";
-
-const DEFAULT_LANGUAGES = COMMON_LANGUAGE_OPTIONS.map(([code, name]) => ({ code, name }));
+import { languageName, loadLanguageOptions } from "../services/languages";
+import LanguageTabs from "../components/LanguageTabs";
 
 const Art = ({ path, alt, className = "", size = "w500" }) => (
   <img
@@ -64,7 +63,7 @@ function MovieResult({ movie }) {
       <div className="deep-actions">
         <Link className="button-link" to={`/deep-search/movie/${movie.id}`}>View live details</Link>
         {movie.local_movie_id && <Link to={`/movies/${movie.local_movie_id}`}>Open Local Movie</Link>}
-        <Link to={requestMovieHref(movie)}>Request Movie</Link>
+        {!movie.local_movie_id && <Link to={requestMovieHref(movie)}>Request Movie</Link>}
       </div>
     </div>
   </article>;
@@ -88,14 +87,18 @@ export function DeepSearch({ modeTabs = null }) {
   const [type, setType] = useState(initialType);
   const [query, setQuery] = useState(params.get("q") || "");
   const [year, setYear] = useState(params.get("year") || "");
-  const [language, setLanguage] = useState(params.get("language") || "");
+  const [language, setLanguage] = useState(params.get("language") || "all");
   const [page, setPage] = useState(Number(params.get("page")) || 1);
   const [data, setData] = useState();
   const [error, setError] = useState();
   const [loading, setLoading] = useState(false);
-  const [languages, setLanguages] = useState(DEFAULT_LANGUAGES);
+  const [languages, setLanguages] = useState([]);
 
-  useEffect(() => { get("/api/v1/languages").then((value) => Array.isArray(value) && setLanguages(value)).catch(() => {}); }, []);
+  useEffect(() => {
+    loadLanguageOptions()
+      .then(setLanguages)
+      .catch(() => setLanguages([]));
+  }, []);
 
   const path = useMemo(() => {
     const q = query.trim();
@@ -104,7 +107,7 @@ export function DeepSearch({ modeTabs = null }) {
     if (type === "imdb") search.set("external_id", q);
     else { search.set("q", q); search.set("page", page); }
     if (type === "movies" && year) search.set("year", year);
-    if (type === "movies" && language) search.set("language", language);
+    if (type === "movies" && language !== "all") search.set("language", language);
     return `/api/v1/deep-search/${type === "imdb" ? "find" : type}?${search}`;
   }, [type, query, year, language, page]);
 
@@ -113,7 +116,7 @@ export function DeepSearch({ modeTabs = null }) {
     if (!path) { setError("Enter a movie, person, or IMDb ID."); return; }
     const next = { mode: "deep", type, q: query.trim() };
     if (type === "movies" && year) next.year = year;
-    if (type === "movies" && language) next.language = language;
+    if (type === "movies" && language !== "all") next.language = language;
     if (page > 1) next.page = String(page);
     setParams(next);
     setLoading(true); setError(undefined);
@@ -143,13 +146,16 @@ export function DeepSearch({ modeTabs = null }) {
         <button key={value} type="button" role="tab" aria-selected={type === value} className={type === value ? "active" : ""} onClick={() => { setType(value); setData(undefined); setError(undefined); setPage(1); }}>{label}</button>
       )}
     </div>
-    <form className="deep-search-form" onSubmit={(event) => { setPage(1); run(event); }}>
+    <form className={`deep-search-form deep-search-form-${type}`} onSubmit={(event) => { setPage(1); run(event); }}>
       <label className="deep-query">{type === "movies" ? "Movie name" : type === "people" ? "Person name" : "IMDb ID"}
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={type === "movies" ? "e.g. Aadu" : type === "people" ? "e.g. Prithviraj Sukumaran" : "e.g. tt1234567"} required />
       </label>
       {type === "movies" && <>
         <label>Year<input type="number" min="1870" max="2200" value={year} onChange={(event) => setYear(event.target.value)} placeholder="Optional" /></label>
-        <label>Language<select value={language} onChange={(event) => setLanguage(event.target.value)}><option value="">Any language</option>{languages.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
+        <div className="deep-language-filter">
+          <span>Languages</span>
+          <LanguageTabs value={language} languages={languages} onChange={setLanguage} />
+        </div>
       </>}
       <button disabled={loading}>{loading ? "Searching…" : "Search live source"}</button>
     </form>
@@ -236,7 +242,7 @@ export function DeepMovie() {
         </dl>
         <div className="deep-actions">
           {movie.local_movie_id && <Link className="button-link" to={`/movies/${movie.local_movie_id}`}>Open Local Movie</Link>}
-          <Link className="button-link" to={requestMovieHref(movie)}>Request Movie</Link>
+          {!movie.local_movie_id && <Link className="secondary-button-link" to={requestMovieHref(movie)}>Request Movie</Link>}
           {movie.homepage && <a href={movie.homepage} rel="nofollow noreferrer">Official homepage</a>}
         </div>
         <AdminMovieAction movie={movie}/>

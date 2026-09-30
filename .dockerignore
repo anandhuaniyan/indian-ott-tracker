@@ -1,7 +1,13 @@
 .git
+.git/
+.git/**
 .github
 .venv
+.venv/
+.venv/**
 .venv.*
+.venv.*/
+.venv.*/**
 __pycache__
 *.py[cod]
 .pytest_cache
@@ -12,6 +18,8 @@ frontend/dist
 media
 storage
 backups
+backups/
+backups/**
 logs
 *.log
 celerybeat-schedule*
@@ -30,3 +38,12 @@ data/backups
 *.sqlite
 *.sqlite3
 *.db
+tmp
+tmp/
+tmp/**
+output
+output/
+output/**
+private_uploads
+private_uploads/
+private_uploads/**

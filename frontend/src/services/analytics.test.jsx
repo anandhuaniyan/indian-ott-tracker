@@ -6,7 +6,7 @@ const moduleEnv = { ...import.meta.env };
 
 describe("analytics helper", () => {
   beforeEach(() => {
-    vi.stubGlobal("window", { location: { pathname: "/", search: "", href: "https://x/" }, gtag: vi.fn() });
+    vi.stubGlobal("window", { location: { pathname: "/", search: "", href: "https://x/", origin: "https://x" }, gtag: vi.fn() });
     window.document = { title: "" };
   });
   afterEach(() => {
@@ -28,6 +28,17 @@ describe("analytics helper", () => {
       "page_view",
       expect.objectContaining({ page_path: "/" }),
     );
+  });
+
+  it("does not send private routes or account tokens to analytics", () => {
+    import.meta.env.VITE_GA_MEASUREMENT_ID = "G-TEST";
+    window.location.pathname = "/reset-password";
+    window.location.search = "?token=secret-reset-token";
+    window.location.href = "https://x/reset-password?token=secret-reset-token";
+
+    analytics.trackPageView();
+
+    expect(window.gtag).not.toHaveBeenCalled();
   });
 
   it("only sends permitted parameters", () => {

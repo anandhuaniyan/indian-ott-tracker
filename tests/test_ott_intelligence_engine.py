@@ -229,6 +229,9 @@ def test_one_provider_failure_does_not_stop_other_providers(database, monkeypatc
     assert result["evidence"] == 1
     assert database.query(OttEvidence).filter_by(movie_id=2, source_type="STREAMING_AVAILABILITY").count() == 1
     assert database.query(OttAvailabilityObservation).filter_by(movie_id=2, source_type="STREAMING_AVAILABILITY").count() == 1
+    canonical = database.query(OttAvailability).filter_by(movie_id=2, provider="Netflix").one()
+    assert canonical.verification_status == "PLATFORM_CONFIRMED"
+    assert canonical.ott_release_date is None
 
 
 def test_same_day_observations_coalesce_across_sqlite_timezone_behavior(database):

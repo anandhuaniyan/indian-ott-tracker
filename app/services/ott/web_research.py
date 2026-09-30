@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+import httpx
 from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
@@ -19,9 +20,10 @@ from app.models.operations import MovieRequest, OperationState, OttEvidence
 from app.models.ott_availability import OttAvailability
 from app.services.operations import OttResearchService
 from app.services.ott_providers import configured_ott_provider, inspect_source
+from app.services.languages import SUPPORTED_PRIMARY_LANGUAGE_CODES
 
 
-LANGUAGES = ("ml", "ta", "te", "hi", "kn")
+LANGUAGES = SUPPORTED_PRIMARY_LANGUAGE_CODES
 
 
 class WebOttResearchService:
@@ -43,9 +45,14 @@ class WebOttResearchService:
 
     def targets(self, limit: int = 50):
         today = date.today()
-        lower, upper = today - timedelta(days=60), today - timedelta(days=30)
+        this_month = today.replace(day=1)
+        previous_month = (this_month - timedelta(days=1)).replace(day=1)
+        next_month = (this_month.replace(day=28) + timedelta(days=4)).replace(day=1)
+        after_next_month = (next_month.replace(day=28) + timedelta(days=4)).replace(day=1)
+        lower, upper = previous_month, after_next_month - timedelta(days=1)
         # Include requests first, then all target-language releases with no
-        # confirmed India platform/date.  Admin locks are excluded entirely.
+        # confirmed India platform/date across previous/current/next month.
+        # Admin locks are excluded entirely.
         requested = self.db.query(MovieRequest.local_movie_id).filter(
             MovieRequest.local_movie_id.is_not(None)
         )
@@ -126,7 +133,19 @@ class WebOttResearchService:
         }
         if not report["configured"]:
             return report | {"status": "NOT_CONFIGURED"}
-        results = self.provider.search(movie, max_queries=max_queries)
+        try:
+            results = self.provider.search(movie, max_queries=max_queries)
+        except (httpx.HTTPError, TimeoutError, ConnectionError) as exc:
+            # Search discovery is optional.  A quota, transport, or upstream
+            # failure must not prevent the caller from continuing with TMDB,
+            # direct provider feeds, or the next movie.
+            return report | {
+                "status": "SOURCE_UNAVAILABLE",
+                "error": sanitize_error(exc),
+                "temporary_failure": True,
+            }
+        if any(r.get("error") == "QUOTA_EXCEEDED" for r in results):
+            return report | {"error": "QUOTA_EXCEEDED"}
         report["results"] = len(results)
         for result in results[:8]:
             query = result.get("query")

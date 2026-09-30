@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, Float, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, Date, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
@@ -95,6 +95,18 @@ class Movie(TimestampMixin, Base):
         back_populates="movie",
         cascade="all, delete-orphan",
     )
+
+    safety_classification: Mapped[str] = mapped_column(
+        String(20), default="UNKNOWN", nullable=False, index=True
+    )
+    safety_risk_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    safety_reasons: Mapped[list | None] = mapped_column(JSON)
+    safety_public_visibility: Mapped[str] = mapped_column(
+        String(20), default="FULL", nullable=False, index=True
+    )
+    safety_classification_source: Mapped[str | None] = mapped_column(String(20))
+    safety_classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    safety_manual_override: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     credits: Mapped[list["MovieCredit"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
     external_ids: Mapped[list["ExternalId"]] = relationship(back_populates="movie", cascade="all, delete-orphan")

@@ -16,6 +16,8 @@ from app.models.movie import Movie
 from app.models.operations import MovieRequest
 from app.models.research import RequestCommunication
 from app.services.notification_service import NotificationService
+from app.services.email_layout import build_transactional_email, deliver_email
+from app.services.request_notification_data import request_notification_data
 
 
 ACTIVE_REQUEST_STATUSES = ("PENDING", "REVIEWING", "FOUND")
@@ -53,9 +55,14 @@ class MovieRequestEmailService:
         return item.verified_title or item.movie_name
 
     def _message(self, item: MovieRequest, kind: str) -> EmailMessage:
-        title = self._title(item)
-        safe_title = escape(title)
-        reference = escape(item.request_id)
+        data = request_notification_data(self.db, item)
+        title = data.title
+        details = [
+            ("Original title", data.original_title),
+            ("Release date", data.release_date or data.year),
+            ("Language", data.language),
+            ("Request reference", data.request_id),
+        ]
         if kind == "confirmation":
             subject = f"Movie Request Received — {title}"
             plain = (
@@ -64,31 +71,45 @@ class MovieRequestEmailService:
                 f"Current status: Pending\nRequest reference: {item.request_id}\n"
                 f"Website: {settings.SITE_URL.rstrip('/')}"
             )
-            html = (
-                f"<h2>Request received</h2><p>Your request for <strong>{safe_title}</strong> has been received.</p>"
-                "<p>We’ll review your request and aim to make it available within 48 hours. "
-                "We’ll email you again once it becomes available.</p>"
-                "<p>Current status: <strong>Pending</strong></p>"
-                f'<p><a href="{escape(settings.SITE_URL.rstrip("/"), quote=True)}">Visit Indian OTT Tracker</a></p>'
-                f"<p><small>Request reference: {reference}</small></p>"
+            return build_transactional_email(
+                to=item.email,
+                subject=subject,
+                heading="Request received",
+                intro=f"Your request for {title} has been received. We’ll review it and email you after an administrator verifies that it is available.",
+                plain=plain,
+                details=[*details, ("Status", "Pending")],
+                action_label="Visit OTT Tracker",
+                action_url=settings.SITE_URL.rstrip("/"),
+                poster_url=data.poster_url,
             )
         elif kind == "completion":
-            if not item.local_movie_id:
+            if not data.movie_url:
                 raise ValueError("A local movie is required for completion email")
-            url = f"{settings.SITE_URL.rstrip('/')}/movies/{item.local_movie_id}"
             subject = f"Your Requested Movie Is Now Available — {title}"
-            plain = f"Good news — {title} has been added and is now available.\n\nView Movie: {url}"
-            html = (
-                f"<h2>Good news</h2><p><strong>{safe_title}</strong> has been added and is now available.</p>"
-                f'<p><a href="{escape(url, quote=True)}">View Movie</a></p>'
+            plain = f"Good news — {title} has been added and is now available.\n\nView Movie: {data.movie_url}"
+            return build_transactional_email(
+                to=item.email,
+                subject=subject,
+                heading="Your requested movie is available",
+                intro=f"An OTT Tracker administrator verified {title} and made its movie page available.",
+                plain=plain,
+                details=[*details, ("OTT platform", data.ott_platform), ("OTT release date", data.ott_release_date)],
+                action_label="View movie",
+                action_url=data.movie_url,
+                poster_url=data.poster_url,
             )
         elif kind == "rejection":
             reason = (item.public_rejection_reason or "The movie cannot currently be added.").strip()
             subject = f"Update on Your Movie Request — {title}"
             plain = f"We’re sorry, but {title} cannot currently be added.\n\n{reason}\n\nRequest reference: {item.request_id}"
-            html = (
-                f"<h2>Request update</h2><p>We’re sorry, but <strong>{safe_title}</strong> cannot currently be added.</p>"
-                f"<p>{escape(reason)}</p><p><small>Request reference: {reference}</small></p>"
+            return build_transactional_email(
+                to=item.email,
+                subject=subject,
+                heading="Request update",
+                intro=f"We’re sorry, but {title} cannot currently be added. {reason}",
+                plain=plain,
+                details=details,
+                poster_url=data.poster_url,
             )
         elif kind == "admin_notification":
             admin_url = f"{settings.SITE_URL.rstrip('/')}/admin/requests"
@@ -105,41 +126,23 @@ class MovieRequestEmailService:
                 f"Admin Requests: {admin_url}",
             ]
             plain = "\n".join(fields)
-            html = (
-                f"<h2>New movie request</h2><p><strong>{safe_title}</strong></p>"
-                "<dl>"
-                f"<dt>External ID</dt><dd>{item.external_movie_id or 'Unavailable'}</dd>"
-                f"<dt>IMDb ID</dt><dd>{escape(item.imdb_id or 'Unavailable')}</dd>"
-                f"<dt>Language</dt><dd>{escape(item.verified_language_name or item.verified_original_language or item.language or 'Unavailable')}</dd>"
-                f"<dt>Release date</dt><dd>{item.verified_release_date or item.release_year or 'Unavailable'}</dd>"
-                f"<dt>Requester</dt><dd>{escape(item.email)}</dd>"
-                f"<dt>Request ID</dt><dd>{reference}</dd>"
-                f"<dt>Additional details</dt><dd>{escape(item.details or 'None')}</dd>"
-                "</dl>"
-                f'<p><a href="{escape(admin_url, quote=True)}">Open Admin Requests</a></p>'
+            return build_transactional_email(
+                to=settings.ADMIN_NOTIFICATION_EMAIL,
+                subject=subject,
+                heading="New movie request",
+                intro=f"A viewer requested {title}.",
+                plain=plain,
+                details=[*details, ("TMDB ID", data.tmdb_id), ("IMDb ID", data.imdb_id), ("Requester", item.email), ("Additional details", item.details)],
+                action_label="Open Admin Requests",
+                action_url=admin_url,
+                poster_url=data.poster_url,
             )
         else:
             raise ValueError("Unknown movie-request email kind")
-        message = EmailMessage()
-        message["Subject"] = subject
-        message["From"] = settings.SMTP_FROM
-        message["To"] = settings.ADMIN_NOTIFICATION_EMAIL if kind == "admin_notification" else item.email
-        message.set_content(plain)
-        message.add_alternative(
-            '<div style="max-width:600px;margin:auto;padding:20px;font-family:Arial,sans-serif;line-height:1.55">'
-            f"{html}</div>",
-            subtype="html",
-        )
-        return message
 
     @staticmethod
     def _deliver(message: EmailMessage) -> None:
-        with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as client:
-            if settings.SMTP_USE_TLS:
-                client.starttls()
-            if settings.SMTP_USERNAME:
-                client.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-            client.send_message(message)
+        deliver_email(message)
 
     def send(self, item: MovieRequest, kind: str, *, respect_cooldown: bool = True) -> dict:
         if kind not in EMAIL_KINDS:

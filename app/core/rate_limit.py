@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import threading
 import time
 
@@ -44,7 +45,78 @@ def _local_fallback_limit(key: str, maximum: int, seconds: int) -> None:
             count, expires_at = current[0] + 1, current[1]
         _fallback_windows[key] = (count, expires_at)
     if count > maximum:
-        raise HTTPException(429, "Too many requests; try again later")
+        _raise_rate_limited(max(1, math.ceil(expires_at - now)))
+
+
+def _raise_rate_limited(retry_after: int) -> None:
+    retry_after = max(1, retry_after)
+    minutes = max(1, math.ceil(retry_after / 60))
+    raise HTTPException(
+        429,
+        f"Too many attempts. Please try again in {minutes} minute{'s' if minutes != 1 else ''}.",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+def _key(request: Request, bucket: str, identity: str | int | None) -> str:
+    return f"rate:{bucket}:{_subject(request, identity)}"
+
+
+def _redis_client():
+    return redis.from_url(
+        settings.REDIS_URL,
+        socket_connect_timeout=0.2,
+        socket_timeout=0.2,
+    )
+
+
+def _redis_retry_after(client, key: str, fallback: int) -> int:
+    try:
+        ttl = int(client.ttl(key))
+    except (AttributeError, TypeError, ValueError):
+        ttl = fallback
+    return ttl if ttl > 0 else fallback
+
+
+def check_limit(
+    request: Request,
+    bucket: str,
+    maximum: int,
+    *,
+    identity: str | int | None = None,
+) -> None:
+    """Reject a subject whose existing failure counter reached its limit."""
+    key = _key(request, bucket, identity)
+    try:
+        client = _redis_client()
+        count = int(client.get(key) or 0)
+        if count >= maximum:
+            _raise_rate_limited(_redis_retry_after(client, key, 60))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _warn_redis_unavailable(exc)
+        now = time.monotonic()
+        with _fallback_lock:
+            current = _fallback_windows.get(key)
+        if current and current[1] > now and current[0] >= maximum:
+            _raise_rate_limited(math.ceil(current[1] - now))
+
+
+def clear_limit(
+    request: Request,
+    bucket: str,
+    *,
+    identity: str | int | None = None,
+) -> None:
+    """Clear one precise limiter subject, normally after successful login."""
+    key = _key(request, bucket, identity)
+    try:
+        _redis_client().delete(key)
+    except Exception as exc:
+        _warn_redis_unavailable(exc)
+    with _fallback_lock:
+        _fallback_windows.pop(key, None)
 
 
 def _warn_redis_unavailable(exc: Exception) -> None:
@@ -77,18 +149,14 @@ def limit(
     *,
     identity: str | int | None = None,
 ) -> None:
-    key = f"rate:{bucket}:{_subject(request, identity)}"
+    key = _key(request, bucket, identity)
     try:
-        client = redis.from_url(
-            settings.REDIS_URL,
-            socket_connect_timeout=0.2,
-            socket_timeout=0.2,
-        )
+        client = _redis_client()
         count = client.incr(key)
         if count == 1:
             client.expire(key, seconds)
         if count > maximum:
-            raise HTTPException(429, "Too many requests; try again later")
+            _raise_rate_limited(_redis_retry_after(client, key, seconds))
     except HTTPException:
         raise
     except Exception as exc:

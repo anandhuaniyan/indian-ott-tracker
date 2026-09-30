@@ -8,8 +8,12 @@ entity so a worker restart never loses successful work.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import case, exists, func, or_
+from sqlalchemy import extract
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.orm import Session
 
 from app.config.settings import settings
@@ -38,7 +42,12 @@ from app.services.rating_provider import (
 from app.services.tmdb.client import TMDbRequestError
 from app.services.tmdb.movie_service import TMDbMovieService
 from app.services.trailers import TrailerService
-from app.services.youtube_trailer import YouTubeTrailerService
+from app.services.youtube_trailer import (
+    YouTubeInvalidKey,
+    YouTubeQuotaExceeded,
+    YouTubeTemporaryError,
+    YouTubeTrailerService,
+)
 
 
 METADATA = "tmdb.metadata_backfill"
@@ -70,6 +79,8 @@ class ResumableBackfill:
             item.total_count = max(item.total_count, total)
         return item
 
+    STALE_RUNNING_THRESHOLD = timedelta(minutes=30)
+
     def _eligible(self, entity_type: str, entity_id_column):
         done = exists().where(
             (BackfillRecord.operation == self.operation)
@@ -85,14 +96,65 @@ class ResumableBackfill:
         )
         return ~done & ~exhausted
 
+    def _recover_stale_running(self) -> int:
+        """Reset RUNNING records that are stale (worker was interrupted) to PENDING.
+
+        Records still actively being processed by a live worker (touched within
+        STALE_RUNNING_THRESHOLD) are left untouched. This allows `_eligible` to
+        pick them up for retry without losing the attempt counter.
+        """
+        stale_at = _now() - self.STALE_RUNNING_THRESHOLD
+        stale = (
+            self.db.query(BackfillRecord)
+            .filter(
+                BackfillRecord.operation == self.operation,
+                BackfillRecord.status == "RUNNING",
+                BackfillRecord.updated_at < stale_at,
+            )
+            .all()
+        )
+        for record in stale:
+            record.status = "PENDING"
+        if stale:
+            self.db.commit()
+        return len(stale)
+
     def _record(self, entity_type: str, entity_id: int) -> BackfillRecord:
         record = self.db.query(BackfillRecord).filter_by(
             operation=self.operation, entity_type=entity_type, entity_id=entity_id
         ).first()
         if not record:
-            record = BackfillRecord(operation=self.operation, entity_type=entity_type, entity_id=entity_id)
-            self.db.add(record)
-            self.db.flush()
+            if self.db.bind and self.db.bind.dialect.name == "postgresql":
+                statement = (
+                    postgresql_insert(BackfillRecord)
+                    .values(operation=self.operation, entity_type=entity_type, entity_id=entity_id)
+                    .on_conflict_do_nothing(
+                        index_elements=["operation", "entity_type", "entity_id"]
+                    )
+                    .returning(BackfillRecord.id)
+                )
+                record_id = self.db.execute(statement).scalar_one_or_none()
+                record = (
+                    self.db.get(BackfillRecord, record_id)
+                    if record_id is not None
+                    else self.db.query(BackfillRecord).filter_by(
+                        operation=self.operation,
+                        entity_type=entity_type,
+                        entity_id=entity_id,
+                    ).one()
+                )
+            else:
+                try:
+                    with self.db.begin_nested():
+                        record = BackfillRecord(operation=self.operation, entity_type=entity_type, entity_id=entity_id)
+                        self.db.add(record)
+                        self.db.flush()
+                except IntegrityError:
+                    record = self.db.query(BackfillRecord).filter_by(
+                        operation=self.operation,
+                        entity_type=entity_type,
+                        entity_id=entity_id,
+                    ).one()
         return record
 
     def _start(self, entity_type: str, entity_id: int) -> BackfillRecord:
@@ -110,23 +172,58 @@ class ResumableBackfill:
         record.last_error = sanitize_error(error) if error else None
         self.db.commit()
 
+    def _yield_control(self, succeeded: int, processed: int) -> str:
+        """Return a yield decision for batch-progress gating.
+
+        - >=20% success rate: "continue"
+        - 5-20% success rate: "reassess"
+        - <5% success rate: "stop"
+        """
+        if processed <= 0:
+            return "stop"
+        rate = succeeded / processed
+        if rate >= 0.20:
+            return "continue"
+        if rate >= 0.05:
+            return "reassess"
+        return "stop"
+
+    def _db_query_completed(self):
+        """Return the base query for counting completed backfill records."""
+        return self.db.query(BackfillRecord).filter(BackfillRecord.operation == self.operation, or_(
+            BackfillRecord.status == "DONE",
+            (BackfillRecord.status == "FAILED") & (BackfillRecord.attempts >= settings.BACKFILL_MAX_ATTEMPTS),
+        ))
+
     def _summary(self, state: OperationState, processed: int, succeeded: int, failed: int, complete: bool) -> dict:
-        state.status = "COMPLETE" if complete else "PAUSED"
-        completed_records = self.db.query(BackfillRecord).filter(
+        if state.status != "WAITING_FOR_YOUTUBE_QUOTA":
+            state.status = "COMPLETE" if complete else "PAUSED"
+        completed_records = self._db_query_completed().filter(
             BackfillRecord.operation == self.operation,
             or_(
                 BackfillRecord.status == "DONE",
                 (BackfillRecord.status == "FAILED") & (BackfillRecord.attempts >= settings.BACKFILL_MAX_ATTEMPTS),
             ),
         ).count()
-        state.processed_count = completed_records
+        # A polymorphic checkpoint can outlive its movie/person. Keep history,
+        # but never publish an impossible processed > total counter.
+        state.total_count = max(state.total_count, completed_records)
+        state.processed_count = min(completed_records, state.total_count)
         state.last_success_at = _now()
         state.last_error = None if not failed else f"{failed} record(s) failed in the latest batch"
+        state.details = {
+            **(state.details or {}),
+            "current_batch": processed,
+            "updated_in_batch": succeeded,
+            "failed_in_batch": failed,
+            "batch_finished_at": state.last_success_at.isoformat(),
+        }
         if complete:
             state.completed_at = _now()
         self.db.commit()
         return {
             "operation": self.operation,
+            "status": state.status,
             "processed": processed,
             "succeeded": succeeded,
             "failed": failed,
@@ -270,63 +367,144 @@ class TrailerBackfillService(ResumableBackfill):
 
     operation = TRAILERS
 
+    _PERMANENT_FAILURE_MARKER = "HTTP 404 for /movie/"
+
+    def _eligible(self, entity_type: str, entity_id_column):
+        eligible = super()._eligible(entity_type, entity_id_column)
+        permanent = exists().where(
+            (BackfillRecord.operation == self.operation)
+            & (BackfillRecord.entity_type == entity_type)
+            & (BackfillRecord.entity_id == entity_id_column)
+            & (BackfillRecord.status == "FAILED")
+            & BackfillRecord.last_error.like(f"%{self._PERMANENT_FAILURE_MARKER}%")
+        )
+        return eligible & ~permanent
+
+    @staticmethod
+    def _youtube_quota_date() -> str:
+        return datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
+
+    def _quota(self, state: OperationState) -> tuple[int, dict]:
+        details = dict(state.details or {})
+        quota_date = self._youtube_quota_date()
+        if details.get("youtube_quota_date") != quota_date:
+            details.update(youtube_quota_date=quota_date, youtube_searches_used=0)
+        used = int(details.get("youtube_searches_used") or 0)
+        return used, details
+
+    def _reserve_youtube_search(self, state: OperationState) -> bool:
+        used, details = self._quota(state)
+        if used >= settings.YOUTUBE_SEARCH_DAILY_LIMIT:
+            state.status = "WAITING_FOR_YOUTUBE_QUOTA"
+            state.details = details
+            self.db.commit()
+            return False
+        details["youtube_searches_used"] = used + 1
+        details["youtube_quota_remaining_estimate"] = max(
+            0, settings.YOUTUBE_SEARCH_DAILY_LIMIT - used - 1
+        )
+        state.details = details
+        self.db.commit()
+        return True
+
+    def _defer(self, movie_id: int) -> None:
+        record = self._record("movie", movie_id)
+        record.status = "PENDING"
+        record.attempts = max(0, record.attempts - 1)
+        record.last_error = None
+        self.db.commit()
+
+    def _mark_no_confident(self, movie_id: int) -> None:
+        record = self._record("movie", movie_id)
+        record.status = "DONE"
+        record.last_error = "NO_CONFIDENT_TRAILER"
+        self.db.commit()
+
+    def _waiting_for_quota(self, state: OperationState, movie_id: int, reason: str) -> dict:
+        used, details = self._quota(state)
+        details.update(
+            youtube_quota_remaining_estimate=max(0, settings.YOUTUBE_SEARCH_DAILY_LIMIT - used),
+            last_processed_movie_id=movie_id,
+            last_progress_at=_now().isoformat(),
+        )
+        state.status = "WAITING_FOR_YOUTUBE_QUOTA"
+        state.last_error = reason
+        state.details = details
+        self.db.commit()
+        return {
+            "operation": self.operation,
+            "processed": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "cursor": state.cursor,
+            "complete": False,
+            "stopped": "youtube_quota",
+            "status": state.status,
+            "youtube_searches_used": used,
+        }
+
     def run(self, batch_size: int | None = None) -> dict:
-        batch_size = max(1, min(batch_size or settings.TRAILER_BACKFILL_BATCH_SIZE, 100))
+        batch_size = max(1, min(batch_size or settings.TRAILER_BACKFILL_BATCH_SIZE, 500))
         total = self.db.query(Movie).count()
+        self.db.expire_all()
         state = self.state(total)
+        self._recover_stale_running()
         if not (settings.TMDB_API_KEY or settings.TMDB_ACCESS_TOKEN):
             state.status = "BLOCKED"
             state.last_error = "External metadata integration is not configured"
             self.db.commit()
             return {"operation": self.operation, "configured": False, "processed": 0, "complete": False}
-        has_trailer = exists().where(
-            (MovieTrailer.movie_id == Movie.id) & (MovieTrailer.is_primary.is_(True))
-        )
-        stale_trailer = exists().where(
-            (MovieTrailer.movie_id == Movie.id)
-            & or_(
-                MovieTrailer.last_checked_at.is_(None),
-                MovieTrailer.last_checked_at < _now() - timedelta(days=settings.TRAILER_REFRESH_DAYS),
-                MovieTrailer.is_unavailable.is_(True),
+        quota_used, _quota_details = self._quota(state)
+        if settings.YOUTUBE_API_KEY and quota_used >= settings.YOUTUBE_SEARCH_DAILY_LIMIT:
+            return self._waiting_for_quota(
+                state,
+                int((state.details or {}).get("last_processed_movie_id") or state.cursor),
+                "Application YouTube search limit reached",
             )
+        has_trailer = exists().where(
+            (MovieTrailer.movie_id == Movie.id)
+            & (MovieTrailer.is_primary.is_(True))
+            & (MovieTrailer.is_unavailable.is_(False))
         )
         requested = exists().where(
             (MovieRequest.external_movie_id == Movie.tmdb_id)
             & (MovieRequest.status.in_(["PENDING", "REVIEWING", "FOUND"]))
         )
-        today = date.today()
+        language_priority = case(
+            (Movie.original_language == "ml", 0),
+            (Movie.original_language == "ta", 1),
+            (Movie.original_language == "te", 2),
+            (Movie.original_language == "hi", 3),
+            (Movie.original_language == "kn", 4),
+            (Movie.original_language == "en", 5),
+            (Movie.original_language == "ko", 6),
+            (Movie.original_language == "ja", 7),
+            else_=8,
+        )
+        year_priority = case(
+            (extract("year", Movie.release_date) >= 2026, 0),
+            (extract("year", Movie.release_date) >= 2025, 1),
+            (extract("year", Movie.release_date) >= 2024, 2),
+            (extract("year", Movie.release_date) >= 2023, 3),
+            (extract("year", Movie.release_date) >= 2022, 4),
+            (extract("year", Movie.release_date) >= 2021, 5),
+            (extract("year", Movie.release_date) >= 2020, 6),
+            else_=7,
+        )
         plain = lambda: self.db.query(Movie).filter(
             ~has_trailer,
             self._eligible("movie", Movie.id),
         ).order_by(
             case(
                 (requested, 0),
-                (Movie.release_date >= today, 1),
-                (Movie.release_date >= today - timedelta(days=730), 2),
-                else_=3,
+                else_=1,
             ),
+            year_priority,
+            language_priority,
             Movie.popularity.desc().nullslast(),
             Movie.id,
         ).limit(batch_size)
         movies = plain().all()
-        if len(movies) < batch_size:
-            refresh = (
-                self.db.query(Movie)
-                .filter(has_trailer, stale_trailer)
-                .order_by(
-                    case(
-                        (requested, 0),
-                        (Movie.release_date >= today, 1),
-                        (Movie.release_date >= today - timedelta(days=730), 2),
-                        else_=3,
-                    ),
-                    Movie.popularity.desc().nullslast(),
-                    Movie.id,
-                )
-                .limit(batch_size - len(movies))
-                .all()
-            )
-            movies.extend(refresh)
         if not movies:
             return self._summary(state, 0, 0, 0, True)
         state.status = "RUNNING"
@@ -334,28 +512,80 @@ class TrailerBackfillService(ResumableBackfill):
         self.db.commit()
         provider = TMDbMovieService()
         service = TrailerService(self.db)
-        succeeded = failed = 0
+        succeeded = failed = no_confident = 0
         stopped = None
         for movie in movies:
             movie_id = movie.id
+            added_this = no_confident_this = error_this = 0
+            existing_reused_this = duplicate_skipped_this = 0
             self._start("movie", movie_id)
             try:
-                payload = provider.get_movie_videos(movie.tmdb_id)
+                payload = provider.get_movie_videos(movie.tmdb_id, movie.original_language)
                 results = payload.get("results") or []
+                youtube_fallback = False
                 if not results and settings.YOUTUBE_API_KEY:
+                    state = self.state()
+                    if not self._reserve_youtube_search(state):
+                        self._defer(movie_id)
+                        continue
                     youtube = YouTubeTrailerService()
                     found = youtube.search(movie)
                     if found:
                         payload = {"results": found}
+                        youtube_fallback = True
                     else:
-                        self._health_check_stored(movie_id, youtube, service)
-                service.upsert(self.db.get(Movie, movie_id), payload, commit=True)
-                self._finish("movie", movie_id)
-                succeeded += 1
+                        payload = None
+                    state = self.state()
+                    state.details = {
+                        **(state.details or {}),
+                        "last_search_query": youtube.last_query,
+                        "last_candidate": youtube.last_candidate,
+                    }
+                    self.db.commit()
+                if payload is None:
+                    self._mark_no_confident(movie_id)
+                    no_confident_this = 1
+                else:
+                    primary = service.upsert(
+                        self.db.get(Movie, movie_id),
+                        payload,
+                        commit=True,
+                        authoritative=not youtube_fallback,
+                    )
+                    outcomes = service.last_write_outcomes
+                    added_this = int(outcomes.get("created") or 0)
+                    existing_reused_this = int(outcomes.get("existing_video_reused") or 0)
+                    duplicate_skipped_this = int(outcomes.get("duplicate_skipped") or 0)
+                    if primary:
+                        self._finish("movie", movie_id)
+                        succeeded += 1
+                    else:
+                        self._mark_no_confident(movie_id)
+                        no_confident_this = 1
+            except YouTubeQuotaExceeded:
+                self.db.rollback()
+                self._defer(movie_id)
+                continue
+            except YouTubeInvalidKey as exc:
+                self.db.rollback()
+                self._finish("movie", movie_id, exc)
+                failed += 1
+                error_this = 1
+                state = self.state()
+                state.status = "BLOCKED"
+                state.last_error = sanitize_error(exc)
+                self.db.commit()
+                stopped = "youtube_invalid_key"
+                break
+            except YouTubeTemporaryError:
+                self.db.rollback()
+                self._defer(movie_id)
+                continue
             except TMDbRequestError as exc:
                 self.db.rollback()
                 self._finish("movie", movie_id, exc)
                 failed += 1
+                error_this = 1
                 if exc.status_code == 429:
                     stopped = "provider_rate_limited"
                     break
@@ -363,8 +593,21 @@ class TrailerBackfillService(ResumableBackfill):
                 self.db.rollback()
                 self._finish("movie", movie_id, exc)
                 failed += 1
+                error_this = 1
+            no_confident += no_confident_this
             state = self.state()
             state.cursor = movie_id
+            state.details = {
+                **(state.details or {}),
+                "trailers_added": int((state.details or {}).get("trailers_added") or 0) + added_this,
+                "already_had_trailer": int((state.details or {}).get("already_had_trailer") or 0),
+                "existing_video_reused": int((state.details or {}).get("existing_video_reused") or 0) + existing_reused_this,
+                "duplicate_skipped": int((state.details or {}).get("duplicate_skipped") or 0) + duplicate_skipped_this,
+                "no_confident_trailer": int((state.details or {}).get("no_confident_trailer") or 0) + no_confident_this,
+                "errors": int((state.details or {}).get("errors") or 0) + error_this,
+                "last_processed_movie_id": movie_id,
+                "last_progress_at": _now().isoformat(),
+            }
             self.db.commit()
         remaining = (
             self.db.query(Movie.id)
@@ -372,10 +615,21 @@ class TrailerBackfillService(ResumableBackfill):
             .first()
             is not None
         )
-        result = self._summary(state, succeeded + failed, succeeded, failed, not remaining)
+        processed = succeeded + failed + no_confident
+        result = self._summary(state, processed, succeeded, failed, not remaining)
+        quota_used, details = self._quota(self.state())
+        result.update(
+            youtube_searches_used=quota_used,
+            youtube_quota_remaining_estimate=max(0, settings.YOUTUBE_SEARCH_DAILY_LIMIT - quota_used),
+            trailers_created=int(details.get("trailers_added") or 0),
+            trailers_updated=int(details.get("existing_video_reused") or 0),
+            existing_reused=int(details.get("existing_video_reused") or 0),
+            no_confident_trailer=int(details.get("no_confident_trailer") or 0),
+        )
+        result["yield_control"] = self._yield_control(succeeded, processed)
         if stopped:
             state = self.state()
-            state.status = "PAUSED"
+            state.status = "BLOCKED" if stopped == "youtube_invalid_key" else "PAUSED"
             state.last_error = stopped
             self.db.commit()
             result.update({"complete": False, "stopped": stopped})
@@ -413,7 +667,7 @@ class IMDbIdRecoveryService(ResumableBackfill):
         return attempted <= now - timedelta(days=delay_days)
 
     def run(self, batch_size: int | None = None) -> dict:
-        batch_size = max(1, min(batch_size or settings.IMDB_ID_BACKFILL_BATCH_SIZE, 100))
+        batch_size = max(1, min(batch_size or settings.IMDB_ID_BACKFILL_BATCH_SIZE, 500))
         total = self.db.query(Movie).count()
         known_ids = self.db.query(func.count(func.distinct(ExternalId.movie_id))).filter(
             func.lower(ExternalId.provider) == "imdb"
@@ -575,7 +829,7 @@ class IMDbBackfillService(ResumableBackfill):
     def run(self, batch_size: int | None = None) -> dict:
         service = IMDbRatingRefreshService(self.db, self.provider)
         service.operation = self.operation
-        result = service.refresh(max(1, min(batch_size or settings.IMDB_BACKFILL_BATCH_SIZE, 100)))
+        result = service.refresh(max(1, min(batch_size or settings.IMDB_BACKFILL_BATCH_SIZE, 500)))
         return {
             "operation": self.operation,
             "succeeded": result.get("processed", 0) if not result.get("stopped") else 0,

@@ -22,6 +22,7 @@ from app.models.movie import Movie
 from app.models.movie_metadata import ExternalId
 from app.models.operations import OperationState, OttEvidence, OttSourceRelease
 from app.services.operations import OttResearchService
+from app.services.languages import normalize_language_code
 from app.services.ott.matching import MovieMatchService
 from app.services.ott.providers.ottplay import OTTPlayProvider
 
@@ -242,7 +243,9 @@ class OttSourceSyncService:
         if not title:
             raise ValueError("Source record has no title")
         release_date = _date(raw.get("ott_release_date") or raw.get("release_date") or raw.get("date"))
-        language = str(raw.get("language") or raw.get("original_language") or "").strip().lower() or None
+        language = normalize_language_code(
+            raw.get("language") or raw.get("original_language")
+        )
         platform = str(raw.get("platform") or raw.get("provider") or "").strip() or None
         source_url = _safe_source_url(raw.get("source_url") or raw.get("url"))
         raw_key = raw.get("id") or raw.get("external_id") or raw.get("source_id")

@@ -3,12 +3,31 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
-import { Comments, ContactRequests, Dashboard, DataHealth, Discovery, Jobs, Movies, OttGoldSet, OttResearch, ResearchHistory, ResearchRunDetail, RequestDetail, Requests, Sources } from "./Admin";
+import { Comments, ContactRequests, ContentSafety, Dashboard, DataHealth, Discovery, Jobs, Maintenance, Movies, OttGoldSet, OttResearch, ResearchHistory, ResearchRunDetail, RequestDetail, Requests, Sources } from "./Admin";
 import { Request } from "./Public";
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+it("renders content-safety history and supports administrator restoration", async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+    total: 1, page: 1, pages: 1,
+    counts: { restricted: 1, blocked: 1, restored: 0, notification_failed: 0 },
+    items: [{ id: 9, movie_id: 17, tmdb_id: 777, imdb_id: "tt777", title: "Safety Film", original_title: "Original Safety Film", release_date: "2026-08-01", language_name: "Malayalam", previous_classification: "SAFE", new_classification: "BLOCKED", risk_score: 100, tmdb_adult: true, certification: "X", reasons: ["TMDB adult flag"], classification_source: "AUTOMATIC", action: "HIDDEN_FROM_PUBLIC_CATALOGUE", public_visibility_before: "FULL", public_visibility_after: "HIDDEN", notification_status: "SENT", notification_attempts: 1, created_at: "2026-09-01T00:00:00Z" }],
+  }) });
+  vi.stubGlobal("fetch", fetch);
+  render(<MemoryRouter><ContentSafety /></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "Safety Film" })).toBeInTheDocument();
+  expect(screen.getByText("SAFE → BLOCKED")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Open details"));
+  expect(screen.getByText("tt777")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Restore as safe" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+    expect.stringContaining("/content-safety/movies/17"),
+    expect.objectContaining({ method: "PATCH" }),
+  ));
 });
 
 it("shows the admin guard when the session is absent", async () => {
@@ -41,6 +60,29 @@ it("renders the validated movie request form", () => {
   expect(
     screen.getByRole("button", { name: "Submit request" }),
   ).toBeInTheDocument();
+});
+
+it("creates and manages maintenance windows from admin while preserving service selections", async () => {
+  const item = { id: 7, title: "OTT Tracker System Maintenance", description: "Routine maintenance.", start_time: "2026-09-18T19:30:00Z", end_time: "2026-09-18T20:30:00Z", status: "SCHEDULED", stored_status: "SCHEDULED", affected_services: ["Movie Search", "Legacy Service"], impact_level: "LOW", impact_message: "Brief interruptions may occur." };
+  const fetch = vi.fn().mockImplementation((_url, options = {}) => Promise.resolve({ ok: true, json: async () => options.method ? item : { items: [item] } }));
+  vi.stubGlobal("fetch", fetch);
+  render(<MemoryRouter><Maintenance /></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "OTT Tracker System Maintenance" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Start time"), { target: { value: "2026-09-18T01:00" } });
+  fireEvent.change(screen.getByLabelText("End time"), { target: { value: "2026-09-18T02:00" } });
+  fireEvent.change(screen.getByLabelText("Description"), { target: { value: "Routine maintenance." } });
+  fireEvent.click(screen.getByLabelText("Movies"));
+  fireEvent.click(screen.getByRole("button", { name: "Schedule maintenance" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/admin/maintenance"), expect.objectContaining({ method: "POST" })));
+  const createCall = fetch.mock.calls.find(([, options]) => options?.method === "POST");
+  expect(JSON.parse(createCall[1].body).affected_services).toContain("Movies");
+  fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  expect(screen.getByRole("button", { name: "Save changes" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Legacy Service")).toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: "Mark completed" }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/admin/maintenance/7"), expect.objectContaining({ method: "PATCH" })));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel maintenance" }));
+  await waitFor(() => expect(fetch.mock.calls.filter(([, options]) => options?.method === "PATCH").length).toBeGreaterThanOrEqual(2));
 });
 
 it("renders responsive request snapshots, SLA state and email actions", async () => {
@@ -78,7 +120,7 @@ it("renders responsive request snapshots, SLA state and email actions", async ()
   expect(screen.getByRole("link", { name: "View Movie" })).toHaveAttribute("href", "/movies/6204");
 });
 
-it("shows the manual requester notification action for added movies", async () => {
+it("shows the admin-only manual requester notification action for added movies", async () => {
   const fetch = vi.fn().mockResolvedValue({
     ok: true,
     json: async () => ({
@@ -311,6 +353,7 @@ it("shows contact delivery history and provides admin resend", async () => {
     items: [{
       request_id: "WEB-123", request_type: "WEBSITE_ISSUE", type_label: "Report Website Issue",
       status: "NEW", whatsapp: "+65 8000 0000", email: "viewer@example.test", comment: "Broken navigation", discord_status: "FAILED", receipt_email_status: "FAILED", outcome_email_status: null,
+      screenshot_url: "/api/v1/admin/contact-requests/WEB-123/screenshot", screenshot_mime_type: "image/png", screenshot_size: 1234,
       created_at: "2026-09-06T00:00:00Z",
       discord_delivery_history: [{ notification_type: "WEBSITE_ISSUE_SUBMITTED", status: "FAILED", attempt_count: 1, sanitized_error: "Temporary failure" }],
       email_delivery_history: [{ notification_type: "CONTACT_EMAIL_RECEIVED", status: "FAILED", attempt_count: 1, attempted_at: "2026-09-06T00:01:00Z", sanitized_error: "SMTP unavailable" }],
@@ -322,6 +365,8 @@ it("shows contact delivery history and provides admin resend", async () => {
   expect(await screen.findByText("Broken navigation")).toBeInTheDocument();
   expect(screen.getByText("Temporary failure")).toBeInTheDocument();
   expect(screen.getByText(/SMTP unavailable/)).toBeInTheDocument();
+  expect(screen.getByAltText("Screenshot attached to WEB-123")).toHaveAttribute("src", expect.stringContaining("/WEB-123/screenshot"));
+  expect(screen.getByRole("link", { name: "Open full image" })).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Resend email" }));
   await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/contact-requests/WEB-123/emails/RECEIVED/retry"), expect.objectContaining({ method: "POST" })));
   fireEvent.click(screen.getByRole("button", { name: "Resend Discord" }));

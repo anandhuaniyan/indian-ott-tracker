@@ -17,14 +17,14 @@ from sqlalchemy.orm import Session, selectinload
 from app.config.settings import settings
 from app.models.movie import Movie
 from app.models.operations import MovieRequest, OperationState, OttEvidence
+from app.services.languages import INDIAN_ORIGINAL_LANGUAGE_CODES
 
 THEATRICAL_RELEASE_TYPES = {"2", "3", "limited theatrical", "theatrical"}
 DIGITAL_RELEASE_TYPES = {"4", "digital", "ott", "streaming"}
 CANONICAL_OTT_STATES = {"available", "confirmed", "released", "upcoming"}
-INDIAN_ORIGINAL_LANGUAGES = {
-    "as", "bn", "gu", "hi", "kn", "ks", "ml", "mr", "ne", "or", "pa",
-    "sa", "sd", "ta", "te", "ur",
-}
+CANONICAL_OTT_WATCH_TYPES = {"subscription", "ads", "free"}
+INVALID_OTT_PROVIDERS = {"", "platform tba", "tba", "unknown", "n/a", "na", "digital", "vod"}
+INDIAN_ORIGINAL_LANGUAGES = frozenset(INDIAN_ORIGINAL_LANGUAGE_CODES)
 
 RELEASE_LABELS = {
     "THEATRICALLY_RELEASED": "Released",
@@ -136,17 +136,29 @@ def _preferred_date(movie: Movie, rows) -> date | None:
 
 
 def confirmed_canonical_ott(movie: Movie):
-    """Return the strongest complete canonical OTT row, if one exists."""
+    """Return the earliest legitimate verified India streaming premiere."""
     candidates = [
         item
         for item in movie.ott_availabilities
         if item.provider
+        and item.provider.strip().casefold() not in INVALID_OTT_PROVIDERS
+        and (item.country or "").upper() == "IN"
+        and (item.watch_type or "").casefold() in CANONICAL_OTT_WATCH_TYPES
         and item.ott_release_date
         and item.verification_status == "CONFIRMED"
         and (item.status or "").lower() in CANONICAL_OTT_STATES
         and (item.confidence or 0) >= settings.OTT_CONFIRMATION_THRESHOLD
     ]
-    return max(candidates, key=lambda item: ((item.confidence or 0), item.ott_release_date), default=None)
+    return min(
+        candidates,
+        key=lambda item: (
+            item.ott_release_date,
+            not bool(item.manually_verified),
+            -(item.confidence or 0),
+            item.id or 0,
+        ),
+        default=None,
+    )
 
 
 def best_canonical_ott(movie: Movie):
@@ -154,17 +166,27 @@ def best_canonical_ott(movie: Movie):
     candidates = [
         item
         for item in movie.ott_availabilities
-        if item.provider and (item.status or "").lower() in CANONICAL_OTT_STATES
+        if item.provider
+        and item.provider.strip().casefold() not in INVALID_OTT_PROVIDERS
+        and (item.country or "").upper() == "IN"
+        and (item.watch_type or "").casefold() in CANONICAL_OTT_WATCH_TYPES
+        and (item.status or "").lower() in CANONICAL_OTT_STATES
     ]
-    return max(
-        candidates,
-        key=lambda item: (
-            item.verification_status == "CONFIRMED" and bool(item.ott_release_date),
-            (item.confidence or 0),
-            item.ott_release_date if item.verification_status == "CONFIRMED" else date.min,
-        ),
-        default=None,
-    )
+    complete = [
+        item for item in candidates
+        if item.verification_status == "CONFIRMED" and item.ott_release_date
+    ]
+    if complete:
+        return min(
+            complete,
+            key=lambda item: (
+                item.ott_release_date,
+                not bool(item.manually_verified),
+                -(item.confidence or 0),
+                item.id or 0,
+            ),
+        )
+    return max(candidates, key=lambda item: ((item.confidence or 0), item.id or 0), default=None)
 
 
 def classify_release(movie: Movie, *, today: date | None = None) -> ReleaseClassification:

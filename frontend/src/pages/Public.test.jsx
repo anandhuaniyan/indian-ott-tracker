@@ -24,9 +24,13 @@ import {
 
 const get = vi.fn();
 const post = vi.fn();
+const userGet = vi.fn();
+const authenticatedPut = vi.fn();
 vi.mock("../services/api", () => ({
   get: (...args) => get(...args),
   post: (...args) => post(...args),
+  userGet: (...args) => userGet(...args),
+  authenticatedPut: (...args) => authenticatedPut(...args),
   imageUrl: (path) => path || "/placeholder.svg",
 }));
 
@@ -40,10 +44,26 @@ const card = {
   language: "ml",
   language_name: "Malayalam",
 };
+const languageOptions = [
+  { code: "ml", name: "Malayalam", region: "indian", group: "primary" },
+  { code: "ta", name: "Tamil", region: "indian", group: "primary" },
+  { code: "te", name: "Telugu", region: "indian", group: "primary" },
+  { code: "hi", name: "Hindi", region: "indian", group: "primary" },
+  { code: "kn", name: "Kannada", region: "indian", group: "primary" },
+  { code: "en", name: "English", region: "international", group: "primary" },
+  { code: "ko", name: "Korean", region: "international", group: "primary" },
+  { code: "ja", name: "Japanese", region: "international", group: "primary" },
+  { code: "zh", name: "Chinese", region: "international", group: "primary" },
+  { code: "es", name: "Spanish", region: "international", group: "primary" },
+  { code: "fr", name: "French", region: "international", group: "primary" },
+];
 
 beforeEach(() => {
   get.mockReset();
   post.mockReset();
+  userGet.mockReset();
+  authenticatedPut.mockReset();
+  userGet.mockRejectedValue(new Error("Unauthenticated"));
 });
 afterEach(() => cleanup());
 
@@ -54,9 +74,15 @@ it("renders Popular once and omits the duplicate Trending section", async () => 
     latest_theatrical: [card],
     upcoming_theatrical: [card],
     recently_added: [card],
+    highest_rated: [card],
     upcoming_ott: [card],
     recent_ott: [card],
     language_sections: { ml: { name: "Malayalam", items: [card] } },
+    languages: languageOptions,
+    language_groups: {
+      indian: { primary: [{ code: "ml", name: "Malayalam" }], more: [] },
+      international: { primary: [{ code: "en", name: "English" }, { code: "ko", name: "Korean" }, { code: "ja", name: "Japanese" }, { code: "zh", name: "Chinese" }, { code: "es", name: "Spanish" }, { code: "fr", name: "French" }], more: [{ code: "th", name: "Thai" }] },
+    },
     genres: [{ slug: "drama", name: "Drama" }],
     platforms: [{ slug: "netflix", name: "Netflix", movie_count: 1 }],
   });
@@ -65,6 +91,11 @@ it("renders Popular once and omits the duplicate Trending section", async () => 
       <Home />
     </MemoryRouter>,
   );
+  expect(screen.getByText("Movies from India and around the world, all in one place")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Movies & OTT Releases Worldwide" })).toBeInTheDocument();
+  expect(screen.getByText(/streaming platforms worldwide, with release dates, ratings, trailers/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Explore movies" })).toHaveAttribute("href", "/discover");
+  expect(screen.queryByText("Indian cinema and international movies, all in one place")).not.toBeInTheDocument();
   expect(await screen.findByText("Upcoming OTT")).toBeInTheDocument();
   const popularHeading = screen.getByRole("heading", { name: "Popular" });
   expect(popularHeading).toBeInTheDocument();
@@ -74,13 +105,30 @@ it("renders Popular once and omits the duplicate Trending section", async () => 
   ).toBeTruthy();
   expect(screen.getAllByRole("link", { name: "View more" }).length).toBeGreaterThanOrEqual(7);
   expect(screen.getAllByText("Malayalam").length).toBeGreaterThanOrEqual(1);
+  expect(screen.queryByRole("link", { name: "Korean" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: "International" }));
+  expect(screen.getByRole("link", { name: "Korean" })).toHaveAttribute("href", "/languages/ko");
+  expect(screen.getByRole("link", { name: "French" })).toHaveAttribute("href", "/languages/fr");
+  expect(screen.getByText("More International")).toBeInTheDocument();
   expect(screen.getByText("Netflix")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: "Japanese" }));
+  await waitFor(() => expect(get).toHaveBeenCalledWith("/api/v1/home?language=ja"));
+  expect(screen.getAllByRole("link", { name: "View more" })[0]).toHaveAttribute(
+    "href", expect.stringContaining("language=ja"),
+  );
 });
 
 describe("browse routes", () => {
   it.each([
     ["/genres/drama", "/genres/:slug", Browse, "drama movies"],
     ["/languages/ml", "/languages/:code", Browse, "Malayalam movies"],
+    ["/languages/en", "/languages/:code", Browse, "English movies"],
+    ["/languages/ko", "/languages/:code", Browse, "Korean movies"],
+    ["/languages/ja", "/languages/:code", Browse, "Japanese movies"],
+    ["/languages/zh", "/languages/:code", Browse, "Chinese movies"],
+    ["/languages/es", "/languages/:code", Browse, "Spanish movies"],
+    ["/languages/fr", "/languages/:code", Browse, "French movies"],
+    ["/languages/th", "/languages/:code", Browse, "Thai movies"],
     ["/ott", "/ott", Ott, "OTT releases"],
     ["/ott/netflix", "/ott/:platform", OttPlatform, "Netflix"],
   ])("renders %s", async (path, route, Component, heading) => {
@@ -96,7 +144,17 @@ describe("browse routes", () => {
               page: 1,
               pages: 0,
             }
-          : { items: [card], total: 1, page: 1, pages: 1 },
+          : {
+              items: [card],
+              total: 1,
+              page: 1,
+              pages: 1,
+              filters: {
+                languages: path.startsWith("/languages/")
+                  ? [{ code: path.split("/").pop(), name: heading.replace(/ movies$/i, "") }]
+                  : [],
+              },
+            },
     );
     render(
       <MemoryRouter initialEntries={[path]}>
@@ -151,12 +209,18 @@ it("renders stored movie metadata and galleries without fabricating empty fields
     ],
     crew: [],
     crew_by_role: {},
-    images: [{ type: "poster", url: "/alt.jpg" }],
+    images: [
+      { type: "poster", url: "/alt.jpg" },
+      { type: "logo", url: "/broken-logo.png" },
+    ],
     releases: [],
+    release_timeline: [{ date: "2026-08-14", label: "Primary theatrical release" }],
+    international_releases: [{ country: "US", date: "2026-08-21", type: "3", label: "Theatrical release" }],
     ratings: [
       { source: "IMDb", rating: 8.2, votes: 100 },
       { source: "Source Rating", rating: 7.4, votes: 90 },
     ],
+    community_rating: { average: 8.5, count: 2 },
     keywords: ["friendship"],
     alternative_titles: [],
     external_ids: [
@@ -184,7 +248,7 @@ it("renders stored movie metadata and galleries without fabricating empty fields
       },
     ],
   };
-  get.mockImplementation((path) => Promise.resolve(path.includes("/comments") ? { items: [], total: 0, page: 1, pages: 0 } : detail));
+  get.mockImplementation((path) => Promise.resolve(path.includes("/public-comments") ? { items: [], total: 0, page: 1, pages: 0 } : detail));
   render(
     <MemoryRouter initialEntries={["/movies/1"]}>
       <Routes>
@@ -196,8 +260,23 @@ it("renders stored movie metadata and galleries without fabricating empty fields
     await screen.findByRole("heading", { name: "Example Film" }),
   ).toBeInTheDocument();
   expect(screen.getByText("Poster gallery")).toBeInTheDocument();
+  expect(screen.getByText("Primary theatrical release")).toBeInTheDocument();
+  expect(screen.getByText("View international releases (1)")).toBeInTheDocument();
+  const logo = screen.getByAltText("Example Film logo");
+  fireEvent.error(logo);
+  expect(logo).not.toBeVisible();
+  const moviePoster = screen.getByAltText("Example Film poster");
+  fireEvent.error(moviePoster);
+  expect(moviePoster).toHaveAttribute("src", "/placeholder.svg");
+  expect(moviePoster).not.toHaveAttribute("srcset");
   expect(screen.getByText("Actor")).toBeInTheDocument();
   expect(screen.getByText(/IMDb ★ 8.2/)).toBeInTheDocument();
+  expect(screen.getByText("8.5 / 10")).toBeInTheDocument();
+  expect(screen.getByText("2 ratings")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Rate this movie" }));
+  expect(screen.getByText("Sign in to rate this movie")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Login" })).toHaveAttribute("href", "/login?returnTo=%2Fmovies%2F1");
+  expect(screen.getByRole("link", { name: "Create account" })).toHaveAttribute("href", "/signup?returnTo=%2Fmovies%2F1");
   expect(screen.getByTestId("release-status")).toHaveTextContent(
     /^Release StatusReleased$/,
   );
@@ -212,6 +291,7 @@ it("renders stored movie metadata and galleries without fabricating empty fields
   );
   expect(screen.queryByText("OTT Availability")).not.toBeInTheDocument();
   expect(screen.queryByText("OTT Research")).not.toBeInTheDocument();
+  expect(screen.queryByText("OTTTracker Verification")).not.toBeInTheDocument();
   expect(screen.getByTestId("movie-display-id")).toHaveTextContent(/^ID101$/);
   expect(screen.getByText("Malayalam")).toHaveAttribute("href", "/languages/ml");
   expect(screen.queryByText("TMDB ID")).not.toBeInTheDocument();
@@ -230,12 +310,37 @@ it("renders stored movie metadata and galleries without fabricating empty fields
   expect(await screen.findByText("No comments yet. Be the first to comment.")).toBeInTheDocument();
 });
 
+it("lets an authenticated user create and update a community rating", async () => {
+  const detail = {
+    movie: { ...card, display_id: 101, original_language: "ml", spoken_languages: [], production_countries: [], production_companies: [], ott: [], collection: null },
+    cast: [], crew: [], crew_by_role: {}, images: [], releases: [], ratings: [], community_rating: { average: null, count: 0 },
+    keywords: [], alternative_titles: [], external_ids: [], trailer: null, videos: [],
+  };
+  get.mockImplementation((path) => Promise.resolve(path.includes("/public-comments") ? { items: [], total: 0, page: 1, pages: 0 } : detail));
+  userGet.mockResolvedValue({ rating: 7.5 });
+  authenticatedPut.mockResolvedValue({ average: 8, count: 1, user_rating: 8, created: false });
+
+  render(<MemoryRouter initialEntries={["/movies/1"]}><Routes><Route path="/movies/:id" element={<Movie />} /></Routes></MemoryRouter>);
+  const selector = await screen.findByLabelText("Your rating");
+  expect(selector).toHaveValue("7.5");
+  expect(selector.querySelectorAll("option")).toHaveLength(20);
+  fireEvent.change(selector, { target: { value: "8" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save rating" }));
+
+  await waitFor(() => expect(authenticatedPut).toHaveBeenCalledWith(
+    "/api/v1/movies/1/community-rating", { rating: 8 },
+  ));
+  expect(await screen.findByText("Rating updated.")).toBeInTheDocument();
+  expect(screen.getByText("8.0 / 10")).toBeInTheDocument();
+  expect(screen.getByText("1 rating")).toBeInTheDocument();
+});
+
 it("shows a clean no-trailer state and treats submitted comment HTML as text", async () => {
   const detail = {
     movie: { ...card, display_id: 101, release_status: "Released", release_status_code: "THEATRICALLY_RELEASED", original_language: "ml", spoken_languages: [], production_countries: [], production_companies: [], ott: [], collection: null },
     cast: [], crew: [], crew_by_role: {}, images: [], releases: [], ratings: [], keywords: [], alternative_titles: [], external_ids: [], trailer: null, videos: [],
   };
-  get.mockImplementation((path) => Promise.resolve(path.includes("/comments") ? { items: [{ id: 1, display_name: "Anand", comment: "<script>alert(1)</script> Great movie", created_at: new Date().toISOString() }], total: 1, page: 1, pages: 1 } : detail));
+  get.mockImplementation((path) => Promise.resolve(path.includes("/public-comments") ? { items: [{ id: 1, display_name: "Anand", comment: "<script>alert(1)</script> Great movie", created_at: new Date().toISOString() }], total: 1, page: 1, pages: 1 } : detail));
   post.mockResolvedValue({ id: 2, status: "PENDING", message: "Your comment has been submitted for review." });
   render(<MemoryRouter initialEntries={["/movies/1"]}><Routes><Route path="/movies/:id" element={<Movie />} /></Routes></MemoryRouter>);
   expect(await screen.findByText("<script>alert(1)</script> Great movie")).toBeInTheDocument();
@@ -257,6 +362,7 @@ it("restores the previous request template and accepts a Deep Search selection",
       <Routes><Route path="/request-movie" element={<Request/>}/></Routes>
     </MemoryRouter>,
   );
+  await screen.findByRole("option", { name: "Malayalam" });
   expect(screen.getByLabelText("Movie Name *")).toHaveValue("Aadu");
   expect(screen.getByRole("tablist")).toBeInTheDocument();
   expect(document.querySelector("main")).toHaveClass("request-page");
@@ -311,6 +417,87 @@ it("keeps issue and access on the single request page with tabs", async () => {
   expect(await screen.findByRole("heading", { name: "Submission received" })).toBeInTheDocument();
 });
 
+it("opens the maintenance tab directly and shows the operational empty state", async () => {
+  get.mockImplementation((path) => Promise.resolve(
+    path === "/api/v1/maintenance"
+      ? { overall_status: "OPERATIONAL", active: [], upcoming: [], history: [] }
+      : [],
+  ));
+  render(<MemoryRouter initialEntries={["/request-movie?tab=maintenance"]}><Routes><Route path="/request-movie" element={<Request/>}/></Routes></MemoryRouter>);
+  expect(screen.getByRole("tab", { name: "Maintenance Window" })).toHaveAttribute("aria-selected", "true");
+  expect(await screen.findByRole("heading", { name: "All systems operational" })).toBeInTheDocument();
+  expect(screen.getByText("There is no scheduled maintenance at this time.")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Service status" })).toBeInTheDocument();
+  expect(screen.getByText("Movies")).toBeInTheDocument();
+  expect(screen.getByText("No recent maintenance history.")).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Request movie" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Report issue" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Request access" })).toBeInTheDocument();
+});
+
+it("shows active progress, upcoming countdown, services, timelines and completed history", async () => {
+  const now = Date.now();
+  const iso = (offset) => new Date(now + offset).toISOString();
+  const base = { description: "Routine maintenance.", affected_services: ["Movies", "Movie Search", "OTT Calendar"], impact_level: "LOW", impact_message: "Brief interruptions may occur.", updated_at: "2026-09-17T12:00:00Z" };
+  get.mockImplementation((path) => Promise.resolve(path === "/api/v1/maintenance" ? {
+    overall_status: "ACTIVE",
+    active: [{ ...base, id: 1, title: "Active work", status: "ACTIVE", start_time: iso(-30 * 60_000), end_time: iso(30 * 60_000) }],
+    upcoming: [{ ...base, id: 2, title: "Upcoming work", status: "SCHEDULED", start_time: iso(24 * 60 * 60_000), end_time: iso(25 * 60 * 60_000) }],
+    history: [{ ...base, id: 3, title: "Completed work", status: "COMPLETED", start_time: iso(-48 * 60 * 60_000), end_time: iso(-47 * 60 * 60_000) }],
+  } : []));
+  render(<MemoryRouter initialEntries={["/request-movie?tab=maintenance"]}><Routes><Route path="/request-movie" element={<Request/>}/></Routes></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "Maintenance in progress" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Active work" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Upcoming work" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Completed work" })).toBeInTheDocument();
+  expect(screen.getAllByText(/IST/).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/SGT/).length).toBeGreaterThan(0);
+  expect(document.body).toHaveTextContent("Brief interruptions may occur.");
+  expect(screen.getByRole("progressbar", { name: "Estimated maintenance progress" })).toBeInTheDocument();
+  expect(screen.getByText("Maintenance begins in")).toBeInTheDocument();
+  expect(screen.getAllByLabelText("Maintenance timeline")).toHaveLength(3);
+  expect(screen.getAllByText("Movies").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("Affected").length).toBeGreaterThan(0);
+});
+
+it("previews, removes, replaces, drops and submits an optional issue screenshot", async () => {
+  get.mockResolvedValue([]);
+  post.mockResolvedValue({ request_id: "WEB-SCREEN", status: "NEW", type: "WEBSITE_ISSUE", screenshot_attached: true });
+  render(<MemoryRouter initialEntries={["/request-movie?tab=issue"]}><Routes><Route path="/request-movie" element={<Request/>}/></Routes></MemoryRouter>);
+  const input = screen.getByLabelText(/Drag & drop screenshot here/i);
+  const png = new File([new Uint8Array([1, 2, 3])], "calendar.png", { type: "image/png" });
+  fireEvent.change(input, { target: { files: [png] } });
+  expect(screen.getByText("calendar.png")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+  expect(screen.getByLabelText("Replace screenshot")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+  expect(screen.queryByText("calendar.png")).not.toBeInTheDocument();
+
+  const dropped = new File([new Uint8Array([4, 5, 6])], "phone.webp", { type: "image/webp" });
+  fireEvent.drop(screen.getByLabelText(/Drag & drop screenshot here/i).closest("label"), { dataTransfer: { files: [dropped] } });
+  expect(screen.getByText("phone.webp")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("WhatsApp Number (Preferred)"), { target: { value: "+65 8000 0000" } });
+  fireEvent.change(screen.getByLabelText("Comment / Description *"), { target: { value: "The mobile calendar is misaligned." } });
+  fireEvent.click(screen.getByRole("button", { name: "Send to administrator" }));
+  await waitFor(() => expect(post).toHaveBeenCalled());
+  const submitted = post.mock.calls.at(-1)[1];
+  expect(submitted).toBeInstanceOf(FormData);
+  expect(submitted.get("screenshot").name).toBe("phone.webp");
+  expect(submitted.get("request_type")).toBe("WEBSITE_ISSUE");
+});
+
+it("rejects invalid screenshot type and files over 5 MB before submission", () => {
+  get.mockResolvedValue([]);
+  render(<MemoryRouter initialEntries={["/request-movie?tab=issue"]}><Routes><Route path="/request-movie" element={<Request/>}/></Routes></MemoryRouter>);
+  const input = screen.getByLabelText(/Drag & drop screenshot here/i);
+  fireEvent.change(input, { target: { files: [new File(["text"], "notes.txt", { type: "text/plain" })] } });
+  expect(screen.getByRole("alert")).toHaveTextContent("Please upload a PNG, JPG, or WEBP image.");
+  expect(screen.getByRole("button", { name: "Send to administrator" })).toBeDisabled();
+  fireEvent.change(input, { target: { files: [new File([new Uint8Array(5 * 1024 * 1024 + 1)], "huge.jpg", { type: "image/jpeg" })] } });
+  expect(screen.getByRole("alert")).toHaveTextContent("Screenshot must be 5 MB or smaller.");
+  expect(post).not.toHaveBeenCalled();
+});
+
 it("submits a request access submission", async () => {
   get.mockResolvedValue([]);
   post.mockResolvedValue({ request_id: "ACC-1", status: "NEW", type: "ACCESS_REQUEST", discord_status: "PENDING", receipt_email_status: "NOT_SUPPLIED" });
@@ -328,7 +515,7 @@ it("submits a request access submission", async () => {
 it("orders homepage section listings as movies, pagination, then functional filters", async () => {
   get.mockResolvedValue({
     items: [card], total: 30, page: 1, page_size: 24, pages: 2,
-    filters: { languages: [{ code: "ml", name: "Malayalam" }], genres: [], platforms: [], roles: [] },
+    filters: { languages: languageOptions, genres: [], platforms: [], roles: [] },
     section: "popular",
   });
   render(<MemoryRouter initialEntries={["/discover?view_mode=section_listing&section=popular&sort=popularity"]}><Routes><Route path="/discover" element={<Discover/>}/></Routes></MemoryRouter>);
@@ -339,40 +526,9 @@ it("orders homepage section listings as movies, pagination, then functional filt
   expect(title.compareDocumentPosition(grid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(grid.compareDocumentPosition(pager) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(pager.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  fireEvent.change(screen.getByLabelText("Language"), { target: { value: "ml" } });
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Indian" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Malayalam" }));
   await waitFor(() => expect(get).toHaveBeenCalledWith(expect.stringMatching(/section=popular.*language=ml|language=ml.*section=popular/)));
-});
-
-it("renders a genre dropdown and immediately applies or clears the genre filter", async () => {
-  get.mockResolvedValue({
-    items: [], total: 0, page: 1, page_size: 24, pages: 0,
-    filters: {
-      languages: [],
-      genres: [], platforms: [], roles: [],
-    },
-  });
-  render(<MemoryRouter initialEntries={["/discover"]}><Routes><Route path="/discover" element={<Discover/>}/></Routes></MemoryRouter>);
-
-  const genre = await screen.findByRole("combobox", { name: "Genre" });
-  expect(genre).toHaveValue("");
-  expect(screen.getByRole("option", { name: "All Genres" })).toBeInTheDocument();
-  expect(genre.querySelectorAll("option")).toHaveLength(19);
-
-  fireEvent.change(genre, { target: { value: "science-fiction" } });
-  await waitFor(() => expect(get).toHaveBeenCalledWith(expect.stringContaining("genre=science-fiction")));
-
-  fireEvent.change(genre, { target: { value: "" } });
-  await waitFor(() => expect(get.mock.calls.at(-1)[0]).not.toContain("genre="));
-
-  fireEvent.change(screen.getByRole("combobox", { name: "Sort" }), { target: { value: "popularity" } });
-  fireEvent.change(screen.getByRole("combobox", { name: "Release status" }), { target: { value: "released" } });
-  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-  await waitFor(() => {
-    const request = get.mock.calls.at(-1)[0];
-    expect(request).toContain("sort=popularity");
-    expect(request).toContain("release_status=released");
-  });
 });
 
 it("supports person credit controls and separates normalized roles", async () => {
@@ -382,6 +538,7 @@ it("supports person credit controls and separates normalized roles", async () =>
     name: "Actor",
     department: "Acting",
     profile_path: null,
+    seo_indexable: true,
     roles: ["actor", "director"],
     filmography: [
       {
@@ -517,11 +674,15 @@ it("renders date-grouped poster-first theatrical and confirmed OTT calendar card
 });
 
 it("filters calendar releases by language and provides month navigation", async () => {
-  get.mockResolvedValue({
+  const calendarPayload = {
     period: "this-month",
     today: "2026-08-29",
     start_date: "2026-08-01",
     end_date: "2026-08-31",
+    languages: [
+      { code: "ml", name: "Malayalam", region: "indian", group: "primary" },
+      { code: "ta", name: "Tamil", region: "indian", group: "primary" },
+    ],
     theatrical: {
       items: [
         { ...card, title: "Malayalam Film", theatrical_release_date: "2026-08-27" },
@@ -530,7 +691,18 @@ it("filters calendar releases by language and provides month navigation", async 
       total: 2,
     },
     ott: { items: [], total: 0 },
-  });
+  };
+  get.mockImplementation((path) => Promise.resolve(
+    path.includes("language=ta")
+      ? {
+          ...calendarPayload,
+          theatrical: {
+            items: calendarPayload.theatrical.items.filter((item) => item.language === "ta"),
+            total: 1,
+          },
+        }
+      : calendarPayload,
+  ));
   render(
     <MemoryRouter initialEntries={["/calendar/this-month"]}>
       <Routes><Route path="/calendar/:period" element={<Calendar />} /></Routes>
@@ -539,9 +711,131 @@ it("filters calendar releases by language and provides month navigation", async 
   expect(await screen.findByRole("link", { name: "Previous month, July 2026" })).toHaveAttribute(
     "href", "/calendar/this-month?month=2026-07",
   );
-  fireEvent.change(screen.getByLabelText("Language"), { target: { value: "ta" } });
-  expect(screen.queryByText("Malayalam Film")).not.toBeInTheDocument();
-  expect(screen.getByText("Tamil Film")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: "Indian" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Tamil" }));
+  await waitFor(() => expect(screen.queryByText("Malayalam Film")).not.toBeInTheDocument());
+  expect(await screen.findByText("Tamil Film")).toBeInTheDocument();
+  expect(get).toHaveBeenCalledWith("/api/v1/calendar/this-month?language=ta");
+});
+
+it("marks a low-value accessible person page noindex", async () => {
+  get.mockResolvedValue({
+    id: 4, display_id: 44, name: "Minor Contributor", department: "Other",
+    profile_path: null, seo_indexable: false, roles: [], filmography: [],
+  });
+  render(<MemoryRouter initialEntries={["/people/4"]}><Routes><Route path="/people/:id" element={<Person />} /></Routes></MemoryRouter>);
+  expect(await screen.findByRole("heading", { name: "Minor Contributor" })).toBeInTheDocument();
+  await waitFor(() => expect(document.head.querySelector('meta[name="robots"]')).toHaveAttribute("content", "noindex,follow"));
+});
+
+it("filters discover by the global all, Indian group, and individual language tabs", async () => {
+  get.mockResolvedValue({
+    items: [], total: 0, page: 1, page_size: 24, pages: 0,
+    filters: {
+      languages: languageOptions,
+      genres: [], platforms: [], roles: [],
+    },
+  });
+  render(<MemoryRouter initialEntries={["/discover"]}><Routes><Route path="/discover" element={<Discover/>}/></Routes></MemoryRouter>);
+  await screen.findByRole("heading", { name: /Movies/ });
+  expect(screen.getByRole("tab", { name: "All" })).toHaveAttribute("aria-selected", "true");
+  fireEvent.click(screen.getByRole("tab", { name: "Indian" }));
+  await waitFor(() => expect(get).toHaveBeenCalledWith(expect.stringContaining("language=indian")));
+  expect(screen.getByRole("tab", { name: "Malayalam" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: "Malayalam" }));
+  await waitFor(() => expect(get).toHaveBeenCalledWith(expect.stringContaining("language=ml")));
+  fireEvent.click(screen.getByRole("tab", { name: "English" }));
+  await waitFor(() => expect(get).toHaveBeenCalledWith(expect.stringContaining("language=en")));
+});
+
+it("renders a genre dropdown and immediately applies or clears the genre filter", async () => {
+  get.mockResolvedValue({
+    items: [], total: 0, page: 1, page_size: 24, pages: 0,
+    filters: {
+      languages: languageOptions,
+      genres: [], platforms: [], roles: [],
+    },
+  });
+  render(<MemoryRouter initialEntries={["/discover"]}><Routes><Route path="/discover" element={<Discover/>}/></Routes></MemoryRouter>);
+
+  const genre = await screen.findByRole("combobox", { name: "Genre" });
+  expect(genre).toHaveValue("");
+  expect(screen.getByRole("option", { name: "All Genres" })).toBeInTheDocument();
+  expect(genre.querySelectorAll("option")).toHaveLength(19);
+
+  fireEvent.change(genre, { target: { value: "science-fiction" } });
+  await waitFor(() => expect(get).toHaveBeenCalledWith(expect.stringContaining("genre=science-fiction")));
+
+  fireEvent.change(genre, { target: { value: "" } });
+  await waitFor(() => expect(get.mock.calls.at(-1)[0]).not.toContain("genre="));
+
+  fireEvent.change(screen.getByRole("combobox", { name: "Sort" }), { target: { value: "popularity" } });
+  fireEvent.change(screen.getByRole("combobox", { name: "Release status" }), { target: { value: "released" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await waitFor(() => {
+    const request = get.mock.calls.at(-1)[0];
+    expect(request).toContain("sort=popularity");
+    expect(request).toContain("release_status=released");
+  });
+});
+
+it.each([
+  ["OTT landing", "/ott", "/ott", Ott, "/api/v1/ott?language=ja"],
+  ["OTT platform", "/ott/netflix", "/ott/:platform", OttPlatform, "/api/v1/ott/netflix?sort=ott-release&page=1&language=ja"],
+])("keeps global language selection in the %s URL-backed request", async (_name, path, route, Component, expected) => {
+  get.mockResolvedValue(path === "/ott" ? {
+    platforms: [], upcoming: [], recent: [], confirmed: [],
+    languages: languageOptions, language_counts: {},
+  } : {
+    platform: "Netflix", upcoming: [], recent: [], available: [],
+    page: 1, pages: 0, languages: languageOptions, language_counts: {},
+  });
+  render(
+    <MemoryRouter initialEntries={[path]}>
+      <Routes><Route path={route} element={<Component />} /></Routes>
+    </MemoryRouter>,
+  );
+  await screen.findByRole("tab", { name: "Japanese" });
+  fireEvent.click(screen.getByRole("tab", { name: "Japanese" }));
+  await waitFor(() => expect(get).toHaveBeenCalledWith(expected));
+});
+
+it("renders every OTT release returned for a date without a two-card cap", async () => {
+  const releases = Array.from({ length: 4 }, (_, index) => ({
+    ...card,
+    id: index + 10,
+    title: `OTT Film ${index + 1}`,
+    ott_release_date: "2026-09-11",
+    ott_platform: index % 2 ? "Prime Video" : "Netflix",
+    ott_releases: [
+      {
+        platform: index % 2 ? "Prime Video" : "Netflix",
+        release_date: "2026-09-11",
+        country: "IN",
+      },
+    ],
+  }));
+  get.mockResolvedValue({
+    period: "this-month",
+    today: "2026-09-10",
+    start_date: "2026-09-01",
+    end_date: "2026-09-30",
+    theatrical: { items: [], total: 0 },
+    ott: { items: releases, total: releases.length },
+  });
+
+  render(
+    <MemoryRouter initialEntries={["/calendar/this-month?tab=ott&month=2026-09"]}>
+      <Routes><Route path="/calendar/:period" element={<Calendar />} /></Routes>
+    </MemoryRouter>,
+  );
+
+  expect(await screen.findByRole("heading", { name: "11 September 2026" })).toBeInTheDocument();
+  expect(screen.getByText("4 releases")).toBeInTheDocument();
+  expect(document.querySelectorAll(".calendar-grid .calendar-movie")).toHaveLength(4);
+  releases.forEach((release) => {
+    expect(screen.getByText(release.title)).toBeInTheDocument();
+  });
 });
 
 it("takes Today to the actual date group and focuses it when a release exists", async () => {
@@ -608,7 +902,7 @@ it.each(["2026-07", "2026-09"])(
     const todayGroup = document.getElementById("release-date-2026-08-29");
     await waitFor(() => expect(document.activeElement).toBe(todayGroup));
     expect(todayGroup).toHaveTextContent("No confirmed OTT releases match the selected filters.");
-    expect(get).toHaveBeenCalledWith("/api/v1/calendar/this-month");
+    expect(get).toHaveBeenCalledWith("/api/v1/calendar/this-month?language=ml");
   },
 );
 

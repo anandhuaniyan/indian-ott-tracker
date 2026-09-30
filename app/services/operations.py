@@ -22,6 +22,7 @@ from app.services.release_status import (
     site_date,
 )
 from app.services.roles import ROLE_ALIASES
+from app.services.search.tavily import TavilySearchClient
 
 OPEN = {
     "UNKNOWN",
@@ -495,6 +496,157 @@ class OttResearchService:
             elif age > 365 and status == "NOT_FOUND":
                 days = max(days, 90)
         return now + timedelta(days=days)
+
+    def perform_live_search(self, movie: Movie, max_queries: int = 3) -> dict:
+        """Perform targeted Tavily searches for OTT evidence."""
+        from app.services.search.tavily import TavilySearchClient
+        from app.services.operations import ResearchUsageService
+
+        usage = ResearchUsageService(self.db)
+        client = TavilySearchClient()
+
+        results = []
+        queries_used = 0
+
+        # Build search queries in priority order
+        year = movie.release_date.year if movie.release_date else ""
+        base_query = f"{movie.title} {year} OTT release date India streaming"
+
+        queries = [
+            base_query,
+            f"{movie.title} {year} streaming India",
+        ]
+
+        for query in queries:
+            if queries_used >= max_queries:
+                break
+            if not usage.reserve_tavily_query():
+                break
+            result = client.search(query, max_results=3)
+            results.append({"query": query, "results": result.get("results", [])})
+            queries_used += 1
+
+        return {"movie_id": movie.id, "queries": results, "queries_used": queries_used}
+
+    def _classify_source(self, domain: str) -> str:
+        """Classify source by domain authority."""
+        official_platforms = {
+            "netflix.com", "primevideo.com", "jiocinema.com", "hotstar.com",
+            "zee5.com", "sonyliv.com", "sunnxt.com", "aha.video",
+            "manoramamax.com", "etvwin.com", "simplysouth.com",
+            "lionsgateplay.com", "apple.com"
+        }
+        reputable_news = {
+            "thehindu.com", "indianexpress.com", "timesofindia.indiatimes.com",
+            "economictimes.indiatimes.com", "hindustantimes.com",
+            "cinemaexpress.com", "filmcompanion.in", "variety.com",
+            "deadline.com", "ottplay.com"
+        }
+
+        domain = domain.lower()
+        if any(d in domain for d in official_platforms):
+            return "official_platform"
+        if any(d in domain for d in reputable_news):
+            return "reputable_news"
+        return "aggregator"
+
+    def _extract_ott_evidence(self, movie: Movie, search_results: dict) -> list:
+        """Extract and classify OTT evidence from search results."""
+        evidence_list = []
+
+        for query_result in search_results.get("queries", []):
+            for result in query_result.get("results", []):
+                url = result.get("url", "")
+                content = result.get("content", "")
+                title = result.get("title", "")
+                domain = urlparse(url).netloc.lower()
+
+                source_type = self._classify_source(domain)
+
+                # Skip low-value sources
+                if source_type == "aggregator":
+                    continue
+
+                # Check for OTT-related content
+                ott_keywords = ["ott", "streaming", "prime video", "netflix", "jiocinema",
+                               "hotstar", "zee5", "sonyliv", "sunnxt", "aha",
+                               "manoramamax", "etv", "lionsgate", "apple tv"]
+
+                content_lower = content.lower()
+                if not any(kw in content_lower for kw in ott_keywords):
+                    continue
+
+                # Extract platform mentions
+                platform_found = None
+                for platform in ["Netflix", "Prime Video", "JioHotstar", "ZEE5", "SonyLIV",
+                                "Sun NXT", "aha", "ManoramaMAX", "ETV Win", "Simply South",
+                                "Lionsgate Play", "Apple TV+"]:
+                    if platform.lower() in content_lower:
+                        platform_found = platform
+                        break
+
+                evidence_list.append({
+                    "platform": platform_found,
+                    "source_type": source_type,
+                    "source_url": url,
+                    "source_title": title,
+                    "domain": domain,
+                    "content_snippet": content[:500],
+                    "confidence": 85 if source_type == "official_platform" else 70
+                })
+
+        return evidence_list
+
+    def research_movie_live(self, movie_id: int, max_queries: int = 3) -> dict:
+        """Perform live Tavily research for a single movie and record evidence."""
+        movie = self.db.get(Movie, movie_id)
+        if not movie:
+            return {"error": "Movie not found", "movie_id": movie_id}
+
+        # Check existing evidence first
+        existing = self.db.query(OttEvidence).filter(
+            OttEvidence.movie_id == movie_id,
+            OttEvidence.source_url.is_not(None),
+            OttEvidence.status.in_(["CONFIRMED", "POSSIBLE"])
+        ).count()
+
+        if existing > 0:
+            return {"status": "has_evidence", "movie_id": movie_id, "evidence_count": existing}
+
+        # Check daily limit
+        usage = ResearchUsageService(self.db)
+        if not usage.reserve_daily_movie():
+            return {"error": "Daily research limit exhausted", "movie_id": movie_id}
+
+        # Perform live search
+        search_results = self.perform_live_search(movie, max_queries)
+        evidence_list = self._extract_ott_evidence(movie, search_results)
+
+        # Record evidence
+        recorded = []
+        for ev in evidence_list:
+            if ev.get("platform"):
+                self.record_evidence(
+                    movie_id=movie_id,
+                    platform=ev["platform"],
+                    release_date=None,  # Will be parsed from content if available
+                    source_url=ev["source_url"],
+                    source_title=ev["source_title"],
+                    confidence=ev["confidence"],
+                    source_type=ev["source_type"],
+                    source_name=ev["domain"],
+                    country="IN",
+                    summary=f"Live search: {ev['source_title']}"
+                )
+                recorded.append(ev)
+
+        return {
+            "movie_id": movie_id,
+            "title": movie.title,
+            "queries_used": search_results.get("queries_used", 0),
+            "evidence_found": len(evidence_list),
+            "recorded": recorded
+        }
 
     def record_evidence(
         self,

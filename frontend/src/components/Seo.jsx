@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { useLocation } from "react-router-dom";
 
 const meta = (selector, attributes, value) => {
   let element = document.head.querySelector(selector);
@@ -10,10 +11,15 @@ const meta = (selector, attributes, value) => {
   element.content = value || "";
 };
 
-export default function Seo({ title, description = "Discover Indian movies and verified lawful OTT availability.", image, type = "website", jsonLd, noindex = false }) {
+export default function Seo({ title, description = "Discover movies and OTT releases worldwide across theaters and streaming platforms.", image, type = "website", jsonLd, noindex = false, canonicalPath }) {
+  const route = useLocation();
   useEffect(() => {
-    const full = title === "OTT Tracker" ? "OTT Tracker – Indian Movies & OTT Releases" : `${title} | OTT Tracker`;
-    const canonical = `${import.meta.env.VITE_SITE_URL || location.origin}${location.pathname}`;
+    const full = title === "OTT Tracker" ? "OTT Tracker – Movies & OTT Releases Worldwide" : `${title} | OTT Tracker`;
+    const configuredSite = (import.meta.env.VITE_SITE_URL || "https://otttracker.in").replace(/\/$/, "");
+    const site = import.meta.env.PROD ? "https://otttracker.in" : configuredSite;
+    const path = canonicalPath || route.pathname;
+    const canonical = `${site}${path.startsWith("/") ? path : `/${path}`}`;
+    const hasParameters = Boolean(route.search);
     document.title = full;
     meta('meta[name="description"]', { name: "description" }, description);
     meta('meta[property="og:title"]', { property: "og:title" }, full);
@@ -25,13 +31,15 @@ export default function Seo({ title, description = "Discover Indian movies and v
     meta('meta[name="twitter:card"]', { name: "twitter:card" }, image ? "summary_large_image" : "summary");
     meta('meta[name="twitter:title"]', { name: "twitter:title" }, full);
     meta('meta[name="twitter:description"]', { name: "twitter:description" }, description);
-    meta('meta[name="robots"]', { name: "robots" }, noindex ? "noindex,follow" : "index,follow");
+    meta('meta[name="robots"]', { name: "robots" }, noindex || hasParameters ? "noindex,follow" : "index,follow");
     if (import.meta.env.VITE_GOOGLE_SITE_VERIFICATION) meta('meta[name="google-site-verification"]', { name: "google-site-verification" }, import.meta.env.VITE_GOOGLE_SITE_VERIFICATION);
     if (image) {
       meta('meta[property="og:image"]', { property: "og:image" }, image);
       meta('meta[name="twitter:image"]', { name: "twitter:image" }, image);
     }
-    let link = document.head.querySelector('link[rel="canonical"]');
+    const canonicalLinks = [...document.head.querySelectorAll('link[rel="canonical"]')];
+    let link = canonicalLinks.shift();
+    canonicalLinks.forEach((duplicate) => duplicate.remove());
     if (!link) { link = document.createElement("link"); link.rel = "canonical"; document.head.append(link); }
     link.href = canonical;
     document.head.querySelectorAll('script[data-page-jsonld="true"]').forEach(node => node.remove());
@@ -44,7 +52,7 @@ export default function Seo({ title, description = "Discover Indian movies and v
       document.head.append(script);
     });
     return () => document.head.querySelectorAll('script[data-page-jsonld="true"]').forEach(node => node.remove());
-  }, [title, description, image, type, jsonLd, noindex]);
+  }, [title, description, image, type, jsonLd, noindex, canonicalPath, route.pathname, route.search]);
   return null;
 }
 

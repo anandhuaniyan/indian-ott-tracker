@@ -2,7 +2,7 @@
 
 The operational control center uses these signed-session routes: `/admin`, `/admin/requests`, `/admin/movies`, `/admin/discovery`, `/admin/comments`, `/admin/data-health`, `/admin/images`, `/admin/ott-research`, `/admin/ott-gold-set`, `/admin/jobs`, `/admin/notifications`, `/admin/sources`, and `/admin/system-health`. No API key is included in frontend code.
 
-The dashboard reports real catalogue, discovery, request, moderation, OTT, image, trailer, IMDb, email, job, and source-health counts. It shows the last morning and evening discovery outcomes, next local-time run, today’s discovered/imported/review/failure counts, and a stale alert after two missed successful opportunities. Alerts link directly to filtered work queues. Recent activity combines durable administrator audit events with newly submitted requests.
+The dashboard reports real catalogue, discovery, request, moderation, OTT, image, trailer, IMDb, email, job, and source-health counts. OTT completeness distinguishes never checked, researched without a verified release, platform known/date unknown, complete and needs-review records, with language and year breakdowns. It shows the last morning and evening discovery outcomes, next local-time run, today’s discovered/imported/review/failure counts, and a stale alert after two missed successful opportunities. Alerts link directly to filtered work queues. Recent activity combines durable administrator audit events with newly submitted requests.
 
 Discovery provides paginated status/language filters, recent per-language run history, safe errors, local movie links, and a Needs Review queue. Administrators can map an uncertain candidate to an existing movie or classify it as duplicate, wrong language, TV series, or ignored without deleting its audit history.
 
@@ -13,3 +13,8 @@ Movies provide searchable, filterable, paginated operational coverage with links
 The Sources page reports TMDB, Tavily, YouTube metadata, SMTP, OTTplay, JustWatch, Streaming Availability, and Watchmode configuration/health without exposing credentials. Optional providers are disabled unless explicitly configured and licensed; unmatched discovery rows remain visible for manual catalogue mapping.
 
 Login is rate-limited to five attempts per five minutes. The password is never stored in plain text. Logout deletes the cookie; sessions expire after eight hours.
+# Content safety history
+
+`/admin/content-safety` is the durable review surface for movie visibility decisions. It lists every transition into `RESTRICTED` or `BLOCKED`, subsequent changes between those states, and every administrator override or restoration. Filters cover restricted, blocked, restored, automatic, and manual events. Each entry retains the movie identifiers and titles at decision time, the adult/certification signals, risk score, reasons, prior and new classifications, prior and new visibility, source, timestamp, and Discord delivery state.
+
+`RESTRICTED` movies are removed from lists, search, calendars, recommendations, SEO discovery, and sitemaps but remain available by direct detail URL. `BLOCKED` movies are hidden from public routes, including their direct detail URL. Both remain in the database and fully visible in Admin. Administrators can restore a title as `SAFE` or `MATURE`, or manually restrict/block it, with a required reason. Manual decisions persist and are not overwritten by the automatic scanner.

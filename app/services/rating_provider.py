@@ -3,9 +3,15 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from enum import Enum
+import hashlib
+import logging
 import re
+import threading
+import time
 
 import httpx
+import redis
 from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
@@ -24,6 +30,8 @@ RATING_TEMPORARY_FAILURE = "TEMPORARY_FAILURE"
 RATING_NOT_FOUND = "NOT_FOUND"
 RATING_BLOCKED_BY_QUOTA = "BLOCKED_BY_QUOTA"
 RATING_INVALID_ID = "INVALID_ID"
+RATING_NEEDS_REVIEW = "NEEDS_REVIEW"
+RATING_PROVIDER_DATA_UNAVAILABLE = "PROVIDER_DATA_UNAVAILABLE"
 RETRYABLE_RATING_STATES = {
     RATING_PENDING,
     RATING_NOT_YET_RATED,
@@ -31,6 +39,28 @@ RETRYABLE_RATING_STATES = {
     RATING_NOT_FOUND,
     RATING_BLOCKED_BY_QUOTA,
 }
+# Rows in these states carry a verified rating or an unresolved research finding.
+# Provider failures and empty responses must never replace them.
+PROTECTED_RATING_STATUSES = {
+    RATING_AVAILABLE,
+    RATING_NEEDS_REVIEW,
+    RATING_PROVIDER_DATA_UNAVAILABLE,
+}
+RESEARCH_RATING_STATUSES = {
+    RATING_NEEDS_REVIEW,
+    RATING_PROVIDER_DATA_UNAVAILABLE,
+}
+
+logger = logging.getLogger(__name__)
+
+OMDB_QUOTA_COOLDOWN_SECONDS = 6 * 60 * 60
+OMDB_RATE_LIMIT_COOLDOWN_SECONDS = 5 * 60
+OMDB_REDIS_PREFIX = "omdb:key"
+
+_omdb_state_lock = threading.RLock()
+_local_quota_until: dict[str, float] = {}
+_local_invalid_keys: set[str] = set()
+_last_redis_warning_at = 0.0
 
 
 class ProviderRateLimited(RuntimeError):
@@ -43,6 +73,109 @@ class ProviderQuotaExhausted(RuntimeError):
 
 class ProviderUnavailable(RuntimeError):
     """Provider is temporarily unavailable; the batch must pause cleanly."""
+
+
+class ProviderInvalidKey(RuntimeError):
+    """A configured provider credential is invalid for the current process."""
+
+
+class ProviderTimeout(ProviderUnavailable):
+    """The provider timed out; other credentials must not be consumed."""
+
+
+class ProviderMalformedResponse(ProviderUnavailable):
+    """The provider returned a response that could not be interpreted safely."""
+
+
+class OmdbResponseClass(str, Enum):
+    SUCCESS = "SUCCESS"
+    NOT_FOUND = "NOT_FOUND"
+    QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
+    RATE_LIMITED = "RATE_LIMITED"
+    INVALID_KEY = "INVALID_KEY"
+    PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+    TIMEOUT = "TIMEOUT"
+    MALFORMED_RESPONSE = "MALFORMED_RESPONSE"
+
+
+def omdb_key_fingerprint(api_key: str) -> str:
+    """Return a stable, irreversible identifier safe for state and logs."""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:8]
+
+
+def _warn_omdb_redis_unavailable(exc: Exception) -> None:
+    global _last_redis_warning_at
+    now = time.monotonic()
+    with _omdb_state_lock:
+        if now - _last_redis_warning_at < 60:
+            return
+        _last_redis_warning_at = now
+    logger.warning(
+        "OMDb Redis coordination unavailable; using in-process fallback (%s)",
+        type(exc).__name__,
+    )
+
+
+class OmdbKeyStateStore:
+    """Coordinate OMDb credential cooldown without storing raw credentials."""
+
+    def __init__(self, redis_client=None):
+        self._redis_client = redis_client
+
+    def _redis(self):
+        if self._redis_client is None:
+            self._redis_client = redis.from_url(
+                settings.REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=0.5,
+                socket_timeout=0.5,
+            )
+        return self._redis_client
+
+    @staticmethod
+    def _quota_key(fingerprint: str) -> str:
+        return f"{OMDB_REDIS_PREFIX}:{fingerprint}:quota_exhausted"
+
+    def is_temporarily_unavailable(self, fingerprint: str) -> bool:
+        now = time.time()
+        with _omdb_state_lock:
+            local_until = _local_quota_until.get(fingerprint, 0)
+            if local_until > now:
+                return True
+            _local_quota_until.pop(fingerprint, None)
+        try:
+            return bool(self._redis().exists(self._quota_key(fingerprint)))
+        except Exception as exc:
+            _warn_omdb_redis_unavailable(exc)
+            return False
+
+    def mark_temporarily_unavailable(self, fingerprint: str, ttl_seconds: int) -> None:
+        ttl_seconds = max(1, int(ttl_seconds))
+        with _omdb_state_lock:
+            _local_quota_until[fingerprint] = time.time() + ttl_seconds
+        try:
+            self._redis().setex(self._quota_key(fingerprint), ttl_seconds, "1")
+        except Exception as exc:
+            _warn_omdb_redis_unavailable(exc)
+
+    @staticmethod
+    def is_invalid(fingerprint: str) -> bool:
+        with _omdb_state_lock:
+            return fingerprint in _local_invalid_keys
+
+    @staticmethod
+    def mark_invalid(fingerprint: str) -> None:
+        with _omdb_state_lock:
+            _local_invalid_keys.add(fingerprint)
+
+
+def _reset_omdb_key_state_for_tests() -> None:
+    """Reset process-local provider state between isolated tests."""
+    global _last_redis_warning_at
+    with _omdb_state_lock:
+        _local_quota_until.clear()
+        _local_invalid_keys.clear()
+        _last_redis_warning_at = 0.0
 
 
 @dataclass(frozen=True)
@@ -65,43 +198,82 @@ class MovieRatingProvider(ABC):
 
 
 class OmdbRatingProvider(MovieRatingProvider):
-    """Fetch IMDb-compatible rating fields through a configured OMDb API account."""
+    """Fetch IMDb-compatible rating fields through a configured OMDb API account.
 
-    def __init__(self, api_url: str, api_key: str, timeout: float = 15):
+    Supports a key pool for automatic rotation when a single key is rate-limited
+    or quota-exhausted.  Keys are tried in order; ``ProviderQuotaExhausted`` is
+    raised only when *every* key in the pool is exhausted for this request.
+    """
+
+    def __init__(
+        self,
+        api_url: str,
+        api_key: str,
+        *,
+        key_pool: list[str] | None = None,
+        timeout: float = 15,
+        state_store: OmdbKeyStateStore | None = None,
+    ):
         self.api_url = api_url
-        self.api_key = api_key
         self.timeout = timeout
+        self._state = state_store or OmdbKeyStateStore()
+        # Deduplicated key pool: primary key first, then any extras
+        seen: set[str] = set()
+        self._keys: list[str] = []
+        for candidate in [api_key, *(key_pool or [])]:
+            key = (candidate or "").strip()
+            if key and key not in seen:
+                self._keys.append(key)
+                seen.add(key)
 
-    def fetch(self, imdb_id: str) -> RatingResult | None:
-        if not IMDB_ID.fullmatch(imdb_id):
-            return None
+    # ── Single-key fetch (original logic) ──────────────────────────────
+
+    def _fetch_one(self, imdb_id: str, api_key: str) -> RatingResult | None:
+        """Attempt a single OMDb lookup with *api_key*."""
         try:
             response = httpx.get(
                 self.api_url,
-                params={"apikey": self.api_key, "i": imdb_id},
+                params={"apikey": api_key, "i": imdb_id},
                 timeout=self.timeout,
                 follow_redirects=True,
             )
-        except httpx.RequestError:
-            raise ProviderUnavailable("IMDb rating provider is temporarily unavailable") from None
+        except httpx.TimeoutException:
+            raise ProviderTimeout("OMDb request timed out") from None
+        except httpx.HTTPError:
+            raise ProviderUnavailable("OMDb transport unavailable") from None
         status_code = getattr(response, "status_code", 200)
         if status_code == 429:
             raise ProviderRateLimited("IMDb rating provider rate limit reached")
-        if status_code in {401, 402, 403}:
-            raise ProviderQuotaExhausted("IMDb rating provider account or free quota is unavailable")
+        if status_code in {401, 403}:
+            raise ProviderInvalidKey("OMDb credential is invalid")
+        if status_code == 402:
+            raise ProviderQuotaExhausted("OMDb credential quota is exhausted")
         if status_code >= 500:
             raise ProviderUnavailable("IMDb rating provider is temporarily unavailable")
         if status_code >= 400:
             raise ProviderUnavailable(f"IMDb rating provider returned HTTP {status_code}")
 
-        payload = response.json()
-        error = str(payload.get("Error", ""))
-        if str(payload.get("Response", "True")).lower() == "false" and any(
-            phrase in error.lower() for phrase in ("limit", "quota", "too many")
-        ):
-            raise ProviderQuotaExhausted("IMDb rating provider free quota is exhausted")
+        try:
+            payload = response.json()
+        except (TypeError, ValueError):
+            raise ProviderMalformedResponse("OMDb returned malformed JSON") from None
+        if not isinstance(payload, dict):
+            raise ProviderMalformedResponse("OMDb returned an unexpected response shape")
+
+        response_class = self._classify_payload(payload)
+        if response_class == OmdbResponseClass.QUOTA_EXHAUSTED:
+            raise ProviderQuotaExhausted("OMDb credential quota is exhausted")
+        if response_class == OmdbResponseClass.RATE_LIMITED:
+            raise ProviderRateLimited("OMDb credential is rate limited")
+        if response_class == OmdbResponseClass.INVALID_KEY:
+            raise ProviderInvalidKey("OMDb credential is invalid")
+        if response_class == OmdbResponseClass.PROVIDER_UNAVAILABLE:
+            raise ProviderUnavailable("OMDb returned an unclassified provider error")
+        if response_class == OmdbResponseClass.MALFORMED_RESPONSE:
+            raise ProviderMalformedResponse("OMDb response is missing required status data")
+
         checked_at = datetime.now(timezone.utc)
-        if str(payload.get("Response", "True")).lower() == "false":
+        if response_class == OmdbResponseClass.NOT_FOUND:
             return RatingResult(None, None, imdb_id, checked_at, RATING_NOT_FOUND)
 
         raw_rating = payload.get("imdbRating")
@@ -119,12 +291,96 @@ class OmdbRatingProvider(MovieRatingProvider):
         result_status = RATING_AVAILABLE if rating is not None else RATING_NOT_YET_RATED
         return RatingResult(rating, vote_count, imdb_id, checked_at, result_status)
 
+    @staticmethod
+    def _classify_payload(payload: dict) -> OmdbResponseClass:
+        response_value = str(payload.get("Response", "")).strip().lower()
+        if response_value == "true":
+            return OmdbResponseClass.SUCCESS
+        if response_value != "false":
+            return OmdbResponseClass.MALFORMED_RESPONSE
+
+        error = str(payload.get("Error", "")).strip().lower()
+        if any(phrase in error for phrase in ("invalid api key", "no api key provided", "api key is invalid")):
+            return OmdbResponseClass.INVALID_KEY
+        if any(phrase in error for phrase in ("too many requests", "rate limit", "rate-limit")):
+            return OmdbResponseClass.RATE_LIMITED
+        if any(phrase in error for phrase in ("request limit reached", "daily limit", "quota", "limit exhausted")):
+            return OmdbResponseClass.QUOTA_EXHAUSTED
+        if any(phrase in error for phrase in ("movie not found", "title not found", "incorrect imdb id", "not found")):
+            return OmdbResponseClass.NOT_FOUND
+        return OmdbResponseClass.PROVIDER_UNAVAILABLE
+
+    # ── Multi-key fetch with rotation ──────────────────────────────────
+
+    def fetch(self, imdb_id: str) -> RatingResult | None:
+        if not IMDB_ID.fullmatch(imdb_id):
+            return None
+        last_retryable: Exception | None = None
+        invalid_count = 0
+        for key in self._keys:
+            fingerprint = omdb_key_fingerprint(key)
+            if self._state.is_invalid(fingerprint):
+                invalid_count += 1
+                continue
+            if self._state.is_temporarily_unavailable(fingerprint):
+                continue
+            logger.info("OMDb key selected fingerprint=%s", fingerprint)
+            try:
+                result = self._fetch_one(imdb_id, key)
+                logger.info(
+                    "OMDb request completed fingerprint=%s status=%s",
+                    fingerprint,
+                    result.status if result else RATING_INVALID_ID,
+                )
+                return result
+            except ProviderQuotaExhausted as exc:
+                last_retryable = exc
+                self._state.mark_temporarily_unavailable(fingerprint, OMDB_QUOTA_COOLDOWN_SECONDS)
+                logger.warning("OMDb key quota exhausted fingerprint=%s; failing over", fingerprint)
+            except ProviderRateLimited as exc:
+                last_retryable = exc
+                self._state.mark_temporarily_unavailable(fingerprint, OMDB_RATE_LIMIT_COOLDOWN_SECONDS)
+                logger.warning("OMDb key rate limited fingerprint=%s; failing over", fingerprint)
+            except ProviderInvalidKey:
+                invalid_count += 1
+                self._state.mark_invalid(fingerprint)
+                logger.warning("OMDb key invalid fingerprint=%s; skipping for this process", fingerprint)
+            except (ProviderTimeout, ProviderMalformedResponse, ProviderUnavailable):
+                # These failures are provider-wide or ambiguous. Trying every key
+                # would duplicate load without establishing a credential problem.
+                raise
+        logger.error("All OMDb credentials unavailable configured=%d", len(self._keys))
+        if last_retryable:
+            raise ProviderQuotaExhausted("All OMDb credentials are temporarily unavailable") from None
+        if invalid_count:
+            raise ProviderInvalidKey("All OMDb credentials are invalid or unavailable") from None
+        raise ProviderQuotaExhausted("All OMDb credentials are temporarily unavailable")
+
+
+def _parse_omdb_keys() -> list[str]:
+    """Return deduplicated OMDb API keys from OMDB_API_KEYS, falling back to IMDB_RATING_API_KEY."""
+    def parse(raw_source: str) -> list[str]:
+        pool: list[str] = []
+        seen: set[str] = set()
+        for candidate in (raw_source or "").split(","):
+            key = candidate.strip()
+            if key and key not in seen:
+                pool.append(key)
+                seen.add(key)
+        return pool
+
+    configured_pool = parse(settings.OMDB_API_KEYS)
+    return configured_pool or parse(settings.IMDB_RATING_API_KEY)
+
 
 def configured_rating_provider() -> MovieRatingProvider | None:
     provider = settings.IMDB_RATING_PROVIDER.strip().lower()
-    if provider == "omdb" and settings.IMDB_RATING_API_URL and settings.IMDB_RATING_API_KEY:
-        return OmdbRatingProvider(settings.IMDB_RATING_API_URL, settings.IMDB_RATING_API_KEY)
-    return None
+    if provider != "omdb" or not settings.IMDB_RATING_API_URL:
+        return None
+    keys = _parse_omdb_keys()
+    if not keys:
+        return None
+    return OmdbRatingProvider(settings.IMDB_RATING_API_URL, keys[0], key_pool=keys[1:])
 
 
 def ensure_pending_rating(db: Session, movie_id: int) -> MovieRating:
@@ -167,6 +423,21 @@ def next_rating_check(movie: Movie, status: str, attempts: int, now: datetime) -
 
 def apply_rating_result(record: MovieRating, movie: Movie, result: RatingResult) -> None:
     record.source = "IMDb"
+    if (record.status or "") in RESEARCH_RATING_STATUSES:
+        # Research is the source of truth while a finding is unresolved; do not
+        # let a provider result resolve NEEDS_REVIEW or PROVIDER_DATA_UNAVAILABLE.
+        record.last_attempt_at = result.checked_at
+        record.last_error = f"Research state {record.status} protected; provider result ignored"
+        record.attempt_count = (record.attempt_count or 0) + 1
+        return
+    if result.rating is None and record.rating is not None:
+        # Provider returned no value (N/A, missing field); never discard an
+        # existing verified rating. Surface the provider outcome in metadata only.
+        record.last_attempt_at = result.checked_at
+        record.last_error = "Provider returned no rating; preserved existing verified value"
+        record.attempt_count = (record.attempt_count or 0) + 1
+        record.next_check_at = next_rating_check(movie, record.status, record.attempt_count, result.checked_at)
+        return
     record.rating = result.rating
     record.vote_count = result.vote_count
     record.status = result.status
@@ -179,10 +450,16 @@ def apply_rating_result(record: MovieRating, movie: Movie, result: RatingResult)
 
 def mark_rating_failure(record: MovieRating, movie: Movie, status: str, error: object, now: datetime) -> None:
     record.source = "IMDb"
-    record.status = status
     record.last_attempt_at = now
     record.last_error = sanitize_error(error, limit=1000)
     record.attempt_count = (record.attempt_count or 0) + 1
+    keep_state = record.rating is not None or (record.status or "") in PROTECTED_RATING_STATUSES
+    if keep_state:
+        # Provider failures are provider states, not movie-rating states. A
+        # verified rating or an open NEEDS_REVIEW/PDU finding must be preserved.
+        record.next_check_at = next_rating_check(movie, record.status, record.attempt_count, now)
+        return
+    record.status = status
     record.next_check_at = next_rating_check(movie, status, record.attempt_count, now)
 
 
@@ -202,7 +479,10 @@ class IMDbRatingRefreshService:
             missing.append("IMDB_RATING_PROVIDER")
         if not settings.IMDB_RATING_API_URL:
             missing.append("IMDB_RATING_API_URL")
-        if not settings.IMDB_RATING_API_KEY:
+        if not _parse_omdb_keys():
+            # Keep the established diagnostic contract. OMDB_API_KEYS is an
+            # optional multi-key alternative; IMDB_RATING_API_KEY remains the
+            # documented single-key configuration accepted by the provider.
             missing.append("IMDB_RATING_API_KEY")
         return {
             "provider": "OMDb",
@@ -296,7 +576,7 @@ class IMDbRatingRefreshService:
                 MovieRequest.status.in_(("PENDING", "REVIEWING", "FOUND")),
             )
         )
-        batch_limit = max(1, min(batch_size, 100))
+        batch_limit = max(1, min(batch_size, 500))
         query = self.db.query(Movie, ExternalId, rating).join(
             ExternalId,
             (ExternalId.movie_id == Movie.id) & (func.lower(ExternalId.provider) == "imdb"),
@@ -306,7 +586,7 @@ class IMDbRatingRefreshService:
         ).filter(
             or_(
                 rating.id.is_(None),
-                (rating.status.in_(tuple(RETRYABLE_RATING_STATES) + (RATING_AVAILABLE,)))
+                (rating.status.in_(tuple(RETRYABLE_RATING_STATES)))
                 & ((rating.next_check_at.is_(None)) | (rating.next_check_at <= now)),
             )
         ).order_by(
@@ -350,6 +630,7 @@ class IMDbRatingRefreshService:
                 mark_rating_failure(record, movie, RATING_INVALID_ID, "Invalid IMDb identifier", now)
                 processed += 1
                 state.cursor = movie.id
+                self.db.commit()
                 continue
             try:
                 result = self.provider.fetch(external_id.external_id)
@@ -360,6 +641,10 @@ class IMDbRatingRefreshService:
                     updated += int(result.status == RATING_AVAILABLE)
                 processed += 1
                 state.cursor = movie.id
+                # A 500-item provider batch can run for several minutes. Persist
+                # each completed attempt so a worker/container restart resumes
+                # after the last durable movie instead of replaying the batch.
+                self.db.commit()
             except (ProviderRateLimited, ProviderQuotaExhausted) as exc:
                 mark_rating_failure(record, movie, RATING_BLOCKED_BY_QUOTA, exc, now)
                 state.status = "BLOCKED"

@@ -28,7 +28,12 @@ export async function get(path, { maxAge = 60000 } = {}) {
   try { return await request; } catch (error) { cache.delete(path); throw error; }
 }
 export async function post(path, body) {
-  const response = await fetch(`${API}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const multipart = typeof FormData !== "undefined" && body instanceof FormData;
+  const response = await fetch(`${API}${path}`, {
+    method: "POST",
+    ...(multipart ? {} : { headers: { "Content-Type": "application/json" } }),
+    body: multipart ? body : JSON.stringify(body),
+  });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const validationMessage = Array.isArray(payload.detail) ? payload.detail.map(item => item.msg).filter(Boolean).join(" ") : null;
@@ -50,5 +55,47 @@ export async function adminPost(path) {
     throw new Error(payload.detail || (response.status === 401 ? "Unauthenticated" : "Request failed"));
   }
   return response.json();
+}
+export async function authenticatedPut(path, body) {
+  const response = await fetch(`${API}${path}`, {
+    method: "PUT",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const validationMessage = Array.isArray(payload.detail) ? payload.detail.map(item => item.msg).filter(Boolean).join(" ") : null;
+    const error = new Error(typeof payload.detail === "string" ? payload.detail : validationMessage || "Unable to save rating");
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+export async function userGet(path) {
+  const response = await fetch(`${API}${path}`, { credentials: "include" });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const error = new Error(payload.detail || (response.status === 401 ? "Unauthenticated" : "Request failed"));
+    error.status = response.status;
+    throw error;
+  }
+  return response.json();
+}
+export async function userPost(path, body) {
+  const response = await fetch(`${API}${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const validationMessage = Array.isArray(payload.detail) ? payload.detail.map(item => item.msg).filter(Boolean).join(" ") : null;
+    const error = new Error(typeof payload.detail === "string" ? payload.detail : validationMessage || "Request failed");
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
 }
 export const imageUrl = (path, size="w500") => path ? (path.startsWith("http") ? path : path.startsWith("/media/") || path.startsWith("/storage/") ? `${API}${path}` : `https://image.tmdb.org/t/p/${size}${path}`) : "/placeholder.svg";

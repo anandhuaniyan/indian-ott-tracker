@@ -12,9 +12,12 @@ class Settings(BaseSettings):
     TMDB_API_KEY: str = ""
     TMDB_ACCESS_TOKEN: str = ""
     YOUTUBE_API_KEY: str = ""
+    YOUTUBE_SEARCH_DAILY_LIMIT: int = 90
     IMDB_RATING_PROVIDER: str = ""
     IMDB_RATING_API_URL: str = ""
     IMDB_RATING_API_KEY: str = ""
+    OMDB_API_KEYS: str = ""  # Comma-separated pool of valid OMDb API keys
+    IMDB_RATING_REFRESH_ENABLED: bool = False
     METADATA_BACKFILL_BATCH_SIZE: int = 100
     PERSON_BACKFILL_BATCH_SIZE: int = 100
     IMAGE_BACKFILL_BATCH_SIZE: int = 100
@@ -32,6 +35,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     MEDIA_ROOT: str = "media"
+    REPORT_ISSUE_UPLOAD_ROOT: str = "private_uploads/report_issues"
     FRONTEND_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
     ADMIN_API_KEY: str = ""
     ADMIN_SESSION_SECRET: str = ""
@@ -39,10 +43,11 @@ class Settings(BaseSettings):
     SITE_URL: str = "http://localhost:5173"
     SITE_TIMEZONE: str = "Asia/Singapore"
     MOVIE_DISCOVERY_REGULAR_PAST_DAYS: int = 60
-    MOVIE_DISCOVERY_REGULAR_FUTURE_DAYS: int = 180
+    MOVIE_DISCOVERY_REGULAR_FUTURE_DAYS: int = 365
     MOVIE_DISCOVERY_WEEKLY_PAST_DAYS: int = 365
     MOVIE_DISCOVERY_WEEKLY_FUTURE_DAYS: int = 365
     MOVIE_DISCOVERY_MAX_PAGES_PER_LANGUAGE: int = 50
+    MOVIE_DISCOVERY_REGULAR_PAGES_PER_YEAR: int = 2
     GOOGLE_ANALYTICS_ID: str = ""
     GOOGLE_SITE_VERIFICATION: str = ""
     ADSENSE_PUBLISHER_ID: str = ""
@@ -59,7 +64,7 @@ class Settings(BaseSettings):
     OTT_RESEARCH_MEDIUM_PRIORITY_DAYS: int = 180
     OTT_RESEARCH_AUTO_MAX_AGE_DAYS: int = 365
     OTT_RESEARCH_MIN_YEAR: int = 2000
-    OTT_DAILY_RESEARCH_MOVIE_LIMIT: int = 20
+    OTT_DAILY_RESEARCH_MOVIE_LIMIT: int = 10
     OTTPLAY_ENABLED: bool = False
     OTTPLAY_ADAPTER_URL: str = ""
     OTTPLAY_API_KEY: str = ""
@@ -88,10 +93,38 @@ class Settings(BaseSettings):
     OTT_INTELLIGENCE_AUTO_PUBLICATION_ENABLED: bool = False
     TAVILY_API_KEY: str = ""
     TAVILY_MONTHLY_APP_BUDGET: int = 800
-    TAVILY_MAX_QUERIES_PER_MOVIE: int = 2
+    TAVILY_MAX_QUERIES_PER_MOVIE: int = 3
+    AI_RESEARCH_ENABLED: bool = False
+    AI_RESEARCH_PROVIDER: str = ""
+    AI_RESEARCH_MODEL: str = ""
+    AI_RESEARCH_API_URL: str = ""
+    AI_RESEARCH_API_KEY: str = ""
+    AI_RESEARCH_FALLBACK_PROVIDER: str = ""
+    AI_RESEARCH_FALLBACK_MODEL: str = ""
+    AI_RESEARCH_FALLBACK_API_URL: str = ""
+    AI_RESEARCH_FALLBACK_API_KEY: str = ""
+    AI_RESEARCH_MOVIES_PER_RUN: int = 10
+    AI_RESEARCH_CALLS_PER_MOVIE: int = 2
+    AI_RESEARCH_DAILY_CALL_LIMIT: int = 20
+    AI_RESEARCH_CONCURRENCY: int = 1
+    AI_RESEARCH_MAX_RETRIES: int = 1
+    AI_RESEARCH_DISCORD_ENABLED: bool = False
+    AI_RESEARCH_DISCORD_WEBHOOK_URL: str = ""
+    AI_RESEARCH_DISCORD_TIMEOUT_SECONDS: float = 5.0
     DISCORD_WEBHOOK_URL: str = ""
     DISCORD_BOT_ENDPOINT: str = ""
     DISCORD_BOT_SHARED_SECRET: str = ""
+    DISCORD_MAINTENANCE_SHARED_SECRET: str = ""
+    DISCORD_MAINTENANCE_ADMIN_IDS: str = ""
+    DISCORD_MAINTENANCE_GUILD_ID: str = ""
+    CLOUDFLARE_API_TOKEN: str = ""
+    CLOUDFLARE_ACCOUNT_ID: str = ""
+    CLOUDFLARE_ZONE_ID: str = ""
+    CLOUDFLARE_MAINTENANCE_WORKER: str = "otttracker-maintenance"
+    CLOUDFLARE_MAINTENANCE_ROUTES: str = "otttracker.in/*,www.otttracker.in/*"
+    CLOUDFLARE_API_BASE_URL: str = "https://api.cloudflare.com/client/v4"
+    CLOUDFLARE_ROUTE_TIMEOUT_SECONDS: float = 10.0
+    CLOUDFLARE_MAINTENANCE_LOCK_SECONDS: int = 30
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
     SMTP_HOST: str = ""
@@ -100,6 +133,23 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = ""
     SMTP_USE_TLS: bool = True
+
+    # Private Support / Contributions. Never expose Discord secrets or banking
+    # details through Vite; the API returns PayNow display data only to eligible users.
+    PAYNOW_QR_URL: str = ""
+    PAYNOW_INSTRUCTIONS: str = ""
+    PAYNOW_RECIPIENT_LABEL: str = ""
+    SUPPORT_DISCORD_SHARED_SECRET: str = ""
+    SUPPORT_DISCORD_ADMIN_IDS: str = ""
+    SUPPORT_DISCORD_ADMIN_ROLE_IDS: str = ""
+
+    # Pinterest API
+    PINTEREST_APP_ID: str = ""
+    PINTEREST_APP_SECRET: str = ""
+    PINTEREST_REDIRECT_URI: str = "https://otttracker.in/api/v1/integrations/pinterest/callback"
+    PINTEREST_ACCESS_TOKEN: str = ""
+    PINTEREST_REFRESH_TOKEN: str = ""
+    PINTEREST_ENABLED: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",

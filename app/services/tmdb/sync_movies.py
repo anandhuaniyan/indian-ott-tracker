@@ -11,11 +11,16 @@ from app.repositories.language_repository import LanguageRepository
 from app.repositories.movie_repository import MovieRepository
 from app.services.tmdb.movie_service import TMDbMovieService
 from app.services.trailers import TrailerService
+from app.services.languages import (
+    INTERNATIONAL_PRIMARY_LANGUAGE_CODES,
+    SUPPORTED_PRIMARY_LANGUAGE_CODES,
+    normalize_language_code,
+)
 
 service = TMDbMovieService()
 
-LANGUAGES = ["ml","ta","te","hi","kn"]
-START_YEAR = 2011
+LANGUAGES = list(SUPPORTED_PRIMARY_LANGUAGE_CODES)
+START_YEAR = 2020
 END_YEAR = date.today().year
 
 def sync_movies():
@@ -30,14 +35,24 @@ def sync_movies():
     try:
         for year in range(START_YEAR, END_YEAR + 1):
             for language in LANGUAGES:
-                first = service.discover_movies_by_language_and_year(language, year, 1)
+                first = service.discover_movies_by_language_and_year(
+                    language,
+                    year,
+                    1,
+                    watch_region="IN" if language in INTERNATIONAL_PRIMARY_LANGUAGE_CODES else None,
+                )
                 total_pages = first.get("total_pages", 1)
 
                 for page in range(1, total_pages + 1):
                     if page == 1:
                         data = first
                     else:
-                        data = service.discover_movies_by_language_and_year(language, year, page)
+                        data = service.discover_movies_by_language_and_year(
+                            language,
+                            year,
+                            page,
+                            watch_region="IN" if language in INTERNATIONAL_PRIMARY_LANGUAGE_CODES else None,
+                        )
 
                     print(f"Year={year} Language={language} Page={page}/{total_pages}")
 
@@ -56,7 +71,9 @@ def sync_movies():
                             movie.popularity = details.get("popularity")
                             movie.vote_average = details.get("vote_average")
                             movie.vote_count = details.get("vote_count")
-                            movie.original_language = details.get("original_language")
+                            movie.original_language = normalize_language_code(
+                                details.get("original_language")
+                            )
                             movie.adult = details.get("adult", False)
                             movie.genres.clear()
                             movie.languages.clear()
@@ -74,7 +91,9 @@ def sync_movies():
                                 popularity=details.get("popularity"),
                                 vote_average=details.get("vote_average"),
                                 vote_count=details.get("vote_count"),
-                                original_language=details.get("original_language"),
+                                original_language=normalize_language_code(
+                                    details.get("original_language")
+                                ),
                                 adult=details.get("adult", False),
                             )
                             movie_repo.create(movie)
@@ -92,14 +111,16 @@ def sync_movies():
                                 db.flush()
                             movie.genres.append(genre)
 
-                        lang = details.get("original_language")
-                        if lang:
-                            language_obj = language_repo.get_by_iso(lang)
+                        for spoken in details.get("spoken_languages", []):
+                            spoken_code = spoken.get("iso_639_1")
+                            if not spoken_code:
+                                continue
+                            language_obj = language_repo.get_by_iso(spoken_code)
                             if not language_obj:
                                 language_obj = Language(
-                                    iso_639_1=lang,
-                                    english_name=lang.upper(),
-                                    native_name=lang.upper(),
+                                    iso_639_1=spoken_code,
+                                    english_name=spoken.get("english_name") or spoken_code.upper(),
+                                    native_name=spoken.get("name") or None,
                                 )
                                 db.add(language_obj)
                                 db.flush()

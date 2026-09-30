@@ -1,16 +1,19 @@
-export const COMMON_LANGUAGE_OPTIONS = [
-  ["ml", "Malayalam"], ["ta", "Tamil"], ["te", "Telugu"], ["hi", "Hindi"],
-  ["kn", "Kannada"], ["en", "English"], ["bn", "Bengali"], ["mr", "Marathi"],
-  ["pa", "Punjabi"], ["gu", "Gujarati"], ["ur", "Urdu"], ["or", "Odia"],
-  ["as", "Assamese"], ["ne", "Nepali"], ["si", "Sinhala"], ["ar", "Arabic"],
-  ["es", "Spanish"], ["fr", "French"], ["de", "German"], ["it", "Italian"],
-  ["ja", "Japanese"], ["ko", "Korean"], ["zh", "Chinese"], ["ru", "Russian"],
-];
+import { get } from "./api";
 
-const NAMES = Object.fromEntries(COMMON_LANGUAGE_OPTIONS);
+const PUBLIC_LANGUAGE_NAMES = {
+  ml: "Malayalam", ta: "Tamil", te: "Telugu", hi: "Hindi", kn: "Kannada",
+  bn: "Bengali", mr: "Marathi", pa: "Punjabi", gu: "Gujarati", or: "Odia",
+  as: "Assamese", en: "English", ko: "Korean", ja: "Japanese", zh: "Chinese",
+  es: "Spanish", fr: "French", th: "Thai",
+};
+
+export function loadLanguageOptions() {
+  return get("/api/v1/languages", { maxAge: 60 * 60 * 1000 })
+    .then((items) => (Array.isArray(items) ? items : []));
+}
 
 export function languageName(code, storedName) {
   if (storedName) return storedName;
-  if (!code) return "";
-  return NAMES[String(code).toLowerCase()] || code;
+  const normalized = String(code || "").trim().toLowerCase();
+  return PUBLIC_LANGUAGE_NAMES[normalized] || normalized.toUpperCase();
 }

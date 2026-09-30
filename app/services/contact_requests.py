@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.config.settings import settings
 from app.core.secrets import sanitize_error
 from app.models.operations import ContactRequest, RequestNotificationDelivery
+from app.services.report_issue_uploads import stored_screenshot_path
 
 
 TYPE_LABELS = {
@@ -25,6 +26,8 @@ TYPE_LABELS = {
 }
 
 EMAIL_EVENTS = {"RECEIVED", "IN_PROGRESS", "RESOLVED", "APPROVED", "REJECTED"}
+
+ADMIN_NOTIFICATION_TYPE = "ADMIN_NOTIFICATION_EMAIL"
 
 
 class ContactEmailDeliveryError(RuntimeError):
@@ -43,9 +46,11 @@ class ContactRequestNotificationService:
 
         discord = RequestDiscordService(self.db).schedule_submission(item)
         email = self.schedule_email(item, "RECEIVED")
+        admin_email = self.schedule_admin_email(item)
         return {
             "discord": discord.status,
             "email": email.status if email else item.receipt_email_status,
+            "admin_email": admin_email.status if admin_email else None,
         }
 
     @staticmethod
@@ -83,9 +88,100 @@ class ContactRequestNotificationService:
         message["Subject"] = title
         message["From"] = settings.SMTP_FROM
         message["To"] = item.email
+        if item.email and settings.SMTP_FROM:
+            message["Reply-To"] = settings.SMTP_FROM
         message.set_content(plain)
         message.add_alternative(html, subtype="html")
+        self._attach_screenshot(message, item)
         return message
+
+    def _admin_message(self, item: ContactRequest) -> EmailMessage:
+        label = TYPE_LABELS.get(item.request_type, "Website request")
+        site_url = settings.SITE_URL.rstrip("/")
+        admin_url = f"{site_url}/admin/contact-requests/{item.request_id}"
+        submitted = (
+            item.created_at.replace(tzinfo=timezone.utc).isoformat()
+            if item.created_at else None
+        )
+        subject = f"New Contact Request — {label} ({item.request_id})"
+        fields = [
+            f"Request ID: {item.request_id}",
+            f"Type: {label}",
+            f"Name: {item.name or 'Not supplied'}",
+            f"WhatsApp: {item.whatsapp or 'Not supplied'}",
+            f"Phone: {item.phone or 'Not supplied'}",
+            f"Email: {item.email or 'Not supplied'}",
+            f"Movie Name: {item.movie_name or 'Not supplied'}",
+            f"Movie URL: {item.movie_url or 'Not supplied'}",
+            f"TMDB ID: {item.tmdb_id or 'Not supplied'}",
+            f"Issue Type: {item.issue_type or 'Not supplied'}",
+            f"Expected OTT Platform: {item.expected_ott_platform or 'Not supplied'}",
+            f"Expected OTT Release Date: {item.expected_ott_release_date or 'Not supplied'}",
+            f"Evidence URL: {item.evidence_url or 'Not supplied'}",
+            f"Comment: {item.comment or 'Not supplied'}",
+            f"Submitted At: {submitted or 'Unknown'}",
+            f"Status: {item.status}",
+            f"Admin URL: {admin_url}",
+        ]
+        plain = "\n".join(fields)
+        html = (
+            '<div style="max-width:600px;margin:auto;padding:20px;font-family:Arial,sans-serif;line-height:1.55">'
+            f"<h2>New contact request</h2>"
+            f"<p><strong>{escape(label)}</strong> — {escape(item.request_id)}</p>"
+            "<table style=\"border-collapse:collapse;width:100%\" cellpadding=\"8\">"
+            + "".join(
+                f"<tr style=\"border-bottom:1px solid #eee\"><td style=\"width:200px;color:#666\">{escape(key)}</td><td>{escape(value)}</td></tr>"
+                for key, value in (
+                    ("Name", item.name or "Not supplied"),
+                    ("WhatsApp", item.whatsapp or "Not supplied"),
+                    ("Phone", item.phone or "Not supplied"),
+                    ("Email", item.email or "Not supplied"),
+                    ("Movie Name", item.movie_name or "Not supplied"),
+                    ("Movie URL", item.movie_url or "Not supplied"),
+                    ("TMDB ID", item.tmdb_id or "Not supplied"),
+                    ("Issue Type", item.issue_type or "Not supplied"),
+                    ("Expected OTT Platform", item.expected_ott_platform or "Not supplied"),
+                    ("Expected OTT Release Date", item.expected_ott_release_date or "Not supplied"),
+                    ("Evidence URL", item.evidence_url or "Not supplied"),
+                    ("Comment", item.comment or "Not supplied"),
+                    ("Submitted At", submitted or "Unknown"),
+                    ("Status", item.status),
+                )
+            )
+            + "</table>"
+            f'<p><a href="{escape(admin_url, quote=True)}">Open Contact Request</a></p>'
+            "</div>"
+        )
+        message = EmailMessage()
+        message["Subject"] = subject
+        message["From"] = settings.SMTP_FROM
+        message["To"] = settings.ADMIN_NOTIFICATION_EMAIL
+        if item.email:
+            message["Reply-To"] = item.email
+        message.set_content(plain)
+        message.add_alternative(html, subtype="html")
+        self._attach_screenshot(message, item)
+        return message
+
+    @staticmethod
+    def _attach_screenshot(message: EmailMessage, item: ContactRequest) -> None:
+        if not item.screenshot_path or not item.screenshot_mime_type:
+            return
+        try:
+            path = stored_screenshot_path(item.screenshot_path)
+        except ValueError:
+            return
+        if not path.is_file() or path.stat().st_size <= 0:
+            return
+        maintype, subtype = item.screenshot_mime_type.split("/", 1)
+        if maintype != "image" or subtype not in {"png", "jpeg", "webp"}:
+            return
+        message.add_attachment(
+            path.read_bytes(),
+            maintype=maintype,
+            subtype=subtype,
+            filename=f"report_screenshot{path.suffix}",
+        )
 
     @staticmethod
     def _deliver_message(message: EmailMessage) -> None:
@@ -142,7 +238,12 @@ class ContactRequestNotificationService:
             record.status = "NOT_CONFIGURED"
             item = self._request(record)
             if item:
-                self._sync_status(item, self._event(record), record.status)
+                self._sync_status(
+                    item,
+                    self._event(record),
+                    record.status,
+                    admin=record.notification_type == ADMIN_NOTIFICATION_TYPE,
+                )
             self.db.commit()
             return record
         try:
@@ -159,8 +260,48 @@ class ContactRequestNotificationService:
             record.sanitized_error = sanitize_error(exc)
             item = self._request(record)
             if item:
-                self._sync_status(item, self._event(record), record.status)
+                self._sync_status(
+                    item,
+                    self._event(record),
+                    record.status,
+                    admin=record.notification_type == ADMIN_NOTIFICATION_TYPE,
+                )
             self.db.commit()
+        return record
+
+    def schedule_admin_email(
+        self, item: ContactRequest, *, force_enqueue: bool = False
+    ) -> RequestNotificationDelivery | None:
+        if not settings.ADMIN_NOTIFICATION_EMAIL:
+            return None
+        dedupe_key = f"CONTACT_REQUEST:{item.request_id}:ADMIN_EMAIL:SUBMITTED"
+        record = (
+            self.db.query(RequestNotificationDelivery)
+            .filter_by(dedupe_key=dedupe_key)
+            .first()
+        )
+        if not record:
+            record = RequestNotificationDelivery(
+                request_id=item.request_id,
+                request_kind="CONTACT_REQUEST",
+                notification_type=ADMIN_NOTIFICATION_TYPE,
+                provider="EMAIL",
+                dedupe_key=dedupe_key,
+                status="PENDING" if self.configured() else "NOT_CONFIGURED",
+            )
+            self.db.add(record)
+            try:
+                self.db.commit()
+            except IntegrityError:
+                self.db.rollback()
+                record = (
+                    self.db.query(RequestNotificationDelivery)
+                    .filter_by(dedupe_key=dedupe_key)
+                    .one()
+                )
+        self.db.commit()
+        if record.status != "SENT" and (record.status != "NOT_CONFIGURED" or force_enqueue):
+            self.enqueue(record)
         return record
 
     def deliver(self, delivery_id: int) -> dict:
@@ -169,8 +310,9 @@ class ContactRequestNotificationService:
             return {"status": "MISSING", "delivery_id": delivery_id}
         if record.status == "SENT":
             return {"status": "SENT", "delivery_id": record.id, "deduplicated": True}
+        is_admin = record.notification_type == ADMIN_NOTIFICATION_TYPE
         item = self._request(record)
-        if not item or not item.email:
+        if not item or (not is_admin and not item.email):
             record.status = "FAILED"
             record.sanitized_error = "Contact request or recipient no longer exists"
             self.db.commit()
@@ -182,22 +324,26 @@ class ContactRequestNotificationService:
         if not self.configured():
             record.status = "NOT_CONFIGURED"
             record.sanitized_error = "SMTP is not configured"
-            self._sync_status(item, event, record.status)
+            if not is_admin:
+                self._sync_status(item, event, record.status)
             self.db.commit()
             return {"status": record.status, "delivery_id": record.id}
         try:
-            self._deliver_message(self._message(item, event))
+            message = self._admin_message(item) if is_admin else self._message(item, event)
+            self._deliver_message(message)
         except Exception as exc:
             safe_error = sanitize_error(exc)
             record.status = "FAILED"
             record.sanitized_error = safe_error
-            self._sync_status(item, event, record.status)
+            if not is_admin:
+                self._sync_status(item, event, record.status)
             self.db.commit()
             raise ContactEmailDeliveryError(safe_error) from exc
         record.status = "SENT"
         record.sent_at = now
         record.sanitized_error = None
-        self._sync_status(item, event, record.status)
+        if not is_admin:
+            self._sync_status(item, event, record.status)
         self.db.commit()
         return {"status": record.status, "delivery_id": record.id}
 
@@ -239,7 +385,9 @@ class ContactRequestNotificationService:
         )
 
     @staticmethod
-    def _sync_status(item: ContactRequest, event: str, status: str) -> None:
+    def _sync_status(item: ContactRequest, event: str, status: str, *, admin: bool = False) -> None:
+        if admin:
+            return
         if event == "RECEIVED":
             item.receipt_email_status = status
         else:

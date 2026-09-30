@@ -13,7 +13,7 @@ _omdb_missing = [
     name for name, present in (
         ("IMDB_RATING_PROVIDER", settings.IMDB_RATING_PROVIDER.strip().lower() == "omdb"),
         ("IMDB_RATING_API_URL", bool(settings.IMDB_RATING_API_URL)),
-        ("IMDB_RATING_API_KEY", bool(settings.IMDB_RATING_API_KEY)),
+        ("OMDB_API_KEYS", bool((settings.OMDB_API_KEYS or settings.IMDB_RATING_API_KEY).strip())),
     ) if not present
 ]
 _startup_log = logging.getLogger(__name__)
@@ -26,6 +26,13 @@ else:
     _startup_log.info("OMDb worker configuration: READY")
 
 celery_app = Celery("indian_ott_tracker", broker=settings.REDIS_URL, backend=settings.REDIS_URL, include=["app.workers.tasks"])
+# The scheduled OMDb IMDb-rating refresh is disabled until the AI/web research
+# system can safely reconcile results; keep the task registered for on-demand use.
+_imdb_rating_refresh_entry = (
+    {"imdb-rating-refresh": {"task": "ratings.imdb_refresh", "schedule": 21600}}
+    if settings.IMDB_RATING_REFRESH_ENABLED
+    else {}
+)
 celery_app.conf.update(
     task_acks_late=True, task_default_retry_delay=60, task_serializer="json",
     result_serializer="json", timezone=settings.SITE_TIMEZONE, enable_utc=True,
@@ -38,22 +45,45 @@ celery_app.conf.update(
             "task": "movies.discovery_weekly",
             "schedule": crontab(minute=30, hour=3, day_of_week="sun"),
         },
+        "tmdb-catalogue-weekly-reconciliation": {
+            "task": "tmdb.catalogue_reconciliation",
+            "schedule": 21600,
+        },
         "metadata-enrichment": {"task": "tmdb.metadata_enrichment", "schedule": 900},
         "trailer-backfill": {
             "task": "tmdb.trailer_backfill",
-            "schedule": 1800,
-            "kwargs": {"batch_size": 30, "continuous": False},
+            "schedule": crontab(minute=15, hour=16),
+            "kwargs": {"batch_size": 90, "continuous": True},
         },
         "imdb-id-recovery": {"task": "ratings.imdb_id_backfill", "schedule": 18000},
-        "imdb-rating-refresh": {"task": "ratings.imdb_refresh", "schedule": 21600},
         "data-health": {"task": "operations.data_health", "schedule": 900},
+        "content-safety": {
+            "task": "content_safety.scan",
+            "schedule": crontab(minute=15, hour=4),
+            "kwargs": {"batch_size": 500, "continuous": True},
+        },
         "image-health": {"task": "operations.image_health", "schedule": 21600},
         "image-recovery": {"task": "operations.image_recovery", "schedule": 3600},
         "release-status": {"task": "operations.release_status", "schedule": 86400},
         "ott-queue": {"task": "operations.ott_queue", "schedule": 21600},
         "ott-research": {"task": "operations.ott_research", "schedule": 1800},
+        "ott-research-daily": {
+            "task": "operations.ott_research_scheduled",
+            "schedule": crontab(minute=0, hour=3),
+            "kwargs": {"limit": 10, "run_key": "scheduled:ott_research_daily"},
+        },
+        "ott-research-weekly": {
+            "task": "operations.ott_research_scheduled",
+            "schedule": crontab(minute=0, hour=4, day_of_week="sun"),
+            "kwargs": {"limit": 25, "run_key": "scheduled:ott_research_weekly"},
+        },
         "ott-verification": {"task": "operations.ott_verification", "schedule": 86400},
         "ott-intelligence-daily": {"task": "operations.ott_intelligence_daily", "schedule": 86400},
+        "ott-catalogue-audit": {
+            "task": "operations.ott_catalogue_audit",
+            "schedule": 3600,
+            "kwargs": {"batch_size": 100},
+        },
         "ott-intelligence-weekly": {"task": "operations.ott_intelligence_weekly", "schedule": 604800},
         "ott-web-research": {"task": "operations.ott_web_research", "schedule": 86400},
         "ott-gold-set-evaluation": {"task": "operations.ott_gold_set_evaluate", "schedule": 604800},
@@ -64,6 +94,7 @@ celery_app.conf.update(
         "request-email-recovery": {"task": "notifications.request_email_recovery", "schedule": 300},
         "notifications": {"task": "operations.notifications", "schedule": 86400},
         "cleanup": {"task": "operations.cleanup", "schedule": 604800},
+        **_imdb_rating_refresh_entry,
     },
 )
 

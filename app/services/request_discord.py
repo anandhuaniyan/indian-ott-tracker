@@ -19,7 +19,7 @@ from app.models.operations import (
 )
 from app.services.contact_requests import TYPE_LABELS
 from app.services.notification_service import NotificationService
-from app.services.release_status import best_canonical_ott
+from app.services.request_notification_data import request_notification_data
 
 
 FINAL_STATUSES = {"SENT", "FAILED", "NOT_CONFIGURED"}
@@ -42,49 +42,36 @@ class RequestDiscordService:
     def __init__(self, db: Session):
         self.db = db
 
-    def movie_message(self, item: MovieRequest, *, update: bool = False) -> str:
-        movie = None
-        if item.local_movie_id:
-            from app.models.movie import Movie
-
-            movie = self.db.get(Movie, item.local_movie_id)
-        ott = best_canonical_ott(movie) if movie else None
-        meaningful_ott = bool(ott and ott.provider and (ott.confidence or 0) > 0)
-        title = item.verified_title or item.movie_name
+    def movie_message(
+        self, item: MovieRequest, *, update: bool = False, completion: bool = False
+    ) -> str:
+        data = request_notification_data(self.db, item)
+        title = data.title
         lines = [
-            "🎬 MOVIE REQUEST OTT UPDATE" if update else "🎬 NEW MOVIE REQUEST",
-            f"Request ID: {item.request_id}",
+            "🎬 MOVIE REQUEST COMPLETED" if completion else "🎬 MOVIE REQUEST OTT UPDATE" if update else "🎬 NEW MOVIE REQUEST",
+            f"Request ID: {data.request_id}",
             f"Movie Name: {_value(title, 'Unknown')}",
         ]
-        if item.original_title and item.original_title.casefold() != title.casefold():
-            lines.append(f"Original Movie Name: {_value(item.original_title)}")
+        if data.original_title:
+            lines.append(f"Original Movie Name: {_value(data.original_title)}")
         lines.extend(
             [
-                f"Year: {_value(item.release_year, 'Unknown')}",
-                "Language: "
-                + _value(
-                    item.verified_language_name
-                    or item.verified_original_language
-                    or item.language,
-                    "Unknown",
-                ),
-                f"TMDB ID: {_value(item.external_movie_id, 'Unknown')}",
-                f"IMDb ID: {_value(item.imdb_id, 'Pending')}",
-                f"Theatrical Release Date: {_value(item.verified_release_date, 'Unknown')}",
-                f"OTT Platform: {_value(ott.provider if meaningful_ott else None, 'Researching')}",
-                "OTT Release Date: "
-                + _value(
-                    ott.ott_release_date if meaningful_ott and ott.ott_release_date else None,
-                    "Researching",
-                ),
-                "OTT Confidence: "
-                + (f"{int(ott.confidence or 0)}%" if meaningful_ott else "Researching"),
+                f"Year: {_value(data.year, 'Unknown')}",
+                f"Language: {_value(data.language, 'Unknown')}",
+                f"TMDB ID: {_value(data.tmdb_id, 'Unknown')}",
+                f"IMDb ID: {_value(data.imdb_id, 'Pending')}",
+                f"Theatrical Release Date: {_value(data.release_date, 'Unknown')}",
+                f"OTT Platform: {_value(data.ott_platform, 'Researching')}",
+                f"OTT Release Date: {_value(data.ott_release_date, 'Researching')}",
                 f"Requester Email: {_value(item.email)}",
                 f"Requester WhatsApp / Phone: {_value(item.whatsapp_phone)}",
                 f"Comments: {_value(item.details, limit=420)}",
                 f"Request Time: {_value(item.created_at, 'Unknown')}",
-                f"Request Status: {_value(item.status, 'Unknown')}",
-                f"Local Movie ID: {_value(item.local_movie_id, 'Pending')}",
+                f"Request Status: {_value(data.status, 'Unknown')}",
+                f"Already in library: {'Yes' if data.already_in_library else 'No'}",
+                f"Local Movie ID: {_value(data.movie_id, 'Pending')}",
+                f"Movie URL: {_value(data.movie_url)}",
+                f"Poster: {_value(data.poster_url)}",
                 f"Admin URL: {settings.SITE_URL.rstrip('/')}/admin/requests/{item.request_id}",
             ]
         )
@@ -203,6 +190,15 @@ class RequestDiscordService:
         )
         return self.enqueue(record)
 
+    def schedule_completion(self, item: MovieRequest) -> RequestNotificationDelivery:
+        record = self.create(
+            request_id=item.request_id,
+            request_kind="MOVIE_REQUEST",
+            notification_type="MOVIE_REQUEST_COMPLETED",
+            event_key="ADMIN_COMPLETION",
+        )
+        return self.enqueue(record)
+
     def schedule_admin_resend(
         self, item: MovieRequest | ContactRequest
     ) -> RequestNotificationDelivery:
@@ -237,7 +233,11 @@ class RequestDiscordService:
             self.db.commit()
             return {"status": record.status, "delivery_id": record.id}
         message = (
-            self.movie_message(item, update=record.notification_type == "MOVIE_REQUEST_OTT_UPDATE")
+            self.movie_message(
+                item,
+                update=record.notification_type == "MOVIE_REQUEST_OTT_UPDATE",
+                completion=record.notification_type == "MOVIE_REQUEST_COMPLETED",
+            )
             if record.request_kind == "MOVIE_REQUEST"
             else self.contact_message(item)
         )

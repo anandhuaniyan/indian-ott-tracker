@@ -3,6 +3,7 @@
 from datetime import date
 
 from app.services.tmdb.client import TMDbClient
+from app.services.languages import normalize_language_code
 
 
 class TMDbMovieService:
@@ -29,9 +30,32 @@ class TMDbMovieService:
             append_to_response="credits,external_ids,images,keywords,release_dates,alternative_titles,watch/providers,videos",
         )
 
-    def get_movie_videos(self, movie_id: int) -> dict:
-        """Fetch official-provider video metadata without a YouTube search API."""
-        return self.client.get(f"/movie/{movie_id}/videos")
+    @staticmethod
+    def _language_param(original_language: str | None) -> str | None:
+        """Map a movie's original language to the TMDB language query value."""
+        code = normalize_language_code(original_language)
+        if not code:
+            return None
+        # TMDB returns region-specific trailers only when the language-tag
+        # includes a region subtag for Indian languages (e.g. hi-IN, ta-IN).
+        # English-language movies use the standard en-US tag.
+        if code == "en":
+            return "en-US"
+        return f"{code}-IN"
+
+    def get_movie_videos(self, movie_id: int, original_language: str | None = None) -> dict:
+        """Fetch official-provider video metadata for the movie's language.
+
+        Without an explicit language parameter TMDB only returns English videos
+        for Indian regional films. Passing the movie's language with a region
+        tag (e.g. hi-IN, ta-IN) surfaces the original-language trailer/teaser.
+        """
+        params = {}
+        if original_language:
+            language = self._language_param(original_language)
+            if language:
+                params["language"] = language
+        return self.client.get(f"/movie/{movie_id}/videos", **params)
 
     def get_movie_external_ids(self, movie_id: int) -> dict:
         """Fetch only lawful external identifiers for a bounded recovery job."""
@@ -71,17 +95,37 @@ class TMDbMovieService:
         language: str,
         year: int,
         page: int = 1,
+        watch_region: str | None = None,
+        sort_by: str = "primary_release_date.desc",
+        minimum_vote_count: int = 0,
+        release_date_lte: date | None = None,
     ) -> dict:
         """Discover movies filtered by original language and primary release year."""
+        language = normalize_language_code(language) or language
+        market = (
+            {
+                "watch_region": watch_region,
+                "with_watch_monetization_types": "flatrate|free|ads|rent|buy",
+            }
+            if watch_region
+            else {}
+        )
         return self.client.get(
             "/discover/movie",
             **{
                 "with_original_language": language,
                 "primary_release_year": year,
-                "sort_by": "primary_release_date.desc",
+                "sort_by": sort_by,
                 "include_adult": False,
                 "include_video": False,
+                "vote_count.gte": max(0, minimum_vote_count),
                 "page": page,
+                **(
+                    {"primary_release_date.lte": release_date_lte.isoformat()}
+                    if release_date_lte
+                    else {}
+                ),
+                **market,
             },
         )
 
@@ -91,8 +135,19 @@ class TMDbMovieService:
         start_date: date,
         end_date: date,
         page: int = 1,
+        watch_region: str | None = None,
+        minimum_vote_count: int = 0,
     ) -> dict:
         """Discover movies in a bounded release window for one language."""
+        language = normalize_language_code(language) or language
+        market = (
+            {
+                "watch_region": watch_region,
+                "with_watch_monetization_types": "flatrate|free|ads|rent|buy",
+            }
+            if watch_region
+            else {}
+        )
         return self.client.get(
             "/discover/movie",
             **{
@@ -102,6 +157,8 @@ class TMDbMovieService:
                 "sort_by": "primary_release_date.desc",
                 "include_adult": False,
                 "include_video": False,
+                "vote_count.gte": max(0, minimum_vote_count),
                 "page": page,
+                **market,
             },
         )

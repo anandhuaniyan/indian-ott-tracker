@@ -20,7 +20,7 @@ Provider-specific code lives under `app/services/ott/providers/` and emits `Norm
 - OTTplay discovery remains opt-in through an operator-authorized JSON adapter. The application does not bypass robots, authentication, CAPTCHA, or anti-bot controls. Matched and unmatched discoveries remain durable in `ott_source_releases`.
 - Official platform/studio/distributor, reputable-news, targeted Tavily, and manual adapters normalize inspected evidence. Search snippets are discovery leads, not automatically verified facts. Tavily remains tightly budgeted and is never run across the full catalogue.
 
-The cheapest-first per-movie order is cache, TMDB/JustWatch, Streaming Availability, then optional Watchmode. Daily OTTplay discovery and the existing targeted research queue run as separate bounded jobs. One provider’s timeout, 403, 429, exhausted quota, or outage is never translated into `NOT_FOUND` and does not stop the remaining providers.
+The cheapest-first per-movie order is cache, TMDB/JustWatch, Streaming Availability, then optional Watchmode. The resumable catalogue audit processes at most 100 movies per batch, records per-movie checkpoints and provider observations, and follows the explicit year/language priority. Daily OTTplay discovery and the existing targeted research queue run as separate bounded jobs. One provider’s timeout, 403, 429, exhausted quota, or outage is never translated into `NOT_FOUND` and does not stop the remaining providers.
 
 ## Identity and reconciliation
 
@@ -40,7 +40,7 @@ Release-day monitoring preserves an announced date when a provider is temporaril
 
 ## Gold set and phased rollout
 
-Migration `a6b7c8d9e0f1` adds the accuracy engine. The first live gold set contains 100 existing movies: 20 each in Malayalam, Tamil, Telugu, Hindi, and Kannada, sampled across upcoming, recent, old, platform-only, no-OTT, and popular candidates. Generation never invents expected values. Administrators must fill trusted expected platform/date/state/source values and mark each case verified.
+Migration `a6b7c8d9e0f1` adds the accuracy engine. The accuracy gold set covers every featured original language: Malayalam, Tamil, Telugu, Hindi, Kannada, English, Korean, Japanese, Chinese, Spanish and French. Each language is sampled across upcoming, recent, old, platform-only, no-OTT, and popular candidates. Generation never invents expected values. Administrators must fill trusted expected platform/date/state/source values and mark each case verified.
 
 The evaluator reports platform precision, date precision, and false dates. The gate requires all 100 cases, at least 95% measured platform precision, at least 98% measured date precision, and zero false published dates. `OTT_INTELLIGENCE_AUTO_PUBLICATION_ENABLED` defaults to `false`; a passing report does not silently change configuration. Production publication is an explicit operator decision after licensing and manual gold-set review.
 
@@ -48,7 +48,7 @@ Only then should operators enable phased work: 0–90 days, 91–180 days, 181�
 
 ## Admin workflow
 
-Admin `/admin/ott-research` is the OTT command center. It reports canonical states, source coverage, provider budgets/health, source agreement, language coverage, conflicts, observations, immutable decisions, health score, and the reason behind each selection. It can run bounded daily/weekly collection or refresh one movie. `/admin/ott-gold-set` generates, filters, edits, and evaluates manual ground truth. Existing Sources pages retain unmatched OTTplay/authorized-feed mapping. Manual verification accepts a platform-only fact when the true date is unknown.
+Admin `/admin/ott-research` is the OTT command center. It reports total, complete, missing-platform, missing-date, platform-known/date-unknown, needs-review, no-verified-result, researched and never-checked counts, with real language/year percentages. It also reports canonical states, source coverage, provider budgets/health, source agreement, conflicts, observations, immutable decisions, health score, and the reason behind each selection. It can run bounded daily/weekly collection or refresh one movie. `/admin/ott-gold-set` generates, filters, edits, and evaluates manual ground truth. Existing Sources pages retain unmatched OTTplay/authorized-feed mapping. Manual verification accepts a platform-only fact when the true date is unknown.
 
 `/admin/research-history` is the cross-provider audit view for both manual and scheduled runs. A full run preserves the existing order: TMDB enrichment, targeted OMDb lookup, configured India OTT provider collection, lawful web research/evidence, canonical reconciliation, targeted data-health refresh, and notifications. Each `OttEvidence` row created by a run retains `research_run_id`, so the detail view can distinguish supporting, rejected/conflicting, and observed evidence. Manually locked canonical values retain authority; an automatic run cannot silently replace stronger administrator evidence.
 

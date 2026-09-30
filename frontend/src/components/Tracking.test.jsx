@@ -15,7 +15,7 @@ describe("GA command transport", () => {
     document.getElementById("ga-gtag-script")?.remove();
   });
   afterEach(() => { cleanup(); vi.unstubAllEnvs(); });
-  const mount = () => render(<MemoryRouter><Tracking /><Link to="/discover">Discover</Link></MemoryRouter>);
+  const mount = (path = "/") => render(<MemoryRouter initialEntries={[path]}><Tracking /><Link to="/discover">Discover</Link></MemoryRouter>);
 
   it("uses Google's Arguments command format, with consent before config", () => {
     mount();
@@ -73,5 +73,15 @@ describe("GA command transport", () => {
     expect(window.adsbygoogle.requestNonPersonalizedAds).toBe(1);
     expect(commands().filter(item=>item[0]==="consent").at(-1)[2].ad_personalization).toBe("denied");
     scripts[0].remove();
+  });
+
+  it("does not load AdSense or emit a page view on private token routes", () => {
+    vi.stubEnv("VITE_ADSENSE_CLIENT_ID", "ca-pub-1234567890123456");
+    localStorage.setItem("ott-consent", JSON.stringify({ necessary: true, analytics: true, advertising: true }));
+
+    mount("/verify-email?token=secret-token");
+
+    expect(document.getElementById("adsense-script")).toBeNull();
+    expect(commands().filter(item => item[1] === "page_view")).toHaveLength(0);
   });
 });

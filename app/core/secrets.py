@@ -26,9 +26,13 @@ def sanitize_error(value: object, *, limit: int = 2000) -> str:
         settings.TMDB_API_KEY,
         settings.TMDB_ACCESS_TOKEN,
         settings.IMDB_RATING_API_KEY,
+        *(k.strip() for k in (settings.OMDB_API_KEYS or "").split(",") if k.strip()),
         settings.OTT_SEARCH_API_KEY,
         settings.GOOGLE_SEARCH_API_KEY,
         settings.TAVILY_API_KEY,
+        settings.AI_RESEARCH_API_KEY,
+        settings.AI_RESEARCH_FALLBACK_API_KEY,
+        settings.AI_RESEARCH_DISCORD_WEBHOOK_URL,
         settings.OTTPLAY_API_KEY,
         settings.JUSTWATCH_API_KEY,
         settings.STREAMING_AVAILABILITY_API_KEY,
@@ -38,6 +42,8 @@ def sanitize_error(value: object, *, limit: int = 2000) -> str:
         settings.TELEGRAM_BOT_TOKEN,
         settings.DISCORD_WEBHOOK_URL,
         settings.DISCORD_BOT_SHARED_SECRET,
+        settings.DISCORD_MAINTENANCE_SHARED_SECRET,
+        settings.CLOUDFLARE_API_TOKEN,
     )
     for secret in known_secrets:
         if secret:

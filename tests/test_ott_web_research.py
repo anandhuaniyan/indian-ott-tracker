@@ -1,5 +1,7 @@
 from datetime import date, timedelta
 
+import httpx
+
 from app.models.movie import Movie
 from app.models.ott_availability import OttAvailability
 from app.services.ott.web_research import WebOttResearchService
@@ -11,9 +13,26 @@ class Search:
         return [{"url": "https://www.jiohotstar.com/watch/example", "title": movie.title}]
 
 
+def test_research_movie_isolates_temporary_search_failure(database):
+    class UnavailableSearch:
+        configured = True
+
+        def search(self, movie, **_):
+            request = httpx.Request("POST", "https://api.tavily.com/search")
+            response = httpx.Response(432, request=request)
+            raise httpx.HTTPStatusError("quota exhausted", request=request, response=response)
+
+    movie = database.query(Movie).filter_by(tmdb_id=101).one()
+    report = WebOttResearchService(database, provider=UnavailableSearch()).research_movie(movie.id)
+
+    assert report["status"] == "SOURCE_UNAVAILABLE"
+    assert report["temporary_failure"] is True
+    assert report["evidence_created"] == 0
+
+
 def test_web_research_publishes_only_explicit_official_date(database, monkeypatch):
     movie = database.query(Movie).filter_by(tmdb_id=101).one()
-    movie.release_date = date.today() - timedelta(days=45)
+    movie.release_date = date.today().replace(day=1) - timedelta(days=10)
     database.query(OttAvailability).filter_by(movie_id=movie.id).delete()
     database.commit()
     monkeypatch.setattr(
@@ -27,14 +46,14 @@ def test_web_research_publishes_only_explicit_official_date(database, monkeypatc
     )
     report = WebOttResearchService(database, provider=Search()).run(limit=5)
     row = database.query(OttAvailability).filter_by(movie_id=movie.id, provider="JioHotstar").one()
-    assert report["evidence_created"] == 1
+    assert report["evidence_created"] >= 1
     assert row.ott_release_date == date(2026, 8, 25)
     assert row.verification_status == "CONFIRMED"
 
 
 def test_web_research_never_maps_article_date_to_ott_date(database, monkeypatch):
     movie = database.query(Movie).filter_by(tmdb_id=101).one()
-    movie.release_date = date.today() - timedelta(days=45)
+    movie.release_date = date.today().replace(day=1) - timedelta(days=10)
     database.query(OttAvailability).filter_by(movie_id=movie.id).delete()
     database.commit()
     monkeypatch.setattr(

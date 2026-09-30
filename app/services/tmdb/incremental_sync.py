@@ -4,6 +4,7 @@ from app.database.session import SessionLocal
 from app.models.movie import Movie
 from app.services.tmdb.movie_service import TMDbMovieService
 from app.services.trailers import TrailerService
+from app.services.languages import normalize_language_code
 
 
 class IncrementalTMDbSync:
@@ -54,7 +55,9 @@ class IncrementalTMDbSync:
                         movie.popularity = details.get("popularity")
                         movie.vote_average = details.get("vote_average")
                         movie.vote_count = details.get("vote_count")
-                        movie.original_language = details.get("original_language")
+                        movie.original_language = normalize_language_code(
+                            details.get("original_language")
+                        )
                         movie.adult = details.get("adult", False)
 
                         TrailerService(db).upsert(movie, details.get("videos", {}))
@@ -75,7 +78,9 @@ class IncrementalTMDbSync:
                         popularity=details.get("popularity"),
                         vote_average=details.get("vote_average"),
                         vote_count=details.get("vote_count"),
-                        original_language=details.get("original_language"),
+                        original_language=normalize_language_code(
+                            details.get("original_language")
+                        ),
                         adult=details.get("adult", False),
                     )
                     db.add(movie)

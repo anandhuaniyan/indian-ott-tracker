@@ -11,6 +11,7 @@ from app.models.operations import (
 )
 from app.services.request_discord import DiscordDeliveryError, RequestDiscordService
 from app.services.contact_requests import (
+    ADMIN_NOTIFICATION_TYPE,
     ContactEmailDeliveryError,
     ContactRequestNotificationService,
 )
@@ -214,3 +215,69 @@ def test_contact_email_failure_is_safe_and_recoverable(database, monkeypatch):
     )
     assert service.recover() == [record.id]
     assert queued == [("notifications.contact_request_email", [record.id])]
+
+
+def test_admin_notification_email_is_delivered_to_admin(database, monkeypatch):
+    item = ContactRequest(
+        request_id="WEB-ADMIN",
+        request_type="INCORRECT_OTT",
+        name="Viewer",
+        email="viewer@example.test",
+        whatsapp="+65 8000 0000",
+        comment="The OTT platform is actually JioHotstar.",
+        movie_name="Sample Movie",
+        expected_ott_platform="JioHotstar",
+        status="NEW",
+    )
+    database.add(item)
+    database.commit()
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp.example.test")
+    monkeypatch.setattr(settings, "SMTP_FROM", "noreply@example.test")
+    monkeypatch.setattr(settings, "ADMIN_NOTIFICATION_EMAIL", "admin@example.test")
+    queued = []
+    monkeypatch.setattr(
+        "app.workers.celery_app.celery_app.send_task",
+        lambda name, args=None, **_kwargs: queued.append((name, args)),
+    )
+    sent = []
+    monkeypatch.setattr(
+        ContactRequestNotificationService,
+        "_deliver_message",
+        staticmethod(lambda message: sent.append(message)),
+    )
+    service = ContactRequestNotificationService(database)
+    record = service.schedule_admin_email(item)
+    assert record is not None
+    assert record.notification_type == ADMIN_NOTIFICATION_TYPE
+    assert queued[0] == ("notifications.contact_request_email", [record.id])
+    assert service.deliver(record.id)["status"] == "SENT"
+    assert len(sent) == 1
+    message = sent[0]
+    assert message["To"] == "admin@example.test"
+    assert message["Reply-To"] == "viewer@example.test"
+    plain_body = message.get_body(preferencelist=("plain",)).get_content()
+    assert "New Contact Request" in message["Subject"]
+    assert "Incorrect OTT Information" in message["Subject"]
+    assert "WEB-ADMIN" in plain_body
+    assert "viewer@example.test" in plain_body
+
+
+def test_admin_notification_email_skipped_when_unconfigured(database, monkeypatch):
+    monkeypatch.setattr(settings, "ADMIN_NOTIFICATION_EMAIL", "")
+    item = ContactRequest(
+        request_id="WEB-ADMIN-OFF",
+        request_type="OTHER",
+        email="viewer@example.test",
+        comment="Nothing configured.",
+        status="NEW",
+    )
+    database.add(item)
+    database.commit()
+    service = ContactRequestNotificationService(database)
+    assert service.schedule_admin_email(item) is None
+    assert (
+        database.query(RequestNotificationDelivery)
+        .filter_by(request_id="WEB-ADMIN-OFF", notification_type=ADMIN_NOTIFICATION_TYPE)
+        .count()
+        == 0
+    )

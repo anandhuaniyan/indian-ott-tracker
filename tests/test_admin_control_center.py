@@ -57,7 +57,19 @@ def test_admin_control_center_endpoints_and_request_detail(database, monkeypatch
             "alerts",
             "recent_activity",
             "sources",
+            "language_health",
         } <= set(dashboard.json())
+        assert dashboard.json()["language_health"]["by_language"][0] == {
+            "code": "ml",
+            "language": "Malayalam",
+            "total": 2,
+            "correct": 2,
+            "mismatch": 0,
+            "unknown": 0,
+        }
+        language_health = client.get("/api/v1/admin/language-health")
+        assert language_health.status_code == 200
+        assert language_health.json()["language_mismatch_count"] == 0
         listing = client.get("/api/v1/admin/requests?email_status=FAILED&local=exists")
         assert listing.status_code == 200
         assert listing.json()["counters"]["ALL"] == 1

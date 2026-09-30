@@ -126,6 +126,17 @@ class OTTIntelligenceService:
             return None
         item.movie_match_confidence = max(item.movie_match_confidence, match.confidence)
         service = OttResearchService(self.db, settings.OTT_CONFIRMATION_THRESHOLD)
+        # India watch-provider observations can safely publish the platform
+        # relationship independently of an OTT premiere date. The global
+        # accuracy gate continues to protect date publication, and this path
+        # never turns a TMDB digital date into a streaming date.
+        publish_platform_only = (
+            item.fact_type == "AVAILABILITY"
+            and item.source_type in {"JUSTWATCH_TMDB", "STREAMING_AVAILABILITY", "WATCHMODE"}
+            and bool(item.platform_candidate)
+            and item.platform_confidence >= 75
+            and item.release_date_candidate is None
+        )
         evidence = service.record_evidence(
             movie.id,
             platform=item.platform_candidate,
@@ -146,7 +157,10 @@ class OTTIntelligenceService:
             date_confidence=item.date_confidence,
             verification_method=item.verification_method,
             observed_at=item.observed_at,
-            allow_publication=settings.OTT_INTELLIGENCE_AUTO_PUBLICATION_ENABLED,
+            allow_publication=(
+                settings.OTT_INTELLIGENCE_AUTO_PUBLICATION_ENABLED
+                or publish_platform_only
+            ),
             research_run_id=research_run_id,
         )
         self._observe(movie.id, item, evidence.id)

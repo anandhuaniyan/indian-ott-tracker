@@ -17,6 +17,12 @@ from app.models.movie import Movie
 from app.models.movie_metadata import ExternalId
 from app.models.operations import OperationState, OttSourceRelease
 from app.services.movie_metadata_service import MovieMetadataService
+from app.services.languages import (
+    LANGUAGE_CONFIG,
+    SUPPORTED_PRIMARY_LANGUAGE_CODES,
+    SUPPORTED_PRIMARY_LANGUAGE_NAMES,
+    normalize_language_code,
+)
 from app.services.notification_service import NotificationService
 from app.services.operations import OttResearchService
 from app.services.ott_source_sync import OttSourceSyncService
@@ -24,13 +30,15 @@ from app.services.release_status import ReleaseStatusService
 from app.services.tmdb.movie_service import TMDbMovieService
 
 
-LANGUAGES = ("ml", "ta", "te", "hi", "kn")
-LANGUAGE_NAMES = {
-    "ml": "Malayalam",
-    "ta": "Tamil",
-    "te": "Telugu",
-    "hi": "Hindi",
-    "kn": "Kannada",
+LANGUAGES = SUPPORTED_PRIMARY_LANGUAGE_CODES
+_DAILY_LANGUAGE_PRIORITY = ("ml", "ta", "te", "hi", "kn", "en", "ko", "ja")
+_ENABLED_LANGUAGE_CODES = {item.code for item in LANGUAGE_CONFIG if item.enabled}
+UPCOMING_LANGUAGES = tuple(
+    code for code in _DAILY_LANGUAGE_PRIORITY if code in _ENABLED_LANGUAGE_CODES
+)
+LANGUAGE_NAMES = SUPPORTED_PRIMARY_LANGUAGE_NAMES
+INTERNATIONAL_MINIMUM_VOTES = {
+    "en": 20, "ko": 5, "ja": 5, "zh": 5, "es": 5, "fr": 5,
 }
 
 
@@ -70,16 +78,25 @@ class MovieDiscoveryService:
 
     operation = "movies.discovery"
 
-    def __init__(self, db: Session, tmdb: TMDbMovieService | None = None):
+    def __init__(
+        self,
+        db: Session,
+        tmdb: TMDbMovieService | None = None,
+        *,
+        enqueue_imports: bool = True,
+        cache_artwork: bool = True,
+    ):
         self.db = db
         self.tmdb = tmdb or TMDbMovieService()
+        self.enqueue_imports = enqueue_imports
+        self.cache_artwork = cache_artwork
 
     def run_regular(self, now: datetime | None = None, *, trigger_type: str = "AUTOMATED_SCHEDULE", initiated_by: str = "celery:beat", research_run_id: str | None = None) -> dict:
         now = now or datetime.now(timezone.utc)
         local_today = now.astimezone(_site_timezone()).date()
         return self.run(
-            window_start=local_today - timedelta(days=settings.MOVIE_DISCOVERY_REGULAR_PAST_DAYS),
-            window_end=local_today + timedelta(days=settings.MOVIE_DISCOVERY_REGULAR_FUTURE_DAYS),
+            window_start=date(local_today.year, 1, 1),
+            window_end=date(local_today.year + 2, 12, 31),
             run_type="REGULAR",
             now=now,
             trigger_type=trigger_type,
@@ -113,6 +130,7 @@ class MovieDiscoveryService:
     ) -> dict:
         now = now or datetime.now(timezone.utc)
         local_hour = now.astimezone(_site_timezone()).hour
+        languages = UPCOMING_LANGUAGES if run_type == "REGULAR" else LANGUAGES
         # Scheduled jobs normally begin at exactly 08:00 or 20:00. A small
         # window tolerates worker delays without mislabelling an operator's
         # daytime manual run as the evening schedule.
@@ -124,7 +142,7 @@ class MovieDiscoveryService:
             started_at=now,
             window_start=window_start,
             window_end=window_end,
-            languages=list(LANGUAGES),
+            languages=list(languages),
             language_stats={},
             source_stats={},
             trigger_type=trigger_type,
@@ -138,9 +156,14 @@ class MovieDiscoveryService:
 
         language_stats: dict[str, dict] = {}
         failures: list[str] = []
-        for language in LANGUAGES:
+        for language in languages:
             try:
-                language_stats[language] = self._scan_language(
+                scan = (
+                    self._scan_upcoming_language
+                    if run_type == "REGULAR"
+                    else self._scan_language
+                )
+                language_stats[language] = scan(
                     run.id, language, window_start, window_end
                 )
             except Exception as exc:
@@ -185,7 +208,7 @@ class MovieDiscoveryService:
             self._notify_failure(run)
         return self.serialize_run(run)
 
-    def _scan_language(
+    def _scan_upcoming_language(
         self, run_id: int, language: str, window_start: date, window_end: date
     ) -> dict:
         stats = {
@@ -199,12 +222,113 @@ class MovieDiscoveryService:
             "failed": 0,
         }
         seen: set[int] = set()
-        max_pages = settings.MOVIE_DISCOVERY_MAX_PAGES_PER_LANGUAGE
+        for year in range(window_start.year, window_end.year + 1):
+            state_name = f"movies.discovery.upcoming.{year}.{language}"
+            state = self.db.query(OperationState).filter_by(name=state_name).first()
+            if not state:
+                state = OperationState(
+                    name=state_name,
+                    cursor=2,
+                    status="IDLE",
+                    details={"year": year, "language": language},
+                )
+                self.db.add(state)
+                self.db.commit()
+            continuation_page = max(2, int(state.cursor or 2))
+            pages = [1, continuation_page]
+            if continuation_page == 1:
+                pages = [1]
+            total_pages = 1
+            processed_pages = 0
+            for page in pages[: max(1, settings.MOVIE_DISCOVERY_REGULAR_PAGES_PER_YEAR)]:
+                if page > total_pages and processed_pages:
+                    break
+                year_start = max(window_start, date(year, 1, 1))
+                year_end = min(window_end, date(year, 12, 31))
+                try:
+                    payload = self.tmdb.discover_movies_by_language_and_date_range(
+                        language,
+                        year_start,
+                        year_end,
+                        page=page,
+                        # Upcoming regional films frequently have no votes yet.
+                        watch_region=None,
+                        minimum_vote_count=0,
+                    )
+                except Exception as exc:
+                    state.status = "FAILED"
+                    state.last_failure_at = datetime.now(timezone.utc)
+                    state.last_error = sanitize_error(exc)
+                    self.db.commit()
+                    stats["status"] = "FAILED"
+                    stats["failed"] += 1
+                    stats["error"] = sanitize_error(exc)
+                    return stats
+                processed_pages += 1
+                stats["pages"] += 1
+                items = payload.get("results") or []
+                total_pages = min(int(payload.get("total_pages") or 1), 500)
+                for item in items:
+                    tmdb_id = item.get("id")
+                    if not isinstance(tmdb_id, int) or tmdb_id in seen:
+                        continue
+                    seen.add(tmdb_id)
+                    result = self._process_tmdb_candidate(run_id, language, item, year=year)
+                    stats["discovered"] += 1
+                    key = {
+                        "EXISTING": "existing",
+                        "IMPORTED": "imported",
+                        "NEEDS_REVIEW": "needs_review",
+                        "FAILED": "failed",
+                    }.get(result)
+                    if key:
+                        stats[key] += 1
+                next_page = continuation_page + 1
+                if continuation_page >= total_pages:
+                    next_page = 2
+                state.cursor = next_page
+                state.processed_count = int(state.processed_count or 0) + len(items)
+                state.total_count = total_pages * 20
+                state.status = "COMPLETE" if total_pages <= 1 else "PAUSED"
+                state.last_success_at = datetime.now(timezone.utc)
+                state.last_error = None
+                state.details = {
+                    "year": year,
+                    "language": language,
+                    "head_page_checked": True,
+                    "next_continuation_page": next_page,
+                    "total_pages": total_pages,
+                }
+                self.db.commit()
+        if stats["failed"]:
+            stats["status"] = "PARTIAL"
+        return stats
+
+    def _scan_language(
+        self, run_id: int, language: str, window_start: date, window_end: date
+    ) -> dict:
+        """Preserve the established manual/weekly date-range discovery path."""
+        stats = {
+            "language": LANGUAGE_NAMES[language],
+            "status": "COMPLETE",
+            "pages": 0,
+            "discovered": 0,
+            "existing": 0,
+            "imported": 0,
+            "needs_review": 0,
+            "failed": 0,
+        }
+        seen: set[int] = set()
         page = 1
-        while page <= max_pages:
+        while page <= settings.MOVIE_DISCOVERY_MAX_PAGES_PER_LANGUAGE:
             try:
                 payload = self.tmdb.discover_movies_by_language_and_date_range(
-                    language, window_start, window_end, page=page
+                    language,
+                    window_start,
+                    window_end,
+                    page=page,
+                    watch_region=None,
+                    minimum_vote_count=INTERNATIONAL_MINIMUM_VOTES.get(language, 0),
                 )
             except Exception as exc:
                 stats["status"] = "FAILED"
@@ -228,7 +352,10 @@ class MovieDiscoveryService:
                 }.get(result)
                 if key:
                     stats[key] += 1
-            total_pages = min(int(payload.get("total_pages") or page), max_pages)
+            total_pages = min(
+                int(payload.get("total_pages") or page),
+                settings.MOVIE_DISCOVERY_MAX_PAGES_PER_LANGUAGE,
+            )
             if not items or page >= total_pages:
                 break
             page += 1
@@ -236,7 +363,9 @@ class MovieDiscoveryService:
             stats["status"] = "PARTIAL"
         return stats
 
-    def _process_tmdb_candidate(self, run_id: int, language: str, item: dict) -> str:
+    def _process_tmdb_candidate(
+        self, run_id: int, language: str, item: dict, *, year: int | None = None
+    ) -> str:
         now = datetime.now(timezone.utc)
         tmdb_id = int(item["id"])
         candidate = self._candidate(
@@ -252,18 +381,35 @@ class MovieDiscoveryService:
         )
         if candidate.status in {"IGNORED", "DUPLICATE", "WRONG_LANGUAGE", "TV_SERIES"}:
             return "FILTERED"
-        if candidate.status == "EXISTING" and candidate.matched_movie_id:
-            return "EXISTING"
         existing = self.db.query(Movie).filter_by(tmdb_id=tmdb_id).first()
         if existing:
+            self._refresh_existing_upcoming(existing, item, language)
             self._mark(candidate, "EXISTING", existing.id, 100, "TMDB ID")
             return "EXISTING"
         try:
             details = self.tmdb.get_rich_movie_details(tmdb_id)
-            if details.get("adult"):
-                self._mark(candidate, "FILTERED", None, 100, "Adult title excluded")
+            candidate_year = year or (
+                candidate.release_date.year if candidate.release_date else None
+            )
+            rejection = self._upcoming_rejection_reason(
+                details, language, candidate_year, item,
+            )
+            if rejection:
+                self._mark(candidate, "FILTERED", None, 100, rejection)
                 return "FILTERED"
-            actual_language = str(details.get("original_language") or language).lower()
+            actual_language = normalize_language_code(
+                details.get("original_language") or language
+            )
+            if actual_language != language:
+                candidate.language = actual_language
+                self._mark(
+                    candidate,
+                    "WRONG_LANGUAGE",
+                    None,
+                    100,
+                    f"TMDB original language is {actual_language}, not {language}",
+                )
+                return "FILTERED"
             candidate.language = actual_language
             candidate.title = str(details.get("title") or candidate.title)
             candidate.original_title = details.get("original_title") or candidate.original_title
@@ -306,13 +452,16 @@ class MovieDiscoveryService:
             )
             self.db.add(movie)
             self.db.flush()
-            MovieMetadataService(self.db).enrich_movie(movie, payload=details)
+            MovieMetadataService(
+                self.db, cache_artwork=self.cache_artwork
+            ).enrich_movie(movie, payload=details)
             ReleaseStatusService(self.db).classify_movie(movie)
             OttResearchService(self.db, settings.OTT_CONFIRMATION_THRESHOLD).queue_movie(movie.id)
             self.db.commit()
             candidate = self.db.get(MovieDiscoveryCandidate, candidate.id)
             self._mark(candidate, "IMPORTED", movie.id, 100, "New TMDB movie identity")
-            self._enqueue_enrichment(movie.id)
+            if self.enqueue_imports:
+                self._enqueue_enrichment(movie.id)
             return "IMPORTED"
         except Exception as exc:
             self.db.rollback()
@@ -325,6 +474,67 @@ class MovieDiscoveryService:
             candidate.last_error = sanitize_error(exc)
             self.db.commit()
             return "FAILED"
+
+    @staticmethod
+    def _upcoming_rejection_reason(
+        details: dict, language: str, year: int | None, discover_item: dict
+    ) -> str | None:
+        release_date = _parse_date(details.get("release_date")) or _parse_date(
+            discover_item.get("release_date")
+        )
+        actual_language = normalize_language_code(details.get("original_language"))
+        runtime = details.get("runtime")
+        if not details.get("id") or not (
+            details.get("title") or details.get("original_title")
+        ):
+            return "Invalid TMDB movie metadata"
+        if details.get("adult"):
+            return "Adult title excluded"
+        if details.get("video"):
+            return "Video entry excluded"
+        if actual_language != language:
+            return f"TMDB original language is {actual_language}, not {language}"
+        if release_date and year and release_date.year != year:
+            return "Release date is outside the discovery year"
+        if isinstance(runtime, int) and 0 < runtime < 40:
+            return "Short runtime excluded"
+        if not release_date and str(details.get("status") or "").casefold() not in {
+            "planned", "in production", "post production"
+        }:
+            return "Incomplete release metadata"
+        return None
+
+    def _refresh_existing_upcoming(
+        self, movie: Movie, discover_item: dict, language: str
+    ) -> None:
+        discover_date = _parse_date(discover_item.get("release_date"))
+        title_changed = bool(
+            discover_item.get("title")
+            and discover_item.get("title") != movie.title
+        )
+        date_changed = bool(discover_date and discover_date != movie.release_date)
+        missing_core_artwork = bool(
+            (not movie.poster_path and discover_item.get("poster_path"))
+            or (not movie.backdrop_path and discover_item.get("backdrop_path"))
+        )
+        if not (title_changed or date_changed or missing_core_artwork):
+            if discover_item.get("popularity") is not None:
+                movie.popularity = discover_item["popularity"]
+                self.db.commit()
+            return
+        details = self.tmdb.get_rich_movie_details(movie.tmdb_id)
+        if details.get("adult") or details.get("video"):
+            return
+        if normalize_language_code(details.get("original_language")) != language:
+            return
+        payload = dict(details)
+        if not _parse_date(payload.get("release_date")) and discover_date:
+            payload["release_date"] = discover_date.isoformat()
+        MovieMetadataService(
+            self.db, cache_artwork=False, include_ott=False
+        ).enrich_movie(movie, payload=payload)
+        ReleaseStatusService(self.db).classify_movie(movie)
+        self.db.commit()
 
     def _title_identity_match(self, candidate: MovieDiscoveryCandidate) -> Movie | None:
         if not candidate.release_date or not candidate.language:

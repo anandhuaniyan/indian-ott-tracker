@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation, useParams, useSearchParams } from "react-router-dom";
-import { get, imageUrl, post } from "../services/api";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { authenticatedPut, get, imageUrl, post, userGet } from "../services/api";
 import { Card, Failure, Loading } from "../components/ui";
 import Seo, { breadcrumbJsonLd } from "../components/Seo";
 import AdSlot from "../components/AdSlot";
 import analytics from "../services/analytics";
-import { COMMON_LANGUAGE_OPTIONS, languageName } from "../services/languages";
+import { languageName } from "../services/languages";
+import LanguageTabs from "../components/LanguageTabs";
 
 const SORTS = [
   ["latest", "Latest"],
@@ -57,7 +58,6 @@ const useData = (path) => {
   const [revision, setRevision] = useState(0);
   useEffect(() => {
     let current = true;
-    setData(undefined);
     setError(undefined);
     get(path)
       .then((value) => current && setData(value))
@@ -91,7 +91,10 @@ const sectionListingUrl = (section, filters = {}) => {
   });
   return `/discover?${query}`;
 };
-const Art = ({ path, alt, className = "", size = "w500" }) => (
+const languageParams = (value) => (
+  value && value !== "all" ? { language: value } : {}
+);
+const Art = ({ path, alt, className = "", size = "w500", hideOnError = false }) => (
   <img
     className={className}
     loading="lazy"
@@ -106,6 +109,12 @@ const Art = ({ path, alt, className = "", size = "w500" }) => (
     alt={alt}
     onError={(event) => {
       event.currentTarget.onerror = null;
+      event.currentTarget.removeAttribute("srcset");
+      event.currentTarget.alt = "";
+      if (hideOnError) {
+        event.currentTarget.hidden = true;
+        return;
+      }
       event.currentTarget.src = "/placeholder.svg";
     }}
   />
@@ -113,6 +122,54 @@ const Art = ({ path, alt, className = "", size = "w500" }) => (
 const Empty = ({ children = "No movies match these filters yet." }) => (
   <p className="empty">{children}</p>
 );
+
+const languageItems = (items = []) => items.map((item) => (
+  Array.isArray(item)
+    ? { code: item[0], name: item[1] }
+    : item
+));
+
+function LanguageDirectory({ groups }) {
+  const [region, setRegion] = useState("indian");
+  const selected = groups?.[region] || {
+    primary: [],
+    more: [],
+  };
+  const primary = languageItems(selected.primary);
+  const more = languageItems(selected.more);
+  return (
+    <section className="language-directory" aria-labelledby="language-directory-title">
+      <div className="section-title">
+        <h2 id="language-directory-title">Languages</h2>
+      </div>
+      <div className="language-region-tabs" role="tablist" aria-label="Language region">
+        {[["indian", "Indian"], ["international", "International"]].map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            role="tab"
+            aria-selected={region === value}
+            className={region === value ? "active" : ""}
+            onClick={() => setRegion(value)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="chips language-primary-links">
+        {primary.map((item) => <Link key={item.code} to={`/languages/${item.code}`}>{item.name}</Link>)}
+      </div>
+      {more.length > 0 && (
+        <div className="language-more">
+          <h3>More {region === "indian" ? "Indian" : "International"}</h3>
+          <div className="chips">
+            {more.map((item) => <Link key={item.code} to={`/languages/${item.code}`}>{item.name}</Link>)}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
 
 function Pager({ page, pages, onPage }) {
   if (!pages || pages < 2) return null;
@@ -132,12 +189,23 @@ function Pager({ page, pages, onPage }) {
 }
 
 export function Home() {
-  const [data, error, retry] = useData("/api/v1/home");
+  const [homeParams, setHomeParams] = useSearchParams();
+  const selectedLanguage = homeParams.get("language") || "all";
+  const homeQuery = new URLSearchParams(languageParams(selectedLanguage));
+  const [data, error, retry] = useData(
+    `/api/v1/home${homeQuery.size ? `?${homeQuery}` : ""}`,
+  );
+  const setLanguage = (value) => {
+    const next = new URLSearchParams(homeParams);
+    if (value && value !== "all") next.set("language", value);
+    else next.delete("language");
+    setHomeParams(next, { replace: true });
+  };
   const website = {
     "@context": "https://schema.org",
     "@type": "WebSite",
     name: "OTT Tracker",
-    alternateName: "Indian OTT Tracker",
+    description: "Discover movies from India and around the world across theaters and streaming platforms.",
     url: import.meta.env.VITE_SITE_URL || location.origin,
     potentialAction: {
       "@type": "SearchAction",
@@ -147,13 +215,14 @@ export function Home() {
   };
   return (
     <main>
-      <Seo title="OTT Tracker" jsonLd={website} />
+      <Seo title="OTT Tracker" description="Discover popular, upcoming and recently released movies across theaters and streaming platforms worldwide, with release dates, ratings, trailers and verified OTT availability." jsonLd={website} />
       <div className="hero">
-        <p>Indian cinema, all in one place</p>
-        <h1>Indian Movies &amp; OTT Releases</h1>
+        <p>Movies from India and around the world, all in one place</p>
+        <h1>Movies &amp; OTT Releases Worldwide</h1>
         <p>
-          Discover popular, upcoming and recently released Indian movies across
-          theatres and OTT platforms, with verified streaming availability.
+          Discover popular, upcoming and recently released movies across theaters
+          and streaming platforms worldwide, with release dates, ratings, trailers
+          and verified OTT availability.
         </p>
         <Link to="/discover">Explore movies</Link>
       </div>
@@ -170,32 +239,47 @@ export function Home() {
         </div>
       )}
       {!data ? (
-        !error && <p className="loading">Loading Indian cinema…</p>
+        !error && <p className="loading">Loading movies…</p>
       ) : (
         <>
+          <LanguageTabs
+            value={selectedLanguage}
+            languages={data.languages}
+            onChange={setLanguage}
+            className="homepage-language-filter"
+          />
           <Rail
             title="Popular"
             items={data.popular}
-            more={sectionListingUrl("popular", { sort: "popularity" })}
+            more={sectionListingUrl("popular", { sort: "popularity", ...languageParams(selectedLanguage) })}
           />
-          <Rail title="Latest theatrical" items={data.latest_theatrical} more={sectionListingUrl("latest-theatrical", { sort: "latest" })} />
-          <Rail title="Upcoming theatrical" items={data.upcoming_theatrical} more={sectionListingUrl("upcoming-theatrical", { sort: "oldest" })} />
-          <Rail title="Recently added" items={data.recently_added} more={sectionListingUrl("recently-added", { sort: "recently-added" })} />
+          <Rail title="Latest theatrical" items={data.latest_theatrical} more={sectionListingUrl("latest-theatrical", { sort: "latest", ...languageParams(selectedLanguage) })} />
+          <Rail title="Upcoming theatrical" items={data.upcoming_theatrical} more={sectionListingUrl("upcoming-theatrical", { sort: "oldest", ...languageParams(selectedLanguage) })} />
+          <Rail title="Recently added" items={data.recently_added} more={sectionListingUrl("recently-added", { sort: "recently-added", ...languageParams(selectedLanguage) })} />
+          <Rail title="Highest rated" items={data.highest_rated} more={sectionListingUrl("highest-rated", { sort: "highest-rated", ...languageParams(selectedLanguage) })} />
           <AdSlot slot={import.meta.env.VITE_ADSENSE_SLOT_ID} />
-          <Rail title="Upcoming OTT" items={data.upcoming_ott} more={sectionListingUrl("upcoming-ott", { sort: "ott-release" })} />
+          <Rail title="Upcoming OTT" items={data.upcoming_ott} more={sectionListingUrl("upcoming-ott", { sort: "ott-release", ...languageParams(selectedLanguage) })} />
           <Rail
             title="Recently released on OTT"
             items={data.recent_ott}
-            more={sectionListingUrl("recent-ott", { sort: "ott-release" })}
+            more={sectionListingUrl("recent-ott", { sort: "ott-release", ...languageParams(selectedLanguage) })}
           />
-          {Object.entries(data.language_sections || {}).map(([code, section]) => (
-            <Rail
-              key={code}
-              title={section.name}
-              items={section.items}
-              more={sectionListingUrl("language", { language: code, sort: "latest" })}
-            />
-          ))}
+          <section className="editorial-copy" aria-labelledby="what-is-otttracker">
+            <h2 id="what-is-otttracker">What is OTTTracker?</h2>
+            <p>OTTTracker follows theatrical and streaming releases across multiple languages, with strong coverage of Indian cinema and an expanding international catalogue. It records OTT platforms, release dates and lawful viewing links without hosting copyrighted movies.</p>
+            <p>Platform information and dates are treated separately: a service may be identified before a reliable streaming date is known. Release calendars and verification labels show what is confirmed, what is still being checked and when information was last reviewed.</p>
+          </section>
+          <section className="editorial-copy" aria-labelledby="how-we-verify">
+            <h2 id="how-we-verify">How OTTTracker verifies releases</h2>
+            <p>We compare platform records, release evidence and freshness signals, and preserve uncertainty when sources conflict. Confirmed records are rechecked because regional catalogues and dates can change.</p>
+            <Link to="/methodology">Read the full verification methodology</Link>
+          </section>
+          <section aria-labelledby="recently-verified">
+            <div className="section-title"><h2 id="recently-verified">Recently verified OTT information</h2><Link to="/ott">Browse OTT releases</Link></div>
+            <p>{data.verification_activity?.titles_updated || 0} titles updated in the last {data.verification_activity?.period_days || 7} days{data.verification_activity?.dates_confirmed ? ` · ${data.verification_activity.dates_confirmed} release dates confirmed` : ""}.</p>
+            {data.verification_activity?.titles?.length > 0 && <div className="rail">{data.verification_activity.titles.map(movie => <Card key={movie.id} movie={movie}/>)}</div>}
+          </section>
+          <LanguageDirectory groups={data.language_groups} />
           <section>
             <h2>Browse genres</h2>
             <div className="chips">
@@ -226,6 +310,7 @@ export function Home() {
 
 const initialFilters = {
   q: "",
+  language_region: "all",
   language: "",
   genre: "",
   year: "",
@@ -250,11 +335,22 @@ const SECTION_TITLES = {
   "latest-theatrical": "Latest theatrical releases",
   "upcoming-theatrical": "Upcoming theatrical releases",
   "recently-added": "Recently added movies",
+  "highest-rated": "Highest rated movies",
   "upcoming-ott": "Upcoming OTT releases",
   "recent-ott": "Recently released on OTT",
 };
 
 const FILTER_KEYS = Object.keys(initialFilters);
+
+function MissingMovieCandidates({ query, language }) {
+  const params = new URLSearchParams({ q: query, page: "1" });
+  if (language) params.set("language", language);
+  const [live, error] = useData(`/api/v1/deep-search/movies?${params}`);
+  if (error) return <p className="muted">Live movie lookup is temporarily unavailable.</p>;
+  if (!live) return <p className="muted">Checking live movie results…</p>;
+  if (!live.results?.length) return <p className="muted">No verified live movie candidates were found.</p>;
+  return <section className="search-live-fallback" aria-labelledby="live-movie-candidates"><h3 id="live-movie-candidates">Live movie candidates</h3><p>These titles are not in the local results. Open the live details first, or request the matching movie.</p><div className="search-live-list">{live.results.slice(0, 5).map(movie => { const request = new URLSearchParams({ movie_name: movie.title, movie_external_id: String(movie.id) }); if (movie.release_date) request.set("release_year", movie.release_date.slice(0, 4)); if (movie.original_language) request.set("language", movie.original_language); return <article key={movie.id}><span><strong>{movie.title}</strong>{movie.release_date && <small>{movie.release_date.slice(0, 4)}</small>}</span><div className="deep-actions"><Link className="button-link" to={`/deep-search/movie/${movie.id}`}>View live details</Link>{movie.local_movie_id ? <Link to={`/movies/${movie.local_movie_id}`}>Open Local Movie</Link> : <Link to={`/request-movie?${request}`}>Request Movie</Link>}</div></article>; })}</div></section>;
+}
 
 export function Discover({ modeTabs = null }) {
   const location = useLocation();
@@ -274,6 +370,7 @@ export function Discover({ modeTabs = null }) {
     [location.search],
   );
   const [filters, setFilters] = useState(initial);
+  useEffect(() => setFilters(initial), [initial]);
   const page = Math.max(1, Number(urlParams.get("page")) || 1);
   const query = useMemo(() => {
     const apiQuery = new URLSearchParams(
@@ -283,10 +380,20 @@ export function Discover({ modeTabs = null }) {
     apiQuery.set("page", String(page));
     return apiQuery.toString();
   }, [initial, page, section]);
+  const searchQuery = new URLSearchParams({
+    q: initial.q || "",
+    page: String(page),
+    language_region: initial.language_region || "all",
+    ...(initial.language
+      ? { language: initial.language }
+      : {}),
+  });
   const endpoint = isSearch
-    ? `/api/v1/search?q=${encodeURIComponent(filters.q || initial.q || "")}&page=${page}`
+    ? `/api/v1/search?${searchQuery}`
     : `/api/v1/discover?${query}`;
   const [data, error] = useData(endpoint);
+  const allLanguageItems = languageItems(data?.filters?.languages || []);
+  const selectedLanguage = filters.language || "all";
   const submit = (event) => {
     event.preventDefault();
     const next = new URLSearchParams(
@@ -312,6 +419,20 @@ export function Discover({ modeTabs = null }) {
       ...value,
       [event.target.name]: event.target.value,
     }));
+  const selectLanguage = (value) => {
+    const language = value === "all" ? "" : value;
+    setFilters((current) => ({
+      ...current,
+      language,
+      language_region: "all",
+    }));
+    const next = new URLSearchParams(urlParams);
+    if (language) next.set("language", language);
+    else next.delete("language");
+    next.delete("language_region");
+    next.delete("page");
+    setUrlParams(next, { replace: true });
+  };
   const selectGenre = (event) => {
     const genre = event.target.value;
     setFilters((current) => ({ ...current, genre }));
@@ -326,7 +447,7 @@ export function Discover({ modeTabs = null }) {
   const pageTitle = isSearch
     ? "Search movies and people"
     : section === "language"
-      ? `${languageName(initial.language)} movies`
+      ? `${allLanguageItems.find((item) => item.code === initial.language)?.name || languageName(initial.language)} movies`
       : SECTION_TITLES[section] || "Discover movies";
   const onPage = (nextPage) => {
     const next = new URLSearchParams(urlParams);
@@ -345,17 +466,14 @@ export function Discover({ modeTabs = null }) {
           placeholder={isSearch ? "Movie title or person name" : "Title, actor, director, writer or keyword"}
         />
       </label>
+      <LanguageTabs
+        value={selectedLanguage}
+        languages={allLanguageItems}
+        onChange={selectLanguage}
+        className="wide"
+      />
       {!isSearch && (
         <>
-          <label>
-            Language
-            <select name="language" value={filters.language} onChange={set}>
-              <option value="">All</option>
-              {(data?.filters?.languages?.map((item) => [item.code, item.name]) || COMMON_LANGUAGE_OPTIONS).map(([code, name]) => (
-                <option key={code} value={code}>{name}</option>
-              ))}
-            </select>
-          </label>
           <label>
             Genre
             <select name="genre" value={filters.genre} onChange={selectGenre}>
@@ -407,7 +525,7 @@ export function Discover({ modeTabs = null }) {
               ))}
             </div>
           ) : (
-            <Empty />
+            <><Empty />{isSearch && initial.q && <MissingMovieCandidates query={initial.q} language={initial.language} />}</>
           )}
           {isSearch && (
             <>
@@ -438,33 +556,65 @@ export function Discover({ modeTabs = null }) {
 
 export function Browse() {
   const { slug, code } = useParams();
-  const [sort, setSort] = useState("latest");
-  const [page, setPage] = useState(1);
-  const query = slug ? `genre=${slug}` : `language=${code}`;
+  const navigate = useNavigate();
+  const [browseParams, setBrowseParams] = useSearchParams();
+  const sort = browseParams.get("sort") || "latest";
+  const page = Math.max(1, Number(browseParams.get("page")) || 1);
+  const selectedLanguage = slug ? browseParams.get("language") || "all" : code;
+  const query = new URLSearchParams({
+    ...(slug ? { genre: slug, ...languageParams(selectedLanguage) } : { language: code }),
+    sort,
+    page: String(page),
+  });
   const [data, error] = useData(
-    `/api/v1/discover?${query}&sort=${sort}&page=${page}`,
+    `/api/v1/discover?${query}`,
   );
   if (error) return <Failure error={error} />;
+  const configuredLanguage = data?.filters?.languages?.find(
+    (item) => item.code === code,
+  );
+  const browseLanguageName = configuredLanguage?.name || languageName(code);
   const title = slug
     ? `${slug.replaceAll("-", " ")} movies`
-    : `${languageName(code)} movies`;
+    : `${browseLanguageName} movies`;
   return (
     <main>
       <Seo
         title={title}
+        description={slug
+          ? `Browse ${slug.replaceAll("-", " ")} movies, release information and verified India OTT availability.`
+          : `Browse ${browseLanguageName} movies, release information and verified India OTT availability.`}
+        noindex={Boolean(data && data.total === 0)}
         jsonLd={breadcrumbJsonLd([
           { name: "Home", path: "/" },
           { name: title, path: location.pathname },
         ])}
       />
       <h1 className="capitalize">{title}</h1>
+      <LanguageTabs
+        value={selectedLanguage}
+        languages={data?.filters?.languages}
+        onChange={(value) => {
+          if (!slug) {
+            navigate(value === "all" ? "/discover" : `/discover?language=${value}`);
+            return;
+          }
+          const next = new URLSearchParams(browseParams);
+          if (value !== "all") next.set("language", value);
+          else next.delete("language");
+          next.delete("page");
+          setBrowseParams(next, { replace: true });
+        }}
+      />
       <label>
         Sort{" "}
         <select
           value={sort}
           onChange={(event) => {
-            setSort(event.target.value);
-            setPage(1);
+            const next = new URLSearchParams(browseParams);
+            next.set("sort", event.target.value);
+            next.delete("page");
+            setBrowseParams(next, { replace: true });
           }}
         >
           {SORTS.map(([value, label]) => (
@@ -488,7 +638,12 @@ export function Browse() {
           ) : (
             <Empty />
           )}
-          <Pager page={page} pages={data.pages} onPage={setPage} />
+          <Pager page={page} pages={data.pages} onPage={(nextPage) => {
+            const next = new URLSearchParams(browseParams);
+            if (nextPage > 1) next.set("page", String(nextPage));
+            else next.delete("page");
+            setBrowseParams(next);
+          }} />
         </>
       )}
     </main>
@@ -496,7 +651,10 @@ export function Browse() {
 }
 
 export function Ott() {
-  const [data, error] = useData("/api/v1/ott");
+  const [ottParams, setOttParams] = useSearchParams();
+  const selectedLanguage = ottParams.get("language") || "all";
+  const query = new URLSearchParams(languageParams(selectedLanguage));
+  const [data, error] = useData(`/api/v1/ott${query.size ? `?${query}` : ""}`);
   if (error) return <Failure error={error} />;
   if (!data) return <Loading />;
   return (
@@ -513,6 +671,16 @@ export function Ott() {
         Confirmed and currently available streaming information from canonical
         records.
       </p>
+      <LanguageTabs
+        value={selectedLanguage}
+        languages={data.languages}
+        onChange={(value) => {
+          const next = new URLSearchParams(ottParams);
+          if (value !== "all") next.set("language", value);
+          else next.delete("language");
+          setOttParams(next, { replace: true });
+        }}
+      />
       <div className="platforms">
         {data.platforms.map((item) => (
           <Link key={item.slug} to={`/ott/${item.slug}`}>
@@ -531,10 +699,17 @@ export function Ott() {
 
 export function OttPlatform() {
   const { platform } = useParams();
-  const [sort, setSort] = useState("ott-release");
-  const [page, setPage] = useState(1);
+  const [platformParams, setPlatformParams] = useSearchParams();
+  const sort = platformParams.get("sort") || "ott-release";
+  const page = Math.max(1, Number(platformParams.get("page")) || 1);
+  const selectedLanguage = platformParams.get("language") || "all";
+  const query = new URLSearchParams({
+    sort,
+    page: String(page),
+    ...languageParams(selectedLanguage),
+  });
   const [data, error] = useData(
-    `/api/v1/ott/${platform}?sort=${sort}&page=${page}`,
+    `/api/v1/ott/${platform}?${query}`,
   );
   if (error) return <Failure error={error} />;
   if (!data) return <Loading />;
@@ -542,6 +717,8 @@ export function OttPlatform() {
     <main>
       <Seo
         title={`${data.platform} movies`}
+        description={`Browse ${data.platform} movies and OTT releases available across global and regional streaming markets.`}
+        canonicalPath={`/ott/${data.platform.toLowerCase().replaceAll(" ", "-")}`}
         jsonLd={breadcrumbJsonLd([
           { name: "Home", path: "/" },
           { name: "OTT", path: "/ott" },
@@ -549,11 +726,27 @@ export function OttPlatform() {
         ])}
       />
       <h1>{data.platform}</h1>
+      <LanguageTabs
+        value={selectedLanguage}
+        languages={data.languages}
+        onChange={(value) => {
+          const next = new URLSearchParams(platformParams);
+          if (value !== "all") next.set("language", value);
+          else next.delete("language");
+          next.delete("page");
+          setPlatformParams(next, { replace: true });
+        }}
+      />
       <Rail title="Upcoming" items={data.upcoming} />
       <Rail title="Recently released" items={data.recent} />
       <div className="section-title">
         <h2>Available</h2>
-        <select value={sort} onChange={(event) => setSort(event.target.value)}>
+        <select value={sort} onChange={(event) => {
+          const next = new URLSearchParams(platformParams);
+          next.set("sort", event.target.value);
+          next.delete("page");
+          setPlatformParams(next, { replace: true });
+        }}>
           {SORTS.map(([value, label]) => (
             <option key={value} value={value}>
               {label}
@@ -570,7 +763,12 @@ export function OttPlatform() {
       ) : (
         <Empty />
       )}
-      <Pager page={page} pages={data.pages} onPage={setPage} />
+      <Pager page={page} pages={data.pages} onPage={(nextPage) => {
+        const next = new URLSearchParams(platformParams);
+        if (nextPage > 1) next.set("page", String(nextPage));
+        else next.delete("page");
+        setPlatformParams(next);
+      }} />
     </main>
   );
 }
@@ -668,7 +866,7 @@ const TrailersSection = ({ videos, title }) => {
                 <span className="trailer-name">{item.name || `${title} ${videoLabel(item)}`}</span>
                 <small>
                   {videoLabel(item)}
-                  {item.language ? ` · ${languageName(item.language)}` : ""}
+                  {item.language ? ` · ${languageName(item.language, item.language_name)}` : ""}
                 </small>
               </span>
             </button>
@@ -697,7 +895,7 @@ const CommentsSection = ({ movieId }) => {
   const [message, setMessage] = useState();
   const load = (nextPage = 1) => {
     setError(undefined);
-    get(`/api/v1/movies/${movieId}/comments?page=${nextPage}&page_size=10`, { maxAge: 0 })
+    get(`/api/v1/movies/${movieId}/public-comments?page=${nextPage}&page_size=10`, { maxAge: 0 })
       .then((value) => {
         setData((current) => nextPage === 1 ? value : { ...value, items: [...(current?.items || []), ...value.items] });
         setPage(nextPage);
@@ -745,6 +943,84 @@ const CommentsSection = ({ movieId }) => {
       ) : <p className="empty">No comments yet. Be the first to comment.</p>}
     </section>
   );
+};
+
+const COMMUNITY_RATING_OPTIONS = Array.from({ length: 19 }, (_, index) => 1 + index * 0.5);
+
+const CommunityRating = ({ movieId, initial }) => {
+  const [summary, setSummary] = useState(initial || { average: null, count: 0 });
+  const [authenticated, setAuthenticated] = useState(false);
+  const [rating, setRating] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    let current = true;
+    userGet(`/api/v1/movies/${movieId}/community-rating/mine`)
+      .then((value) => {
+        if (!current) return;
+        setAuthenticated(true);
+        if (value?.rating != null) setRating(String(value.rating));
+      })
+      .catch(() => current && setAuthenticated(false));
+    return () => { current = false; };
+  }, [movieId]);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!rating) return;
+    setSaving(true);
+    setMessage("");
+    try {
+      const result = await authenticatedPut(`/api/v1/movies/${movieId}/community-rating`, {
+        rating: Number(rating),
+      });
+      setSummary({ average: result.average, count: result.count });
+      setRating(String(result.user_rating));
+      setMessage(result.created ? "Rating saved." : "Rating updated.");
+    } catch (error) {
+      if (error.status === 401) setAuthenticated(false);
+      setMessage(error.status === 401 ? "Log in to submit a rating." : error.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="community-rating" aria-labelledby="community-rating-title">
+      <div>
+        <h3 id="community-rating-title">Community Rating</h3>
+        <p className="community-rating-score">
+          <strong>{summary.average == null ? "Not rated" : `${Number(summary.average).toFixed(1)} / 10`}</strong>
+          <span>{summary.count} {summary.count === 1 ? "rating" : "ratings"}</span>
+        </p>
+      </div>
+      {authenticated ? (
+        <form onSubmit={submit}>
+          <label htmlFor="community-rating-value">Your rating</label>
+          <div>
+            <select id="community-rating-value" value={rating} onChange={(event) => setRating(event.target.value)} required>
+              <option value="" disabled>Select rating</option>
+              {COMMUNITY_RATING_OPTIONS.map((value) => <option key={value} value={value}>{value.toFixed(1)}</option>)}
+            </select>
+            <button type="submit" disabled={saving || !rating}>{saving ? "Saving…" : "Save rating"}</button>
+          </div>
+        </form>
+      ) : <LoggedOutRatingActions movieId={movieId} />}
+      <p className="community-rating-message" role="status" aria-live="polite">{message}</p>
+    </section>
+  );
+};
+
+const LoggedOutRatingActions = ({ movieId }) => {
+  const [open, setOpen] = useState(false);
+  const returnTo = encodeURIComponent(`/movies/${movieId}`);
+  return open ? (
+    <div className="community-rating-signin">
+      <p>Sign in to rate this movie</p>
+      <div><Link to={`/login?returnTo=${returnTo}`}>Login</Link><Link to={`/signup?returnTo=${returnTo}`}>Create account</Link></div>
+    </div>
+  ) : <button className="community-rating-prompt" type="button" onClick={() => setOpen(true)}>Rate this movie</button>;
 };
 
 export function Movie() {
@@ -847,6 +1123,7 @@ export function Movie() {
               className="title-logo"
               path={logo.url}
               alt={`${movie.title} logo`}
+              hideOnError
             />
           )}
           <p>
@@ -934,6 +1211,8 @@ export function Movie() {
           </div>
         </article>
       </div>
+      {data.release_timeline?.length > 0 && <section className="timeline" aria-labelledby="release-timeline-title"><h2 id="release-timeline-title">Release Timeline</h2><ol>{data.release_timeline.map((event, index) => <li key={`${event.date}-${event.label}-${index}`}><time>{formatDate(event.date)}</time><strong>{event.label}</strong></li>)}</ol></section>}
+      {data.international_releases?.length > 0 && <details className="international-releases"><summary>View international releases ({data.international_releases.length})</summary><ol>{data.international_releases.map((event, index) => <li key={`${event.country}-${event.date}-${event.type}-${index}`}><time>{formatDate(event.date)}</time><strong>{[event.country, event.label, event.certification].filter(Boolean).join(" · ")}</strong></li>)}</ol></details>}
       <Values title="Watch legally">
         {movie.ott.map((item, index) => (
           <article className="ott-row" key={`${item.provider}-${index}`}>
@@ -966,6 +1245,7 @@ export function Movie() {
         ))}
       </Values>
       <Values title="Ratings">
+        <CommunityRating movieId={movie.id} initial={data.community_rating} />
         {data.ratings.map((item, index) => (
           <p key={`${item.source}-${index}`}>
             <strong>{item.source}</strong>: {item.rating ?? (item.status === "pending" ? "Pending" : "Unavailable")}
@@ -1068,7 +1348,7 @@ export function Movie() {
           ))}
       </Values>
       <CommentsSection movieId={movie.id} />
-      <AdSlot slot={import.meta.env.VITE_ADSENSE_SLOT_ID} />
+      <AdSlot slot={import.meta.env.VITE_ADSENSE_SLOT_ID} eligible={data.ads?.eligible} />
     </main>
   );
 }
@@ -1124,6 +1404,7 @@ export function Person() {
         title={data.name}
         description={`${data.name} filmography and movie credits.`}
         image={imageUrl(data.profile_path, "original")}
+        noindex={!data.seo_indexable}
         jsonLd={[
           personLd,
           breadcrumbJsonLd([
@@ -1324,12 +1605,15 @@ export function Calendar() {
   const { period } = useParams();
   const [calendarParams, setCalendarParams] = useSearchParams();
   const tab = calendarParams.get("tab") === "ott" ? "ott" : "theatrical";
-  const selectedLanguage = calendarParams.get("language") || "";
+  const selectedLanguage = calendarParams.get("language") || "all";
   const requestedMonth = calendarParams.get("month") || "";
   const focusToday = calendarParams.get("focus") === "today";
   const [todayRequest, setTodayRequest] = useState(0);
+  const calendarApiParams = new URLSearchParams();
+  if (requestedMonth) calendarApiParams.set("month", requestedMonth);
+  if (selectedLanguage !== "all") calendarApiParams.set("language", selectedLanguage);
   const endpoint = `/api/v1/calendar/${requestedMonth ? "this-month" : period}${
-    requestedMonth ? `?month=${encodeURIComponent(requestedMonth)}` : ""
+    calendarApiParams.size ? `?${calendarApiParams}` : ""
   }`;
   const [data, error, retry] = useData(endpoint);
   useEffect(() => {
@@ -1344,7 +1628,7 @@ export function Calendar() {
       block: "start",
     });
     section.focus?.({ preventScroll: true });
-  }, [data?.today, focusToday, selectedLanguage, tab, todayRequest]);
+  }, [data, focusToday, selectedLanguage, tab, todayRequest]);
   if (error)
     return (
       <main className="calendar-page">
@@ -1368,9 +1652,7 @@ export function Calendar() {
     ? monthLabel(data.start_date)
     : period.replaceAll("-", " ");
   const selected = data[tab];
-  const items = selected.items.filter(
-    (movie) => !selectedLanguage || movie.language === selectedLanguage,
-  );
+  const items = selected.items;
   const groups = items.reduce((result, movie) => {
     const value = calendarDate(movie, tab);
     if (!result.has(value)) result.set(value, []);
@@ -1382,9 +1664,6 @@ export function Calendar() {
   if (todayIsInRange && !groups.has(data.today)) groups.set(data.today, []);
   const groupEntries = Array.from(groups.entries()).sort(([left], [right]) =>
     left.localeCompare(right),
-  );
-  const availableLanguages = COMMON_LANGUAGE_OPTIONS.filter(([code]) =>
-    selected.items.some((movie) => movie.language === code),
   );
   const rangeMonth = data.start_date.slice(0, 7);
   const calendarHref = (targetPeriod, changes = {}) => {
@@ -1402,7 +1681,7 @@ export function Calendar() {
       : `Movies Releasing ${periodLabel}`;
   return (
     <main className="calendar-page">
-      <Seo title={seoTitle} />
+      <Seo title={seoTitle} description={`Browse ${periodLabel} movie and OTT releases worldwide by date and language.`} />
       <header className="calendar-hero">
         <p className="eyebrow">Movie release calendar</p>
         <h1 className="capitalize">{periodLabel} releases</h1>
@@ -1467,24 +1746,19 @@ export function Calendar() {
           OTT Releases
         </Link>
         </nav>
-        <label className="calendar-language-filter">
-          <span>Language</span>
-          <select
-            value={selectedLanguage}
-            onChange={(event) => {
-              const next = new URLSearchParams(calendarParams);
-              if (event.target.value) next.set("language", event.target.value);
-              else next.delete("language");
-              setCalendarParams(next, { replace: true });
-            }}
-          >
-            <option value="">All languages</option>
-            {availableLanguages.map(([code, name]) => (
-              <option value={code} key={code}>{name}</option>
-            ))}
-          </select>
-        </label>
       </div>
+      <LanguageTabs
+        value={selectedLanguage}
+        languages={data.languages}
+        onChange={(value) => {
+          const next = new URLSearchParams(calendarParams);
+          if (value !== "all") next.set("language", value);
+          else next.delete("language");
+          setCalendarParams(next, { replace: true });
+        }}
+        label={`Filter ${tab === "ott" ? "OTT" : "theatrical"} releases by language`}
+        className="calendar-language-filter"
+      />
       <section className="calendar-content" aria-live="polite">
         {groupEntries.length ? (
           groupEntries.map(([releaseDate, movies]) => {
@@ -1507,6 +1781,7 @@ export function Calendar() {
                 id={dateId}
                 key={releaseDate}
                 tabIndex={isToday ? -1 : undefined}
+                ref={isToday && focusToday ? (node) => node?.focus({ preventScroll: true }) : undefined}
               >
                 <header className="calendar-date-heading">
                   <div>
@@ -1549,19 +1824,130 @@ export function Calendar() {
   );
 }
 
+const maintenanceTime = (value, timeZone, zoneLabel) => {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "—";
+  return `${new Intl.DateTimeFormat("en-IN", {
+    day: "numeric", month: "long", year: "numeric",
+    hour: "numeric", minute: "2-digit", timeZone,
+  }).format(parsed)} ${zoneLabel}`;
+};
+
+const maintenanceServices = ["Movies", "Movie Search", "OTT Calendar", "Images", "API"];
+
+function MaintenanceIcon({ type = "maintenance" }) {
+  const paths = {
+    Movies: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M3 9h4M3 15h4M17 5v14M17 9h4M17 15h4"/></>,
+    "Movie Search": <><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></>,
+    "OTT Calendar": <><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></>,
+    Images: <><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="9" r="1.5"/><path d="m4 17 5-5 3.5 3.5 2-2L20 19"/></>,
+    API: <><path d="M8 9 4 12l4 3M16 9l4 3-4 3M14 5l-4 14"/></>,
+    maintenance: <><path d="M14.7 6.3a4 4 0 0 0-5-5L12 3.6 9.6 6 7.3 3.7a4 4 0 0 0 5 5L5 16a2.1 2.1 0 1 0 3 3l7.2-7.2a4 4 0 0 0 5-5L18 9l-2.4-2.4 2.3-2.3a4 4 0 0 0-3.2 2Z"/></>,
+  };
+  return <svg className="maintenance-icon" viewBox="0 0 24 24" aria-hidden="true">{paths[type] || paths.maintenance}</svg>;
+}
+
+const liveMaintenanceStatus = (item, now) => {
+  if (["COMPLETED", "CANCELLED"].includes(item.status)) return item.status;
+  const start = new Date(item.start_time).getTime();
+  const end = new Date(item.end_time).getTime();
+  if (item.status === "ACTIVE" || now >= start) return "ACTIVE";
+  return "SCHEDULED";
+};
+
+const maintenanceCountdown = (target, now) => {
+  const remaining = Math.max(0, new Date(target).getTime() - now);
+  const minutes = Math.floor(remaining / 60000);
+  const days = Math.floor(minutes / 1440);
+  const hours = Math.floor((minutes % 1440) / 60);
+  const mins = minutes % 60;
+  return [days && `${String(days).padStart(2, "0")}d`, (days || hours) && `${String(hours).padStart(2, "0")}h`, `${String(mins).padStart(2, "0")}m`].filter(Boolean).join(" ");
+};
+
+const maintenanceDuration = (item) => {
+  const minutes = Math.max(0, Math.round((new Date(item.end_time) - new Date(item.start_time)) / 60000));
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60), remainder = minutes % 60;
+  return `${hours}h${remainder ? ` ${remainder}m` : ""}`;
+};
+
+function MaintenanceTimeline({ status }) {
+  const steps = status === "COMPLETED" ? ["Scheduled", "Start", "In progress", "Completed"] : ["Scheduled", "Start", "In progress", "Expected end"];
+  const activeIndex = status === "COMPLETED" ? 3 : status === "ACTIVE" ? 2 : 0;
+  return <ol className="maintenance-timeline" aria-label="Maintenance timeline">
+    {steps.map((step, index) => <li className={index < activeIndex ? "passed" : index === activeIndex ? "current" : ""} key={step}><span aria-hidden="true" />{step}</li>)}
+  </ol>;
+}
+
+function MaintenanceWindowCard({ item, compact = false, now }) {
+  const status = liveMaintenanceStatus(item, now);
+  const start = new Date(item.start_time).getTime(), end = new Date(item.end_time).getTime();
+  const progress = status === "ACTIVE" ? Math.max(0, Math.min(100, Math.round(((now - start) / (end - start)) * 100))) : 0;
+  return <article className={`maintenance-window-card status-card-${status.toLowerCase()}${compact ? " compact" : ""}`}>
+    <header><div className="maintenance-title"><span className="maintenance-icon-shell"><MaintenanceIcon /></span><h3>{item.title}</h3></div><strong className={`maintenance-status status-${status.toLowerCase()}`}>{status}</strong></header>
+    {!compact && status === "SCHEDULED" && <div className="maintenance-countdown" aria-live="polite"><span>Maintenance begins in</span><strong>{maintenanceCountdown(item.start_time, now)}</strong></div>}
+    {!compact && status === "ACTIVE" && <div className="maintenance-progress"><div><span>Estimated maintenance progress</span><strong>{progress}%</strong></div><div className="maintenance-progress-track" role="progressbar" aria-label="Estimated maintenance progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow={progress}><span style={{ transform: `scaleX(${progress / 100})` }} /></div></div>}
+    <dl className="maintenance-facts">
+      <div><dt>Starts</dt><dd>{maintenanceTime(item.start_time, "Asia/Kolkata", "IST")}<small>{maintenanceTime(item.start_time, "Asia/Singapore", "SGT")}</small></dd></div>
+      <div><dt>Ends</dt><dd>{maintenanceTime(item.end_time, "Asia/Kolkata", "IST")}<small>{maintenanceTime(item.end_time, "Asia/Singapore", "SGT")}</small></dd></div>
+      {compact && <><div><dt>Duration</dt><dd>{maintenanceDuration(item)}</dd></div><div><dt>Impact</dt><dd>{item.impact_level}</dd></div></>}
+      {!compact && <div><dt>Expected impact</dt><dd><strong>{item.impact_level}</strong> · {item.impact_message}</dd></div>}
+    </dl>
+    {item.affected_services?.length > 0 && <div className="maintenance-service-chips" aria-label="Affected services">{item.affected_services.map((service) => <span key={service}><MaintenanceIcon type={service} />{service}</span>)}</div>}
+    {!compact && !item.affected_services?.length && <p className="maintenance-unaffected">No service interruption expected</p>}
+    {!compact && <p>{item.description}</p>}
+    {status !== "CANCELLED" && <MaintenanceTimeline status={status} />}
+    {status === "ACTIVE" && now >= end && <p>Expected end time has passed. Awaiting administrator confirmation of completion.</p>}
+    <small>Last updated {maintenanceTime(item.updated_at, "Asia/Kolkata", "IST")}</small>
+  </article>;
+}
+
+function MaintenancePanel() {
+  const [data, error, reload] = useData("/api/v1/maintenance");
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  if (error) return <div className="request-error" role="alert"><p>{error}</p><button type="button" onClick={reload}>Retry</button></div>;
+  if (!data) return <p className="maintenance-loading" role="status">Loading maintenance status…</p>;
+  const scheduled = [...(data.active || []), ...(data.upcoming || [])];
+  const active = scheduled.filter((item) => liveMaintenanceStatus(item, now) === "ACTIVE");
+  const upcoming = scheduled.filter((item) => liveMaintenanceStatus(item, now) === "SCHEDULED");
+  const history = data.history || [];
+  const affected = new Set(active.flatMap((item) => item.affected_services || []));
+  const visibleServices = [...new Set([...maintenanceServices, ...affected])];
+  return <section className="maintenance-panel" role="tabpanel" id="maintenance-panel" aria-labelledby="maintenance-tab">
+    <div className={`maintenance-overall ${active.length ? "active" : upcoming.length ? "scheduled" : "operational"}`} role="status">
+      <div className="maintenance-hero-copy"><span className="maintenance-hero-icon"><MaintenanceIcon /></span><div><h2><span className="maintenance-status-dot" aria-hidden="true" />{active.length ? "Maintenance in progress" : upcoming.length ? "Scheduled maintenance" : "All systems operational"}</h2>
+      <p>{active.length ? "Some services may be temporarily interrupted." : upcoming.length ? "An upcoming maintenance window has been scheduled." : "There is no scheduled maintenance at this time."}</p></div></div>
+      <div className="maintenance-signal" aria-hidden="true"><span/><span/><span/><span/><span/></div>
+    </div>
+    <section className="maintenance-service-board" aria-labelledby="service-status-heading"><div><span className="maintenance-eyebrow">Live status</span><h2 id="service-status-heading">Service status</h2></div><div className="maintenance-service-grid">{visibleServices.map((service) => { const isAffected = affected.has(service); return <article className={isAffected ? "affected" : "operational"} key={service}><MaintenanceIcon type={service}/><span>{service}</span><strong><i aria-hidden="true" />{isAffected ? "Affected" : "Operational"}</strong></article>; })}</div></section>
+    {active.length > 0 && <section aria-labelledby="active-maintenance-heading"><span className="maintenance-eyebrow">Current incident</span><h2 id="active-maintenance-heading">Active maintenance</h2>{active.map((item) => <MaintenanceWindowCard key={item.id} item={item} now={now} />)}</section>}
+    {upcoming.length > 0 && <section aria-labelledby="upcoming-maintenance-heading"><span className="maintenance-eyebrow">Plan ahead</span><h2 id="upcoming-maintenance-heading">Upcoming maintenance</h2>{upcoming.map((item) => <MaintenanceWindowCard key={item.id} item={item} now={now} />)}</section>}
+    <section aria-labelledby="maintenance-history-heading"><span className="maintenance-eyebrow">Recent activity</span><h2 id="maintenance-history-heading">Maintenance history</h2>{history.length ? <div className="maintenance-history">{history.map((item) => <MaintenanceWindowCard key={item.id} item={item} compact now={now} />)}</div> : <p className="empty">No recent maintenance history.</p>}</section>
+  </section>;
+}
+
 export function Request() {
   const [params, setParams] = useSearchParams();
   const [languages] = useData("/api/v1/languages");
-  const [tab, setTab] = useState(params.get("tab") === "issue" || params.get("tab") === "contact" ? "issue" : params.get("tab") === "access" ? "access" : "movie");
+  const [tab, setTab] = useState(params.get("tab") === "issue" || params.get("tab") === "contact" ? "issue" : params.get("tab") === "access" ? "access" : params.get("tab") === "maintenance" ? "maintenance" : "movie");
   const [contactType, setContactType] = useState(params.get("type") || "WEBSITE_ISSUE");
   const [movieId, setMovieId] = useState(params.get("movie_external_id") || "");
+  const [requestLanguage, setRequestLanguage] = useState(params.get("language") || "");
   const [result, setResult] = useState();
   const [submitting, setSubmitting] = useState(false);
+  const [screenshot, setScreenshot] = useState();
+  const [screenshotError, setScreenshotError] = useState("");
   const submit = (event) => {
     event.preventDefault();
     setSubmitting(true);
     setResult(undefined);
     const body = Object.fromEntries(new FormData(event.target));
+    delete body.screenshot;
     Object.keys(body).forEach((key) => body[key] === "" && delete body[key]);
     if (body.release_year) body.release_year = Number(body.release_year);
     if (body.movie_external_id) body.movie_external_id = Number(body.movie_external_id);
@@ -1576,8 +1962,13 @@ export function Request() {
         .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
         .finally(() => setSubmitting(false));
     } else {
-      post("/api/v1/contact-requests", body)
-        .then(setResult)
+      const requestBody = screenshot ? new FormData() : body;
+      if (screenshot) {
+        Object.entries(body).forEach(([key, value]) => requestBody.append(key, String(value)));
+        requestBody.append("screenshot", screenshot, screenshot.name);
+      }
+      post("/api/v1/contact-requests", requestBody)
+        .then((value) => { setResult(value); setScreenshot(undefined); setScreenshotError(""); })
         .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
         .finally(() => setSubmitting(false));
     }
@@ -1591,10 +1982,12 @@ export function Request() {
     setParams(next);
     setTab(nextTab);
     setResult(undefined);
+    setScreenshot(undefined);
+    setScreenshotError("");
   };
   return (
     <main className="request-page">
-      <Seo title="Request a movie" />
+      <Seo title="Request a movie" description="Request a missing movie or report incorrect movie and OTT availability information to OTT Tracker." />
       <h1>Request a movie</h1>
       <p>Ask us to review any movie, including one that is already listed here, or report an issue and request access. Your contact details are used only to process this request and are never shown publicly.{tab === "movie" && <> Can't find the movie? You can also search for movie and OTT information using <Link className="request-deep-search-link" to="/deep-search">Deep Search</Link>.</>}</p>
       {tab === "movie" && <Link className="request-deep-search-action" to="/deep-search">Try Deep Search</Link>}
@@ -1602,18 +1995,22 @@ export function Request() {
         <button type="button" role="tab" aria-selected={tab === "movie"} className={tab === "movie" ? "active" : ""} onClick={() => changeTab("movie")}>Request movie</button>
         <button type="button" role="tab" aria-selected={tab === "issue"} className={tab === "issue" ? "active" : ""} onClick={() => changeTab("issue")}>Report issue</button>
         <button type="button" role="tab" aria-selected={tab === "access"} className={tab === "access" ? "active" : ""} onClick={() => changeTab("access")}>Request access</button>
+        <button id="maintenance-tab" type="button" role="tab" aria-controls="maintenance-panel" aria-selected={tab === "maintenance"} className={tab === "maintenance" ? "active" : ""} onClick={() => changeTab("maintenance")}>Maintenance Window</button>
       </div>
+      {tab === "maintenance" && <MaintenancePanel />}
       {!received && tab === "movie" && <form className="request" onSubmit={submit}>
+        <div className="hp-field" aria-hidden="true"><label>Website<input name="website" type="text" tabIndex={-1} autoComplete="off" /></label></div>
         <label>Movie Name *<input name="movie_name" required maxLength="500" defaultValue={params.get("movie_name") || ""} /></label>
         <label>Email *<input name="email" type="email" required maxLength="320" autoComplete="email" /></label>
         <label>ID (optional)<input name="movie_external_id" type="number" min="1" max="2147483647" step="1" inputMode="numeric" value={movieId} onChange={(event) => setMovieId(event.target.value)} /></label>
         <label>Year<input name="release_year" type="number" min="1888" max="2100" defaultValue={params.get("release_year") || ""} /></label>
-        <label>Language<select name="language" defaultValue={params.get("language") || ""}><option value="">Not specified</option>{(languages || COMMON_LANGUAGE_OPTIONS.map(([code, name]) => ({ code, name }))).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
+        <label>Language<select name="language" value={requestLanguage} onChange={(event) => setRequestLanguage(event.target.value)}><option value="">Not specified</option>{(languages || []).map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}</select></label>
         <label>WhatsApp / Phone<input name="whatsapp_phone" type="tel" maxLength="50" autoComplete="tel" /></label>
         <label>Comments<textarea name="details" maxLength="2000" placeholder="Any details that help identify it" /></label>
         <button disabled={submitting}>{submitting ? "Verifying movie…" : "Submit request"}</button>
       </form>}
       {!received && tab === "issue" && <form className="request request-card" onSubmit={submit}>
+        <div className="hp-field" aria-hidden="true"><label>Website<input name="website" type="text" tabIndex={-1} autoComplete="off" /></label></div>
         <div className="request-intro"><h2>Report an issue</h2><p>Report a website issue, incorrect movie information or incorrect OTT information. Submissions go to private administrator review and are never applied automatically.</p></div>
         <label>Request type *<select name="request_type" required value={contactType} onChange={(event) => setContactType(event.target.value)}>
           <option value="WEBSITE_ISSUE">Report website issue</option><option value="INCORRECT_MOVIE">Report incorrect movie information</option><option value="INCORRECT_OTT">Report incorrect OTT information</option><option value="OTHER">Other</option>
@@ -1626,11 +2023,13 @@ export function Request() {
           {movieFields && <><label>Movie Name<input name="movie_name" maxLength="500" defaultValue={params.get("movie_name") || ""} /></label><label>ID<input name="tmdb_id" type="number" min="1" inputMode="numeric" defaultValue={params.get("tmdb_id") || ""} /></label><label className="wide">Movie URL<input name="movie_url" type="url" pattern="https?://.*" defaultValue={params.get("movie_url") || ""} /></label><label className="wide">Issue Type<input name="issue_type" maxLength="100" /></label></>}
           {contactType === "INCORRECT_OTT" && <><label>Expected OTT Platform<input name="expected_ott_platform" maxLength="100" /></label><label>Expected OTT Release Date<input name="expected_ott_release_date" type="date" /></label><label className="wide">Evidence URL<input name="evidence_url" type="url" pattern="https?://.*" /></label></>}
           <label className="wide">Comment / Description *<textarea name="comment" required minLength="5" maxLength="5000" /></label>
+          <ScreenshotUpload file={screenshot} error={screenshotError} onFile={setScreenshot} onError={setScreenshotError} />
         </div>
         <p className="form-help">Provide at least one contact method: WhatsApp, phone, or email.</p>
-        <button disabled={submitting}>{submitting ? "Sending securely…" : "Send to administrator"}</button>
+        <button disabled={submitting || Boolean(screenshotError)}>{submitting ? "Sending securely…" : "Send to administrator"}</button>
       </form>}
       {!received && tab === "access" && <form className="request request-card" onSubmit={submit}>
+        <div className="hp-field" aria-hidden="true"><label>Website<input name="website" type="text" tabIndex={-1} autoComplete="off" /></label></div>
         <div className="request-intro"><h2>Request access</h2><p>Request elevated website access. Access is reviewed by an administrator and is never granted automatically.</p></div>
         <input type="hidden" name="request_type" value="ACCESS_REQUEST" />
         <div className="request-field-grid">
@@ -1666,14 +2065,228 @@ export function Request() {
   );
 }
 
+const SCREENSHOT_TYPES = ["image/png", "image/jpeg", "image/webp"];
+const MAX_SCREENSHOT_SIZE = 5 * 1024 * 1024;
+
+function ScreenshotUpload({ file, error, onFile, onError }) {
+  const inputRef = useRef();
+  const [dragging, setDragging] = useState(false);
+  const [preview, setPreview] = useState("");
+
+  useEffect(() => {
+    if (!file || typeof URL.createObjectURL !== "function") {
+      setPreview("");
+      return undefined;
+    }
+    const nextPreview = URL.createObjectURL(file);
+    setPreview(nextPreview);
+    return () => URL.revokeObjectURL(nextPreview);
+  }, [file]);
+
+  const select = (nextFile) => {
+    if (!nextFile) return;
+    if (!SCREENSHOT_TYPES.includes(nextFile.type)) {
+      onFile(undefined);
+      onError("Please upload a PNG, JPG, or WEBP image.");
+      return;
+    }
+    if (nextFile.size > MAX_SCREENSHOT_SIZE) {
+      onFile(undefined);
+      onError("Screenshot must be 5 MB or smaller.");
+      return;
+    }
+    onError("");
+    onFile(nextFile);
+  };
+  const remove = () => {
+    onFile(undefined);
+    onError("");
+    if (inputRef.current) inputRef.current.value = "";
+  };
+  return (
+    <div className="screenshot-field wide">
+      <div className="screenshot-label"><strong>Attach screenshot</strong> <span>(optional)</span></div>
+      {!file ? (
+        <label
+          className={`screenshot-dropzone${dragging ? " dragging" : ""}`}
+          onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
+          onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+          onDragLeave={(event) => { event.preventDefault(); setDragging(false); }}
+          onDrop={(event) => { event.preventDefault(); setDragging(false); select(event.dataTransfer.files?.[0]); }}
+        >
+          <input ref={inputRef} type="file" name="screenshot" accept="image/png,image/jpeg,image/webp" aria-describedby="screenshot-help screenshot-error" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(event) => select(event.target.files?.[0])} />
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" /></svg>
+          <span>Drag &amp; drop screenshot here</span>
+          <span className="screenshot-or">or</span>
+          <strong className="screenshot-choose">Choose image</strong>
+          <small id="screenshot-help">PNG, JPG or WEBP · Max 5 MB</small>
+        </label>
+      ) : (
+        <div className="screenshot-preview">
+          {preview ? <img src={preview} alt="Selected screenshot preview" /> : <div className="screenshot-preview-placeholder" aria-hidden="true" />}
+          <div><strong>{file.name}</strong><small>{(file.size / (file.size < 1024 * 1024 ? 1024 : 1024 * 1024)).toFixed(file.size < 1024 * 1024 ? 0 : 1)} {file.size < 1024 * 1024 ? "KB" : "MB"}</small></div>
+          <div className="screenshot-actions"><label><input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" aria-label="Replace screenshot" onClick={(event) => { event.currentTarget.value = ""; }} onChange={(event) => select(event.target.files?.[0])} /><span>Replace</span></label><button type="button" onClick={remove}>Remove</button></div>
+        </div>
+      )}
+      <p id="screenshot-error" className="screenshot-error" role={error ? "alert" : undefined}>{error}</p>
+    </div>
+  );
+}
+
 export function Support() {
   return <Request />;
 }
 
-export function Legal({ title, children }) {
+export function ContactPage() {
+  const contact = import.meta.env.VITE_SITE_CONTACT_EMAIL || "otttrackerin@gmail.com";
+  const [result, setResult] = useState();
+  const [submitting, setSubmitting] = useState(false);
+  const [requestType, setRequestType] = useState("OTHER");
+  const submit = (event) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setResult(undefined);
+    const form = event.currentTarget;
+    const body = Object.fromEntries(new FormData(form));
+    Object.keys(body).forEach((key) => body[key] === "" && delete body[key]);
+    post("/api/v1/contact-requests", body)
+      .then((value) => {
+        setResult(value);
+        form.reset();
+        setRequestType("OTHER");
+      })
+      .catch((error) => setResult({ error: error.message, ...(error.data || {}) }))
+      .finally(() => setSubmitting(false));
+  };
+  const received = Boolean(result?.request_id);
+  return (
+    <main className="legal contact-page">
+      <Seo title="Contact Us" description="Contact OTT Tracker about movie data, OTT availability, corrections, copyright enquiries or website feedback." />
+      <h1>Contact Us</h1>
+      <section className="contact-email-block">
+        <h2>Email us directly</h2>
+        <p className="contact-email">
+          <a href={`mailto:${contact}`}>{contact}</a>
+        </p>
+        <p>
+          Use this address for general enquiries, movie correction requests,
+          OTT information corrections, content/data issues, copyright/contact
+          enquiries, and website feedback. We aim to reply within 48 hours.
+        </p>
+      </section>
+      <section className="contact-request-form">
+        <h2>Send a message</h2>
+        <p>
+          Prefer a form? Submit your enquiry below. It is reviewed privately
+          by an administrator. For movie requests, use the{" "}
+          <Link to="/request-movie">Request a movie</Link> form instead.
+        </p>
+        {received ? (
+          <section className="request-success" role="status">
+            <div>
+              <h3>Message received</h3>
+              <p>
+                {result.receipt_email_status === "SENT"
+                  ? "A confirmation email is on its way to you."
+                  : result.receipt_email_status === "NOT_SUPPLIED"
+                    ? "Thank you — no confirmation email was sent because none was supplied."
+                    : "Your message was received. We will reply as soon as possible."}
+              </p>
+              <small>Request reference: {result.request_id}</small>
+              <button className="link-button" type="button" onClick={() => setResult(undefined)}>
+                Send another message
+              </button>
+            </div>
+          </section>
+        ) : (
+          <form className="request request-card" onSubmit={submit}>
+            <div className="hp-field" aria-hidden="true"><label>Website<input name="website" type="text" tabIndex={-1} autoComplete="off" /></label></div>
+            <label>Subject / request type *<select name="request_type" required value={requestType} onChange={(event) => setRequestType(event.target.value)}>
+              <option value="WEBSITE_ISSUE">Website issue / feedback</option>
+              <option value="INCORRECT_MOVIE">Incorrect movie information</option>
+              <option value="INCORRECT_OTT">Incorrect OTT information</option>
+              <option value="ACCESS_REQUEST">Request access</option>
+              <option value="OTHER">Other enquiry</option>
+            </select></label>
+            <label>Name<input name="name" maxLength="200" autoComplete="name" /></label>
+            <label>Email *<input name="email" type="email" required maxLength="320" autoComplete="email" /><small>So we can reply to you.</small></label>
+            <label>Subject<input name="issue_type" maxLength="100" placeholder="A short subject line" /></label>
+            {requestType === "INCORRECT_OTT" && <><label>Movie / Title<input name="movie_name" maxLength="500" /></label><label>Expected OTT platform<input name="expected_ott_platform" maxLength="100" placeholder="e.g. Netflix, Prime Video" /></label><label>Evidence URL<input name="evidence_url" type="url" pattern="https?://.*" /></label></>}
+            {requestType === "INCORRECT_MOVIE" && <><label>Movie / Title<input name="movie_name" maxLength="500" /></label><label>Movie URL<input name="movie_url" type="url" pattern="https?://.*" /></label></>}
+            <label className="wide">Message *<textarea name="comment" required minLength="5" maxLength="5000" rows="6" /></label>
+            <button disabled={submitting}>{submitting ? "Sending…" : "Send message"}</button>
+          </form>
+        )}
+        {result?.error && !result?.candidates?.length && (
+          <div className="request-error" role="alert"><p>{result.error}</p></div>
+        )}
+      </section>
+      <p>Do not send passwords, payment details or other sensitive information.</p>
+    </main>
+  );
+}
+
+const TRUST_CONTENT = {
+  methodology: { title: "How OTTTracker verifies releases", description: "OTTTracker's methodology for movie metadata, theatrical dates, OTT platforms, streaming dates and data freshness.", sections: [
+    ["What we track", "OTTTracker tracks movie metadata, theatrical releases, streaming platforms, OTT release dates and regional availability. It does not host movies."],
+    ["Movie metadata", "Titles, artwork, cast, crew, trailers and production details may originate with configured metadata providers. These descriptive fields do not by themselves confirm streaming availability."],
+    ["Theatrical and OTT releases", "Theatrical dates and digital or OTT dates are stored separately. Regional releases can differ, so the region shown with a streaming record matters."],
+    ["Verification process", "Platform identification, date evidence and current availability are evaluated independently. We compare configured sources, retain supporting timestamps and recheck records as information changes."],
+    ["Verification states", "Confirmed means reliable supporting evidence is available. Platform confirmed — date unknown means the service is identified but the release date is not sufficiently reliable. Verification in progress means information has not met confirmation requirements. No verified information means there is not enough evidence to publish a platform or date as confirmed."],
+    ["Conflicting information", "When credible sources disagree, OTTTracker preserves uncertainty rather than selecting an unsupported date. A record can remain under review until evidence is reconciled."],
+    ["Freshness and update frequency", "Where timestamps are available, pages show when OTT data was last checked or verified. Important and upcoming releases may be checked more often, but no fixed interval is guaranteed."],
+    ["Corrections, limitations and regions", "Streaming catalogues change, provider links can expire and coverage varies by country. Readers can report errors through the corrections form; reports are reviewed against current evidence."],
+  ]},
+  "editorial-policy": { title: "Editorial Policy", description: "How OTTTracker handles accuracy, sources, updates, automation, corrections and editorial review.", sections: [
+    ["Accuracy and source checking", "We distinguish sourced facts from rumours and do not treat third-party metadata as automatic confirmation of an OTT date."],
+    ["Editorial review", "Only updates marked published after the review gate are public. Drafts and ready-for-review material are not exposed on public article routes."],
+    ["Automation and AI assistance", "Automation may help collect structured data or prepare drafts. Publication requires an explicit editorial review state; generated material is not automatically published."],
+    ["Updates and corrections", "Articles show publication and update dates. Material factual changes should be corrected promptly and, where useful, explained in the updated copy."],
+    ["Independence", "Editorial judgements should not be altered by platform relationships. Sponsored content, if introduced, will be clearly labelled and kept distinct from verification decisions."],
+  ]},
+  sources: { title: "Sources and attribution", description: "The source categories OTTTracker uses and how evidence becomes verified streaming information.", sections: [
+    ["Primary source categories", "Sources may include official streaming platforms, studios, distributors and official announcements."],
+    ["Metadata and media", "TMDB, IMDb and YouTube may provide metadata, ratings, artwork or trailers. Watch-provider data supplied through TMDB may be sourced from JustWatch. Required attribution remains in place."],
+    ["Research providers", "Configured licensed or research services may help locate evidence. Private provider credentials and confidential integrations are never published."],
+    ["Verification is separate", "A third-party metadata field does not automatically mean OTTTracker considers an OTT platform or date confirmed. OTTTracker applies its own verification state and freshness checks."],
+  ]},
+  corrections: { title: "Corrections", description: "Report incorrect movie, OTT platform, release-date, poster or streaming-link information to OTTTracker.", sections: [
+    ["How to report an error", "Choose a category, identify the movie and explain what appears wrong. A source link or the correct platform and date is useful, but never submit passwords or sensitive information."],
+    ["What happens next", "Reports enter a private review queue. OTTTracker checks the current record and available evidence, then may correct, resolve or dismiss the report. Information can change after a report is submitted."],
+  ]},
+};
+
+export function TrustPage({ kind }) {
+  const content = TRUST_CONTENT[kind];
+  const [params] = useSearchParams();
+  const movieId = params.get("movie");
+  const [state, setState] = useState({ category: "WRONG_OTT_PLATFORM", message: "", email: "" });
+  const [notice, setNotice] = useState("");
+  const submitCorrection = async (event) => {
+    event.preventDefault(); setNotice("Sending…");
+    try { await post(`/api/v1/movies/${movieId}/corrections`, state); setNotice("Thank you. Your correction report has been received."); setState({...state, message: ""}); }
+    catch (error) { setNotice(error.message); }
+  };
+  return <main className="prose-page"><Seo title={content.title} description={content.description}/><h1>{content.title}</h1>{content.sections.map(([heading, copy]) => <section key={heading}><h2>{heading}</h2><p>{copy}</p></section>)}{kind === "corrections" && (movieId ? <form className="correction-form" onSubmit={submitCorrection}><h2>Report incorrect movie information</h2><label htmlFor="correction-category">What is wrong?</label><select id="correction-category" value={state.category} onChange={e => setState({...state, category: e.target.value})}><option value="WRONG_OTT_PLATFORM">Wrong OTT platform</option><option value="WRONG_OTT_DATE">Wrong OTT release date</option><option value="BROKEN_STREAMING_LINK">Broken streaming link</option><option value="INCORRECT_POSTER">Incorrect poster</option><option value="INCORRECT_METADATA">Incorrect metadata</option><option value="OTHER">Other</option></select><label htmlFor="correction-message">Details</label><textarea id="correction-message" required minLength="10" value={state.message} onChange={e => setState({...state, message: e.target.value})}/><label htmlFor="correction-email">Email (optional, never shown publicly)</label><input id="correction-email" type="email" autoComplete="email" value={state.email} onChange={e => setState({...state, email: e.target.value})}/><button type="submit">Submit correction</button><p role="status" aria-live="polite">{notice}</p></form> : <p><Link to="/discover">Find the movie</Link>, then use its “Report incorrect information” link to open a movie-specific form.</p>)}</main>;
+}
+
+export function Updates() {
+  const [data, error] = useData("/api/v1/updates");
+  if (error) return <Failure error={error}/>; if (!data) return <Loading/>;
+  return <main className="prose-page"><Seo title="OTT Updates" description="Reviewed OTTTracker updates about streaming releases, verified OTT dates, platforms and methodology."/><h1>OTT Updates</h1><p>Reviewed release roundups, recent confirmations and explanations based on OTTTracker’s current records. Drafts are never shown here.</p>{data.items.length ? <div className="update-grid">{data.items.map(item => <article key={item.slug}><p className="eyebrow">{item.content_type.replaceAll("_", " ")}</p><h2><Link to={`/updates/${item.slug}`}>{item.title}</Link></h2><p>{item.summary}</p><small>Published {formatDate(item.published_at)} · {item.author_name}</small></article>)}</div> : <p>No reviewed updates have been published yet.</p>}</main>;
+}
+
+export function UpdateArticle() {
+  const { slug } = useParams(); const [data, error] = useData(`/api/v1/updates/${slug}`);
+  if (error) return <Failure error={error}/>; if (!data) return <Loading/>;
+  const schema = {"@context":"https://schema.org","@type":"Article",headline:data.title,description:data.summary,datePublished:data.published_at,dateModified:data.updated_at,author:{"@type":"Organization",name:data.author_name},publisher:{"@type":"Organization",name:"OTTTracker"},mainEntityOfPage:`${location.origin}/updates/${data.slug}`};
+  return <main className="prose-page article-page"><Seo title={data.seo_title || data.title} description={data.seo_description || data.summary} image={data.hero_image} type="article" jsonLd={schema} noindex={!data.is_indexable}/><article><p className="eyebrow">OTT Updates</p><h1>{data.title}</h1><p className="article-summary">{data.summary}</p><p className="byline">By {data.author_name} · Published {formatDate(data.published_at)}{data.updated_at !== data.published_at ? ` · Updated ${formatDate(data.updated_at)}` : ""}</p>{data.body.split(/\n\n+/).map((paragraph, index) => <p key={index}>{paragraph}</p>)}<p className="trust-links"><Link to="/methodology">Methodology</Link><Link to="/sources">Sources</Link><Link to="/corrections">Corrections</Link></p></article></main>;
+}
+
+export function Legal({ title, description, children }) {
   return (
     <main className="legal">
-      <Seo title={title} />
+      <Seo title={title} description={description || `${title} for the OTT Tracker movie and streaming discovery service.`} />
       <h1>{title}</h1>
       {children}
     </main>
